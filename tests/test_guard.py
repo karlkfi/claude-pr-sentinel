@@ -17,6 +17,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "pr-sentinel-guard.py"
+WATCHER = str((REPO / "scripts" / "pr-sentinel-watch.sh").resolve())
 
 _spec = util.spec_from_file_location("pr_sentinel_guard", SCRIPT)
 guard = util.module_from_spec(_spec)
@@ -93,6 +94,52 @@ class ClassifyPollUnit(unittest.TestCase):
         self.assertIsNone(guard.classify_poll("echo 'while you sleep'"))
         self.assertIsNone(guard.classify_poll("git status"))
         self.assertIsNone(guard.classify_poll(""))
+
+
+class WatcherLaunchUnit(unittest.TestCase):
+    """The airtight, fail-safe watcher-launch matcher behind the auto-allow."""
+
+    def setUp(self):
+        self._saved = os.environ.get("CLAUDE_PLUGIN_ROOT")
+        os.environ["CLAUDE_PLUGIN_ROOT"] = str(REPO)
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("CLAUDE_PLUGIN_ROOT", None)
+        else:
+            os.environ["CLAUDE_PLUGIN_ROOT"] = self._saved
+
+    def test_exact_launch_matches(self):
+        self.assertTrue(guard.is_watcher_launch(f"bash {WATCHER} 42"))
+        # quoted path (the form the PostToolUse nudge emits) still matches
+        self.assertTrue(guard.is_watcher_launch(f'bash "{WATCHER}" 6'))
+        # a relative path that resolves to the same file matches (realpath, not
+        # string, comparison)
+        self.assertTrue(guard.is_watcher_launch(
+            "bash scripts/../scripts/pr-sentinel-watch.sh 6"))
+
+    def test_near_misses_never_match(self):
+        cases = [
+            f"bash {WATCHER} 6 --force",          # extra trailing arg
+            f"bash {WATCHER}",                     # missing PR number
+            f"bash {WATCHER} abc",                 # non-digit PR
+            f"bash {WATCHER} 0",                   # zero is not a valid PR
+            f"bash {WATCHER} -6",                  # negative / flag-shaped
+            f"bash {WATCHER} 6; rm -rf /",         # chained command
+            f"bash {WATCHER} 6 && echo hi",        # chained command
+            f"bash {WATCHER} 6 | tee log",         # pipe
+            f"bash {WATCHER} 6 > /tmp/x",          # redirect
+            f"bash {WATCHER} $(echo 6)",           # command substitution
+            f"bash {WATCHER} `echo 6`",            # backtick substitution
+            f"bash {WATCHER} 6 &",                 # background operator
+            f"sh {WATCHER} 6",                     # not bash
+            f"bash {REPO}/scripts/pr-sentinel-hook.py 6",   # different script
+            f"bash {WATCHER}-evil 6",              # look-alike path
+            "bash /opt/other/pr-sentinel-watch.sh 6",       # unrelated path
+            f"bash {WATCHER}* 6",                  # glob
+        ]
+        for cmd in cases:
+            self.assertFalse(guard.is_watcher_launch(cmd), cmd)
 
 
 class GuardEndToEnd(unittest.TestCase):
@@ -175,6 +222,67 @@ class GuardEndToEnd(unittest.TestCase):
         )
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("Traceback", proc.stderr)
+
+
+class AutoAllowEndToEnd(unittest.TestCase):
+    """The PreToolUse auto-allow for the plugin's own watcher launch."""
+
+    def _run(self, command, env=None):
+        run_env = {"CLAUDE_PLUGIN_ROOT": str(REPO)}
+        if env:
+            run_env.update(env)
+        return run_guard(bash_payload(command), env=run_env)
+
+    def _assert_allow(self, out):
+        hso = json.loads(out)["hookSpecificOutput"]
+        self.assertEqual(hso["hookEventName"], "PreToolUse")
+        self.assertEqual(hso["permissionDecision"], "allow")
+        self.assertIn("PR_SENTINEL_AUTOALLOW", hso["permissionDecisionReason"])
+
+    def _assert_not_allow(self, out):
+        """Either silence (defer) or a non-allow decision — never allow."""
+        if out.strip():
+            self.assertNotEqual(
+                json.loads(out)["hookSpecificOutput"]["permissionDecision"],
+                "allow")
+
+    def test_exact_launch_is_allowed(self):
+        out, _, rc = self._run(f'bash "{WATCHER}" 42')
+        self._assert_allow(out)
+        self.assertEqual(rc, 0)
+
+    def test_autoallow_off_defers(self):
+        for val in ("0", "false", "FALSE", ""):
+            out, _, _ = self._run(f"bash {WATCHER} 42",
+                                  env={"PR_SENTINEL_AUTOALLOW": val})
+            self.assertEqual(out.strip(), "", val)
+
+    def test_disable_suppresses_autoallow(self):
+        out, _, _ = self._run(f"bash {WATCHER} 42",
+                              env={"PR_SENTINEL_DISABLE": "1"})
+        self.assertEqual(out.strip(), "")
+
+    def test_near_misses_are_not_allowed(self):
+        # extra arg, non-digit PR, chained rm, redirect, look-alike script,
+        # sh not bash, command substitution — none may auto-allow.
+        for cmd in (
+            f"bash {WATCHER} 6 --force",
+            f"bash {WATCHER} notanumber",
+            f"bash {WATCHER} 6; rm -rf /",
+            f"bash {WATCHER} 6 > /tmp/x",
+            f"bash {REPO}/scripts/pr-sentinel-hook.py 6",
+            f"sh {WATCHER} 6",
+            f"bash {WATCHER} $(echo 6)",
+        ):
+            out, _, _ = self._run(cmd)
+            self._assert_not_allow(out)
+
+    def test_override_does_not_block_autoallow(self):
+        # The override escape hatch targets the deny; the watcher launch is
+        # still auto-allowed (checked before override defers).
+        out, _, _ = self._run(f"bash {WATCHER} 42",
+                              env={"PR_SENTINEL_OVERRIDE": "x"})
+        self._assert_allow(out)
 
 
 if __name__ == "__main__":
