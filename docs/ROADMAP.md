@@ -5,27 +5,23 @@ designed and scoped but deliberately **not yet implemented**, so the initial
 plugin stays small and reviewable. Each is tracked as a Queue row in
 [`STATUS.md`](STATUS.md); this doc holds the design intent.
 
-## R1 — Stop-hook backstop (fast-follow)
+## R1 — Stop-hook backstop ✅ shipped
 
-**Problem.** The PostToolUse nudge is advisory — a hook cannot force the model
-to launch the watcher. A session can end its turn with an open PR and pending
-CI and never start a watcher.
+Implemented as `scripts/pr-sentinel-stop-hook.py` (registered under `Stop` in
+`hooks/hooks.json`). A `Stop` hook that blocks the stop **once** — respecting
+`stop_hook_active` so it never loops — when the session ends a turn with an open
+PR it opened, no live watcher, and no local evidence the PR was handed off. This
+is what turns "advisory" into "reliable."
 
-**Design.** A `Stop` hook that fires when the session ends a turn. It blocks the
-stop **once** — returning an instruction to launch the watcher — when *all* of:
-
-- the session created an open PR this session (detected from prior
-  `gh pr create` / `git push` activity in the transcript, or a lightweight
-  marker the nudge could drop), and
-- required checks are still pending, and
-- no live watcher background task is running for that PR.
-
-It must respect `stop_hook_active` to avoid an infinite stop loop: block at most
-once, then let the stop proceed. This is what turns "advisory" into "reliable."
-
-**Why not in the MVP.** It needs a way to know whether a watcher is already
-running (task enumeration) and to identify the session's own open PR without a
-network call or comment ingestion — a design worth landing on its own.
+The two open problems were solved locally: the session's own PR is identified
+from the transcript (the harness's `pr-link` record and the session's own
+`gh pr create` output URL), and a live watcher is detected by enumerating local
+processes (`ps`) for a running `pr-sentinel-watch.sh <PR>` — no network call and
+no PR body/comment ingestion. Check status can't be checked without a network
+call, so "checks pending" is approximated as "opened, not handed off, unwatched";
+the block is safe because it fires at most once and only asks the session to
+launch the watcher, which then authoritatively determines check state. See
+[`DESIGN.md`](DESIGN.md#why-the-nudge-is-advisory) for the mechanism.
 
 ## R2 — PreToolUse foreground-poll deny ✅ shipped
 
