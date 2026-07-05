@@ -36,9 +36,16 @@ response.
 ## Workflow
 
 1. **At session start, check whether the branch is stale.** `git fetch origin
-   main` and, if `origin/main` has advanced, merge it in before other work
-   (`git merge origin/main` — this repo's own dogfood: merge, not rebase).
-   **Work on a `claude/`-prefixed branch, never on `main`.**
+   main && git log --oneline HEAD..origin/main | head` — any output means
+   `origin/main` has advanced; **rebase onto it** before other work
+   (`git rebase origin/main`, then `git push --force-with-lease` once the branch
+   is pushed). Rebase, **not** merge: PRs land via GitHub's "Merge pull request",
+   so a linear branch keeps `main` free of sync-merge noise. (This is a *dev*
+   workflow rule and is the opposite of the *product* rule — the watcher tells a
+   session to heal a **conflicting** PR by merging the base branch IN, never
+   rebase, to keep that push a fast-forward. Different context, different call.)
+   **Work on a `claude/`-prefixed branch, never on `main`**; in a worktree
+   session, do all work via the worktree path, never the parent repo's.
 2. **Before changing behaviour** — read `README.md` and skim the script you're
    touching so the change matches the existing model. If picking the next task,
    run `gh pr list` first and skip any Queue item already covered by an open PR.
@@ -122,8 +129,15 @@ Synthetic `owner/repo`, run ids, and PR numbers exercise identical code paths.
 - Small, focused, Conventional Commits; commit after each validated task.
 - **No Claude attribution** in commit messages or PR descriptions.
 - Amending an unpushed commit is fine. Once pushed, prefer a follow-up commit;
-  only amend + `--force-with-lease` on a `claude/` branch when asked, never on
-  `main`.
+  `--force-with-lease` on a `claude/` branch is fine when the user asks (e.g. to
+  rebase for a clean history — see Workflow step 1), never on `main`.
+- **After pushing, check for a PR** (`gh pr view`): if one exists, update its
+  description with `gh pr edit` to reflect the new commits; open one only when
+  the task is finished.
+- **Unrelated work goes in its own PR** — don't bundle it into the branch you're
+  on. Parallel PRs beat a mixed diff.
+- **Act only on your own branch and PR.** Don't push to or rewrite a branch/PR
+  another session owns.
 - Version lives in exactly two files (`plugin.json`, `marketplace.json`) — bump
   them together. See `docs/development/release-process.md`.
 
@@ -134,3 +148,9 @@ Spell out acronyms on first use, e.g. "continuous integration (CI)".
 Human-facing docs (`README.md`, `docs/` outside `docs/development/`) must never
 link to `CLAUDE.md` / `AGENTS.md`. This file is the entrypoint for agents only;
 humans start at `README.md`. The dependency is one-way.
+
+**Editing `CLAUDE.md` — protect the context budget.** This file loads in full
+into every session, so every line costs context. Add only load-bearing,
+must-act-on rules; put explanation and how-to in the relevant `docs/` page with
+a one-line pointer here. Prefer tightening an existing line over adding a new
+one.
