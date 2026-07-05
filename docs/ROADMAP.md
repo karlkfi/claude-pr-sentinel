@@ -49,6 +49,36 @@ A bare `sleep N` before a status check is deliberately **not** denied — too
 fuzzy to classify without false positives, so the hook fails open on it. See
 the [PreToolUse decision table](../README.md#what-it-does) for the full matrix.
 
+## R4 — Desktop auto-fix migration helper ✅ shipped
+
+**Problem.** pr-sentinel positions itself as the replacement for Claude
+Desktop's "Auto-fix CI & address comments," but installing it doesn't turn that
+toggle off. A migrating user is left with every pre-existing session still
+armed on the PR comment stream — each a credentialed local agent an attacker
+can reach by commenting on an old or merged PR. The toggle is per-session
+desktop state with no bulk or UI control, and archiving (the only bulk stop)
+destroys the session list some users compute metrics from.
+
+**Design.** A stdlib-only Python helper
+([`scripts/pr-sentinel-migrate-autofix.py`](../scripts/pr-sentinel-migrate-autofix.py))
+plus a guiding slash command
+([`commands/pr-sentinel-migrate-autofix.md`](../commands/pr-sentinel-migrate-autofix.md)).
+The per-session state is a plain JSON file under the desktop app's
+`claude-code-sessions` store with a top-level `autoFixEnabled` boolean; the
+helper scans those files and flips the flag to `false` on the targeted set.
+Safety is the whole point: dry-run by default, backs up before editing, refuses
+to run while the app is up (the live app rewrites these files and would clobber
+a live edit), targets **MERGED** PRs by default (never OPEN without `--all`),
+and only touches files matching the expected schema — no-op with a clear
+message otherwise. It is purely local: no network call, no PR text. The design
+plan is [`docs/plan/migrate-autofix.md`](plan/migrate-autofix.md).
+
+**Why Python, not the watcher's bash.** It must resolve per-platform session
+paths and round-trip undocumented app JSON safely; Python stdlib does both with
+no `jq` dependency and fits the existing test harness. The optional GitHub-side
+conversation lock (issue #3) was deliberately left out — a separate concern
+with a public-repo community cost.
+
 ## R3 — Friction / activity report (later)
 
 A read-only analyzer over local session transcripts (the pattern from

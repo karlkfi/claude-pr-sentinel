@@ -8,7 +8,8 @@ components with different data profiles, described honestly below.
 ## Data we collect
 
 None. The plugin has no analytics, no telemetry, and no data collection of any
-kind. It ships as one bash script and one stdlib-only Python script.
+kind. It ships as one bash watcher and a few stdlib-only Python scripts (the
+hooks and the migration helper).
 
 ## The PostToolUse hook (`scripts/pr-sentinel-hook.py`)
 
@@ -38,6 +39,20 @@ kind. It ships as one bash script and one stdlib-only Python script.
 - It writes nothing to disk. The failing-run log excerpt is sanitized
   (ANSI-stripped, size-capped) and printed to the background task's standard
   output, which the Claude Code harness delivers to your session.
+
+## The migration helper (`scripts/pr-sentinel-migrate-autofix.py`)
+
+- Runs **entirely locally with no network access.** You invoke it manually (or
+  via the `/pr-sentinel-migrate-autofix` command) — it is not a hook and does
+  not run on its own.
+- Reads the Claude **desktop app's** own session files under its
+  `claude-code-sessions` store to find the `autoFixEnabled` toggle, along with
+  the sibling `prState` / `prRepository` / `prNumber` / `title` fields it uses
+  to filter and to print a report. It does **not** read PR bodies or comments.
+- With `--apply` it **writes to disk** — the only component that does: it backs
+  up each targeted file under `.autofix-backup-<timestamp>/` before setting
+  `autoFixEnabled` to `false`. This is local file editing under your own
+  account; nothing leaves the machine.
 
 ## Third parties
 
