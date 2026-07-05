@@ -68,7 +68,7 @@
       <circle cx="20" cy="23" r="1.2" fill="#e3b341"/>
       <text x="46" y="24" font-size="17" font-weight="700" font-family="-apple-system, sans-serif" fill="#e3b341">conflict</text>
     </g>
-    <text x="246" y="342" font-size="23" fill="#c9d1d9">the base branch moved — <tspan fill="#e3b341" font-weight="700">heal</tspan> by merging base in, never rebase</text>
+    <text x="246" y="342" font-size="23" fill="#c9d1d9">the base branch moved — <tspan fill="#e3b341" font-weight="700">heal</tspan> the conflict, then push</text>
 
     <!-- row 3: all green, mergeable -->
     <g transform="translate(96,388)">
