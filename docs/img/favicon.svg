@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="shield" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#7e57c2"/>
+    </linearGradient>
+  </defs>
+  <!-- shield + sentinel eye, centered: translate(76,31) scale(5) maps the 88-unit mark to a 512 canvas -->
+  <g transform="translate(76,31) scale(5)">
+    <path d="M36 2 L70 14 V44 C70 66 54 80 36 88 C18 80 2 66 2 44 V14 Z"
+          fill="url(#shield)" stroke="#5b3da8" stroke-width="1.4"/>
+    <!-- watchful eye: almond + iris + pupil, standing for the sentinel keeping watch -->
+    <path d="M16 44 C24 32 48 32 56 44 C48 56 24 56 16 44 Z"
+          fill="#f1ecff" stroke="#5b3da8" stroke-width="1.2" stroke-linejoin="round"/>
+    <circle cx="36" cy="44" r="9" fill="#7e57c2"/>
+    <circle cx="36" cy="44" r="3.6" fill="#2f2153"/>
+  </g>
+</svg>
