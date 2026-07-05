@@ -9,9 +9,8 @@
 You ask Claude to open a pull request (PR). Then the session sits in a
 `gh pr checks --watch` loop — burning tokens and wall-clock, blind to merge
 conflicts — until CI finishes. Or you reach for Claude Desktop's "Autofix
-pull requests," which wakes an agent on **PR review comments** — an indirect
-prompt-injection channel where anyone who can comment can plant instructions
-the agent then follows.
+pull requests," which wakes an agent on the PR comment stream
+([why that's a problem](#why-not-just-auto-fix-ci)).
 
 pr-sentinel replaces both. It's a **hook-nudged background watcher**: after you
 open or push a PR, a hook nudges the session to launch a tiny `bash` watcher as
