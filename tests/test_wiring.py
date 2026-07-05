@@ -74,6 +74,19 @@ class Wiring(unittest.TestCase):
         self.assertTrue(watcher.read_text(encoding="utf-8")
                         .startswith("#!/usr/bin/env bash"))
 
+    def test_migrate_helper_present_and_executable(self):
+        script = REPO / "scripts" / "pr-sentinel-migrate-autofix.py"
+        self.assertTrue(script.is_file())
+        self.assertTrue(os.access(script, os.X_OK),
+                        "migration helper must be executable")
+
+    def test_migrate_command_present(self):
+        cmd = REPO / "commands" / "pr-sentinel-migrate-autofix.md"
+        self.assertTrue(cmd.is_file(), "migration slash command must exist")
+        text = cmd.read_text(encoding="utf-8")
+        self.assertIn("pr-sentinel-migrate-autofix.py", text,
+                      "command must point at the helper script")
+
     def test_agents_symlink(self):
         agents = REPO / "AGENTS.md"
         self.assertTrue(agents.is_symlink(), "AGENTS.md should symlink to CLAUDE.md")
