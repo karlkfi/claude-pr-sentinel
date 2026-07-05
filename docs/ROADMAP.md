@@ -27,28 +27,30 @@ once, then let the stop proceed. This is what turns "advisory" into "reliable."
 running (task enumeration) and to identify the session's own open PR without a
 network call or comment ingestion — a design worth landing on its own.
 
-## R2 — PreToolUse foreground-poll deny (fast-follow)
+## R2 — PreToolUse foreground-poll deny ✅ shipped
 
 **Problem.** Even with the watcher available, a session may still reach for a
 blocking foreground poll, the exact anti-pattern this plugin replaces.
 
-**Design.** A `PreToolUse` hook on `Bash` that **denies** blocking-poll command
-shapes with a fix-it message pointing at the watcher:
+**Design.** A `PreToolUse` hook on `Bash`
+([`scripts/pr-sentinel-guard.py`](../scripts/pr-sentinel-guard.py)) that
+**denies** blocking-poll command shapes with a fix-it message pointing at the
+watcher:
 
-- `gh pr checks --watch`
+- `gh pr checks --watch` (or `-w`)
 - `gh run watch`
 - `until …; do sleep …; done` / `while …; do sleep …; done` polling loops
-- a long bare `sleep N` immediately before a status check
 
-In `bypassPermissions` mode it returns **deny** (not `ask`), mirroring
-workspace-guard, so headless runs self-correct instead of stalling on an
-unanswerable prompt. `PR_SENTINEL_OVERRIDE=<reason>` downgrades the deny to
-`ask` for the rare legitimate case — the same escape-hatch pattern as
-prod-guard's `PROD_GUARD_OVERRIDE`.
+It returns a hard **deny** (not `ask`) in *every* mode — notably
+`bypassPermissions`, mirroring workspace-guard — so headless runs self-correct
+instead of stalling on an unanswerable prompt. `PR_SENTINEL_OVERRIDE=<reason>`
+(any non-empty value) downgrades the deny: the hook defers and the command
+proceeds under the normal permission system, the rare legitimate case — the
+same escape-hatch pattern as prod-guard's `PROD_GUARD_OVERRIDE`.
 
-**Why not in the MVP.** The deny wording and the poll-shape detection deserve
-their own decision table and tests; the nudge + watcher deliver the core value
-first.
+A bare `sleep N` before a status check is deliberately **not** denied — too
+fuzzy to classify without false positives, so the hook fails open on it. See
+the [PreToolUse decision table](../README.md#what-it-does) for the full matrix.
 
 ## R3 — Friction / activity report (later)
 

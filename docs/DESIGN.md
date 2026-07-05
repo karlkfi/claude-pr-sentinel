@@ -84,9 +84,14 @@ task's stdout to the session as the wake payload.
 
 3. **Plugin manifest + tests + docs.**
 
-The Stop-hook backstop and the PreToolUse foreground-poll deny are **scaffolded
-as roadmap items** ([`ROADMAP.md`](ROADMAP.md)), not code, so the MVP stays
-small and reviewable.
+A second hook, the **PreToolUse foreground-poll deny**
+([`scripts/pr-sentinel-guard.py`](../scripts/pr-sentinel-guard.py)), enforces
+the other side of the nudge: it *denies* a Bash command that would foreground-
+poll CI (`gh pr checks --watch`, `gh run watch`, a `while/until … sleep` loop)
+and points the fix-it at the watcher, with `PR_SENTINEL_OVERRIDE=<reason>` as
+the escape hatch (see [`ROADMAP.md`](ROADMAP.md) R2). The Stop-hook backstop
+remains a **scaffolded roadmap item**, not code, so the MVP stayed small and
+reviewable.
 
 ## Report format and the "data, not instructions" frame
 
@@ -142,7 +147,7 @@ These are the point of the plugin, not a footnote.
    "Autofix" switch (#68083).
 
 4. **Secure by default.** Every configuration knob that *loosens* behaviour is
-   opt-in and documented as a trade-off. The escape hatch for the (roadmapped)
+   opt-in and documented as a trade-off. The escape hatch for the
    foreground-poll deny is `PR_SENTINEL_OVERRIDE=<reason>`, mirroring
    prod-guard's `PROD_GUARD_OVERRIDE`.
 
