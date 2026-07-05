@@ -53,6 +53,19 @@ class Wiring(unittest.TestCase):
         self.assertTrue(os.access(guard, os.X_OK),
                         "guard script must be executable")
 
+    def test_stop_hook_registered_and_points_at_real_script(self):
+        hooks = load("hooks/hooks.json")
+        entries = hooks["hooks"]["Stop"]
+        self.assertTrue(entries)
+        # Stop hooks take no matcher (there is no tool to match on).
+        self.assertNotIn("matcher", entries[0])
+        cmd = entries[0]["hooks"][0]["command"]
+        self.assertIn("pr-sentinel-stop-hook.py", cmd)
+        script = REPO / "scripts" / "pr-sentinel-stop-hook.py"
+        self.assertTrue(script.is_file())
+        self.assertTrue(os.access(script, os.X_OK),
+                        "stop hook script must be executable")
+
     def test_watcher_present_and_executable(self):
         watcher = REPO / "scripts" / "pr-sentinel-watch.sh"
         self.assertTrue(watcher.is_file())
