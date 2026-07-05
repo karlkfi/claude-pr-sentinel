@@ -104,13 +104,16 @@ make check          # shellcheck + unittest
 python3 -m unittest discover tests
 ```
 
-Three suites:
+Four suites:
 - `tests/test_watcher.py` — runs the watcher as a subprocess against a **stub
   `gh`** on PATH (canned, jq-projected fixtures) and asserts each exit event
   and the report sanitization (ANSI strip, size cap). Add the scenario that
   motivated any change as a fixture.
 - `tests/test_hook.py` — unit + subprocess tests of command classification, the
   failure heuristic, and the emitted `additionalContext`.
+- `tests/test_migrate.py` — runs the migration helper against a synthetic
+  session store (fixture `local_*.json`) and asserts the scope rules, backup,
+  app-running refusal, and schema no-op.
 - `tests/test_wiring.py` — the manifests/hook registration are valid and agree
   on version, and the scripts exist and are executable.
 
