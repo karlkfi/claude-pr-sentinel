@@ -9,5 +9,5 @@
   "homepage": "https://github.com/karlkfi/claude-pr-sentinel",
   "repository": "https://github.com/karlkfi/claude-pr-sentinel",
   "license": "MIT",
-  "keywords": ["claude-code", "hooks", "ci", "pull-request", "github", "gh", "merge-conflict", "background-task", "watcher", "security", "prompt-injection", "automation", "migration"]
+  "keywords": ["claude-code", "hooks", "ci", "pull-request", "github", "gh", "merge-conflict", "rebase", "background-task", "watcher", "security", "prompt-injection", "automation", "migration"]
 }
