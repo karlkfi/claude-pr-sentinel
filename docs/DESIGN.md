@@ -84,14 +84,16 @@ task's stdout to the session as the wake payload.
 
 3. **Plugin manifest + tests + docs.**
 
-A second hook, the **PreToolUse foreground-poll deny**
-([`scripts/pr-sentinel-guard.py`](../scripts/pr-sentinel-guard.py)), enforces
-the other side of the nudge: it *denies* a Bash command that would foreground-
-poll CI (`gh pr checks --watch`, `gh run watch`, a `while/until … sleep` loop)
-and points the fix-it at the watcher, with `PR_SENTINEL_OVERRIDE=<reason>` as
-the escape hatch (see [`ROADMAP.md`](ROADMAP.md) R2). The Stop-hook backstop
-remains a **scaffolded roadmap item**, not code, so the MVP stayed small and
-reviewable.
+Two fast-follow hooks have since shipped on top of that MVP. The **PreToolUse
+foreground-poll deny** ([`scripts/pr-sentinel-guard.py`](../scripts/pr-sentinel-guard.py))
+enforces the other side of the nudge: it *denies* a Bash command that would
+foreground-poll CI (`gh pr checks --watch`, `gh run watch`, a `while/until …
+sleep` loop) and points the fix-it at the watcher, with
+`PR_SENTINEL_OVERRIDE=<reason>` as the escape hatch. The **Stop-hook backstop**
+([`scripts/pr-sentinel-stop-hook.py`](../scripts/pr-sentinel-stop-hook.py))
+turns the advisory nudge into a reliable one — see [Why the nudge is
+advisory](#why-the-nudge-is-advisory). Both stayed out of the initial MVP so it
+was small and reviewable.
 
 ## Report format and the "data, not instructions" frame
 
@@ -186,10 +188,36 @@ emits a nudge. Keeping the hook network-free keeps it fast (it runs on the
 Hooks can inject context but cannot force the model to call a tool. Rather than
 pretend otherwise, the PostToolUse nudge is explicitly advisory: it describes
 the exact background-task command to run and lets the session decide. The
-roadmapped **Stop-hook backstop** is what turns "advisory" into "reliable": if
-the session ends its turn with an open PR it created, required checks pending,
-and no live watcher, the Stop hook blocks the stop **once** with an instruction
-to launch the watcher (respecting `stop_hook_active` to avoid loops).
+**Stop-hook backstop** (`scripts/pr-sentinel-stop-hook.py`) is what turns
+"advisory" into "reliable": if the session ends its turn with an open PR it
+opened, no live watcher, and no local evidence the PR is handed off, the Stop
+hook blocks the stop **once** with an instruction to launch the watcher.
+
+It solves its two sub-problems **without a network call and without reading the
+PR body or comments**:
+
+- **Identify the session's own PR** by parsing the local transcript JSONL — the
+  harness's own `pr-link` record (a canonical `prNumber`/`prUrl` marker) and, as
+  a fallback, the session's own `gh pr create` correlated with the PR URL `gh`
+  printed. Both are GitHub-controlled metadata the session already surfaced.
+- **Detect a live watcher** from the same transcript: a `run_in_background`
+  launch of `pr-sentinel-watch.sh <PR>` records a `tool_use` id, and when that
+  background task exits the harness records a `<task-notification>` carrying the
+  same id. A watcher is *live* only while its launch has no completion
+  notification — so a watcher that already exited (delivered its event) reads as
+  *not live*, and a session that stopped mid-fix without relaunching is nudged
+  too. This is a harness-generated record, so untrusted CI-log text can't forge
+  it; and the `ready`/`closed` "handed off" signal is trusted only when read
+  back from that watcher's own output file (path learned from the
+  notification), not from a free-text scan.
+
+Check status can't be verified locally (that needs a network call), so "checks
+pending" is approximated as "opened, not handed off, unwatched"; the block is
+safe because it fires at most once and only asks the session to launch the
+watcher, which then authoritatively determines check state. It respects
+`stop_hook_active` — a stop that is itself the continuation of a prior block is
+allowed straight through — so it can never loop, and it **fails open** on any
+uncertainty (unparseable input, unreadable transcript, no resolvable PR).
 
 ### Why fail-open in the hook, fail-safe in the watcher
 

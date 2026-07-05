@@ -23,6 +23,17 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pr-sentinel-stop-hook.py\"",
+            "timeout": 10000
+          }
+        ]
+      }
     ]
   }
 }

@@ -75,6 +75,29 @@ so a headless run self-corrects instead of stalling on an unanswerable prompt.
 Set `PR_SENTINEL_OVERRIDE=<reason>` to allow one legitimate poll (see
 [Configuration](#configuration)).
 
+**The Stop hook** is the backstop that makes the advisory nudge reliable. When
+the session tries to end its turn, it **blocks the stop at most once** if the
+turn is ending with an unwatched open PR — nudging the session to launch the
+watcher before stopping:
+
+| Session state at end of turn (Stop) | Hook action |
+| --- | --- |
+| opened a PR this session, **no** live watcher, PR not handed off | **block once** — launch the watcher for `#N` |
+| a launched watcher hasn't reported completion yet (still running) | silent (already covered) |
+| PR handed off (watcher `ready`/`closed`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
+| no PR opened this session | silent |
+| `stop_hook_active` already set (a prior block) | silent — **never loops** |
+| unreadable transcript / any uncertainty | silent (fail-open) |
+| `PR_SENTINEL_DISABLE=1` set | silent (disabled) |
+
+Everything it decides comes from the one file the harness already hands it — the
+session's own transcript. It identifies the PR from the transcript (the harness's
+`pr-link` record and the session's own `gh pr create` output URL) and treats a
+watcher as live when its background-task launch has no completion notification
+yet — **no network call, no process table, and never the PR body or comments**
+(see [Security invariants](#security-invariants)). It respects `stop_hook_active`
+so it blocks once and then lets the stop proceed.
+
 **The watcher** polls the PR and exits with exactly one event when attention is
 needed:
 
@@ -207,7 +230,7 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_LOG_MAX_BYTES` | `8192` | CI log excerpt cap (tail kept), bytes |
 | `PR_SENTINEL_GH_RETRIES` | `3` | `gh` failures tolerated per poll before an `error` event |
 | `PR_SENTINEL_BACKOFF_NUM` / `_DEN` | `3` / `2` | backoff multiplier (interval × num ÷ den each idle poll) |
-| `PR_SENTINEL_DISABLE` | (unset) | `1` disables the PostToolUse nudge |
+| `PR_SENTINEL_DISABLE` | (unset) | `1` disables the PostToolUse nudge and the Stop backstop |
 | `PR_SENTINEL_OVERRIDE` | (unset) | a non-empty `<reason>` allows one otherwise-denied foreground poll (see the [PreToolUse table](#what-it-does)) |
 | `PR_SENTINEL_DEBUG` | (unset) | `1` re-raises hook errors instead of failing open |
 
@@ -244,8 +267,10 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
 ## Limitations
 
 - **The nudge is advisory.** A `PostToolUse` hook can't force a tool call; if
-  the session ignores the nudge, no watcher starts. The roadmapped Stop-hook
-  backstop closes this gap.
+  the session ignores the nudge, no watcher starts. The **Stop-hook backstop**
+  closes this gap — it blocks the stop once if the turn ends with an unwatched
+  open PR — but it too is best-effort: it fails open on any uncertainty (no PR
+  resolvable, unreadable transcript) and never blocks twice.
 - **Success detection is heuristic.** The hook infers a failed push from output
   text (`fatal:`, `! [rejected]`, `error:`, `Everything up-to-date`). An
   unusual success string could be misread as failure (nudge skipped) — never
@@ -265,8 +290,6 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
 
 Scaffolded, not yet built — see [`docs/ROADMAP.md`](docs/ROADMAP.md):
 
-- **Stop-hook backstop** — block the stop **once** if the session ends its turn
-  with an open PR it created, checks pending, and no live watcher.
 - **Friction/activity report** — a read-only analyzer over local transcripts.
 
 Shipped since the MVP:
@@ -275,6 +298,9 @@ Shipped since the MVP:
   `gh run watch`, and `while/until … sleep` poll loops with a fix-it pointing at
   the watcher; `PR_SENTINEL_OVERRIDE=<reason>` allows a one-off (see the
   [PreToolUse table](#what-it-does)).
+- **Stop-hook backstop** — blocks the stop **once** if the turn ends with an
+  open PR it opened, no live watcher, and the PR not handed off — nudging the
+  session to launch the watcher (see the [Stop table](#what-it-does)).
 
 ## Companion plugins
 
