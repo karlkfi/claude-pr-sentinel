@@ -24,6 +24,7 @@ comments, issue comments, or the PR body.
 
 - [What it does](#what-it-does)
 - [Install](#install)
+- [Migrating from Desktop auto-fix](#migrating-from-desktop-auto-fix)
 - [How it works](#how-it-works)
 - [Security invariants](#security-invariants)
 - [Why not just auto-fix CI?](#why-not-just-auto-fix-ci)
@@ -144,6 +145,50 @@ After installing with either method:
 To verify, ask Claude to open a PR (or push a PR branch); after the command you
 should see an injected pr-sentinel nudge describing the watcher command to run.
 
+## Migrating from Desktop auto-fix
+
+Installing pr-sentinel does **not** turn off Claude Desktop's "Auto-fix CI &
+address comments" toggle on your existing sessions. That toggle wakes a
+credentialed local agent on the PR **comment stream** — the injection channel
+this plugin exists to avoid ([Why not just auto-fix CI?](#why-not-just-auto-fix-ci))
+— so every pre-existing session stays armed on it. On a public repo, anyone who
+can comment on an old or merged PR has an injection path into a local agent that
+holds `git push` and your tokens. Merged-PR sessions are the worst case: no
+reason to stay armed, maximal exposure.
+
+The bundled **migration helper** disarms them in one pass. It's a slash command
+that guides you and a script that does the edit:
+
+```
+/pr-sentinel-migrate-autofix
+```
+
+The command runs a **read-only dry run** and reports how many sessions have
+auto-fix enabled, grouped by PR state and repository. To apply, you run the
+script yourself from a separate terminal **after quitting the desktop app** (the
+running app rewrites these files and would silently clobber a live edit; a
+command inside the app can't quit it):
+
+```
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pr-sentinel-migrate-autofix.py"          # dry run
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pr-sentinel-migrate-autofix.py" --apply  # quit app first
+```
+
+It is safe by construction:
+
+- **Dry-run by default**; `--apply` is required to change anything, and it backs
+  up every edited file first (under `.autofix-backup-<timestamp>/`).
+- **Refuses to run while the app is up** — it detects the running app and stops.
+- **MERGED-PR sessions only by default.** OPEN / in-progress sessions are left
+  alone unless you pass `--all` (an explicit opt-in that also disarms OPEN PRs).
+- **Schema-verified.** It only touches files that carry the expected
+  `autoFixEnabled` boolean; if the desktop format has changed it no-ops with a
+  clear message rather than risk corrupting anything.
+
+Relaunch the app afterward and spot-check a couple of the listed sessions — the
+toggle should be off, and pr-sentinel handles wake-on-CI going forward with no
+comment-channel exposure.
+
 ## How it works
 
 1. **Hook nudge.** A `PostToolUse` hook on `Bash`
@@ -231,6 +276,8 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_GH_RETRIES` | `3` | `gh` failures tolerated per poll before an `error` event |
 | `PR_SENTINEL_BACKOFF_NUM` / `_DEN` | `3` / `2` | backoff multiplier (interval × num ÷ den each idle poll) |
 | `PR_SENTINEL_DISABLE` | (unset) | `1` disables the PostToolUse nudge and the Stop backstop |
+| `PR_SENTINEL_SESSIONS_ROOT` | (platform default) | overrides the session-store path the [migration helper](#migrating-from-desktop-auto-fix) scans (same as its `--root`) |
+| `PR_SENTINEL_ASSUME_APP_QUIT` | (unset) | `1` asserts the desktop app is quit, so the migration helper's `--apply` skips live-app detection (use only after quitting it) |
 | `PR_SENTINEL_OVERRIDE` | (unset) | a non-empty `<reason>` allows one otherwise-denied foreground poll (see the [PreToolUse table](#what-it-does)) |
 | `PR_SENTINEL_DEBUG` | (unset) | `1` re-raises hook errors instead of failing open |
 
@@ -301,6 +348,10 @@ Shipped since the MVP:
 - **Stop-hook backstop** — blocks the stop **once** if the turn ends with an
   open PR it opened, no live watcher, and the PR not handed off — nudging the
   session to launch the watcher (see the [Stop table](#what-it-does)).
+- **Desktop auto-fix migration helper** — `/pr-sentinel-migrate-autofix` and a
+  backing script disable the desktop "Auto-fix CI & address comments" toggle on
+  existing sessions when you switch to pr-sentinel (see
+  [Migrating from Desktop auto-fix](#migrating-from-desktop-auto-fix)).
 
 ## Companion plugins
 
