@@ -7,53 +7,69 @@ session to launch the pr-sentinel background watcher before stopping. It respect
 `stop_hook_active` so it can never loop: a stop that is itself the continuation
 of a prior stop-hook block is allowed straight through.
 
-Two open problems, solved WITHOUT a network call and WITHOUT reading the PR body
-or any comment stream (the excluded injection channel — see docs/DESIGN.md):
+Everything it needs is in the ONE file the harness already hands it — the
+session's own transcript (`transcript_path`). It makes NO network call, reads no
+process table, writes nothing, and never touches the PR body or comment stream
+(the excluded injection channel — see docs/DESIGN.md). Signals used, all from the
+transcript JSONL:
 
-  * Is a watcher running?  -> enumerate local processes (`ps`) for a running
-    `pr-sentinel-watch.sh <PR>`. A watcher that exited (delivered its event)
-    correctly reads as NOT live. `ps` failing -> we can't confirm -> fail-open.
-  * Which PR did the session open?  -> parse the local transcript JSONL: the
-    harness's own `pr-link` records (a canonical `prNumber`/`prUrl` marker) and,
-    as a fallback, the session's own `gh pr create` correlated with the PR URL
-    `gh` printed. Both are GitHub-controlled metadata the session already
-    surfaced; we never touch the PR body or comments.
+  * Which PR did the session open?  -> the harness's own `pr-link` records (a
+    canonical `prNumber`/`prUrl` marker), plus a `gh pr create` correlated with
+    the PR URL that command printed. Both are GitHub-controlled metadata the
+    session already surfaced.
+  * Is a watcher still running?  -> a `run_in_background` launch of
+    `pr-sentinel-watch.sh <PR>` records a `tool_use` id; when that background
+    task exits, the harness records a `<task-notification>` carrying the same
+    `<tool-use-id>` and a `<status>`. A watcher is LIVE iff its launch id has no
+    task-notification yet. This is a harness-generated record — untrusted CI-log
+    text cannot forge it.
+  * Was the PR handed off?  -> a `gh pr merge`/`close`, or a watcher
+    `ready`/`closed` report. The report text only reaches the transcript when the
+    session READS the watcher's own output file, so we trust a `ready`/`closed`
+    marker only when it appears in a read of THAT file (path learned from the
+    task-notification) — a fake marker in a CI-log excerpt cannot satisfy it.
 
 We cannot verify check status locally (that needs a network call), so "checks
-still pending" is approximated as "created, not known-concluded, unwatched". The
-block is safe under that approximation: it fires at most once and only asks the
-session to launch the watcher, which then authoritatively determines check state
-(and exits `ready` at once if the PR is already green).
+still pending" is approximated as "opened, not handed off, unwatched". The block
+is safe under that approximation: it fires at most once and only asks the session
+to launch the watcher, which then authoritatively determines check state (and
+exits `ready` at once if the PR is already green).
 
 Fail-open on ANY uncertainty: unparseable stdin, unreadable transcript, no
-created PR, a concluded PR, a live watcher, or `ps` unavailable -> emit nothing
-(allow the stop). It must never break a session. PR_SENTINEL_DEBUG=1 re-raises.
-PR_SENTINEL_DISABLE=1 disables it (parity with the PostToolUse nudge).
+opened PR, a concluded PR, or a live watcher -> emit nothing (allow the stop). It
+must never break a session. PR_SENTINEL_DEBUG=1 re-raises. PR_SENTINEL_DISABLE=1
+disables it (parity with the PostToolUse nudge).
 
 Reads the Stop hook JSON on stdin, emits a block decision on stdout (or nothing).
 """
 import json
 import os
 import re
-import subprocess
 import sys
 
 # A github.com PR URL, e.g. https://github.com/owner/repo/pull/123
 PR_URL_RE = re.compile(r'https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)')
 
-# A watcher launch on a process command line: `... pr-sentinel-watch.sh 42`.
+# A watcher launch inside a Bash command: `... pr-sentinel-watch.sh 42`.
 WATCH_ARG_RE = re.compile(r'pr-sentinel-watch\.sh["\']?\s+(\S+)')
 
 # A watcher terminal report that means "nothing left to babysit" for a PR.
-CONCLUDED_EVENT_RE = re.compile(r'PR-SENTINEL EVENT:\s*(ready|closed)\b')
-# The `PR: <ref>` line the watcher prints right under the event marker.
-PR_LINE_RE = re.compile(r'^PR:\s*(\S+)', re.MULTILINE)
+CONCLUDED_EVENT_RE = re.compile(r'PR-SENTINEL EVENT:\s*(?:ready|closed)\b')
+
+# Fields pulled out of a `<task-notification>` completion record.
+NOTIF_TOOL_ID_RE = re.compile(r'<tool-use-id>\s*(toolu_[A-Za-z0-9]+)')
+NOTIF_OUTFILE_RE = re.compile(r'<output-file>\s*([^<\s]+)')
+
+# Cheap line pre-filter: only JSON-parse transcript lines that can carry a
+# signal we care about. Everything else (the bulk of a session) is skipped.
+_NEEDLES = ('pr-link', 'pr-sentinel-watch.sh', 'PR-SENTINEL EVENT',
+            'task-notification', 'pr create', 'pr merge', 'pr close', '/pull/')
 
 
 def pr_number(token):
     """Normalise a PR token (a bare number or a github.com PR URL) to its
     number string, or None if it is neither."""
-    token = token.strip().strip('"\'')
+    token = str(token).strip().strip('"\'')
     if token.isdigit():
         return token
     m = PR_URL_RE.search(token)
@@ -87,7 +103,7 @@ def _block_texts(content):
     for block in content:
         if not isinstance(block, dict):
             continue
-        if 'text' in block and isinstance(block['text'], str):
+        if isinstance(block.get('text'), str):
             yield block['text']
         inner = block.get('content')
         if isinstance(inner, str):
@@ -98,128 +114,127 @@ def _block_texts(content):
                     yield sub['text']
 
 
-def _tool_use_result_text(obj):
-    """Text from an entry's structured `toolUseResult` (Bash stdout/stderr),
-    where background-task output and command output are also surfaced."""
+def _entry_text(obj, content):
+    """All human/tool text on one transcript entry: message content plus a
+    structured Bash `toolUseResult` stdout/stderr, if present."""
+    parts = list(_block_texts(content))
     tur = obj.get('toolUseResult')
-    if not isinstance(tur, dict):
-        return ''
-    parts = [tur[k] for k in ('stdout', 'stderr') if isinstance(tur.get(k), str)]
+    if isinstance(tur, dict):
+        parts += [tur[k] for k in ('stdout', 'stderr') if isinstance(tur.get(k), str)]
     return '\n'.join(parts)
 
 
-def parse_transcript(path):
-    """Read the Stop-hook transcript JSONL and return the set of PR numbers the
-    session opened that are NOT yet concluded (no watcher ready/closed report,
-    no `gh pr merge`/`close`).
+def _notification_text(obj):
+    """The `<task-notification>` payload of an entry, from either a
+    `queue-operation` (.content) or an `attachment` (.attachment.prompt)."""
+    if obj.get('type') == 'queue-operation':
+        c = obj.get('content')
+        return c if isinstance(c, str) and '<task-notification>' in c else ''
+    att = obj.get('attachment')
+    if isinstance(att, dict):
+        p = att.get('prompt')
+        if isinstance(p, str) and '<task-notification>' in p:
+            return p
+    return ''
 
-    Two 'opened' signals, unioned for robustness: (1) the harness's own
-    `pr-link` entries (a canonical record carrying `prNumber`/`prUrl`), and
-    (2) a `gh pr create` correlated with the PR URL that command printed. Both
-    are GitHub-controlled metadata the session already surfaced — never the PR
-    body or comments. Fail-open: returns an empty set on any I/O trouble."""
-    create_ids = []          # tool_use ids that ran `gh pr create`
-    result_text = {}         # tool_use_id -> concatenated result text
+
+def _read_file_path(obj):
+    """For a Read tool_result entry, the file path it read (or None)."""
+    tur = obj.get('toolUseResult')
+    if isinstance(tur, dict) and isinstance(tur.get('file'), dict):
+        fp = tur['file'].get('filePath')
+        if isinstance(fp, str):
+            return fp
+    return None
+
+
+def prs_needing_watcher(path):
+    """The set of PR numbers the session opened that are unconcluded AND have no
+    live watcher — i.e. the PRs a stop should be blocked over. Fail-open:
+    returns an empty set on any I/O trouble (allow the stop)."""
     created = set()
     concluded = set()
-    all_text = []            # loose scan corpus for event markers
+    launch_pr_by_toolid = {}   # watcher launch tool_use_id -> PR number
+    completed_toolids = set()  # tool_use_ids with a task-notification (exited)
+    outfile_by_toolid = {}     # watcher launch tool_use_id -> its output file
+    reads = []                 # (file_path, text) for Read results
+    create_ids = []            # tool_use_ids that ran `gh pr create`
+    result_text = {}           # tool_use_id -> concatenated result text
 
     try:
         with open(path, encoding='utf-8', errors='replace') as fh:
             for raw in fh:
-                raw = raw.strip()
-                if not raw:
+                if not any(n in raw for n in _NEEDLES):
                     continue
                 try:
                     obj = json.loads(raw)
                 except ValueError:
                     continue
-                # The harness's canonical per-session PR record.
+
                 if obj.get('type') == 'pr-link':
-                    num = pr_number(str(obj.get('prNumber', '')))
+                    num = pr_number(obj.get('prNumber', ''))
                     if num:
                         created.add(num)
+                    continue
+
+                notif = _notification_text(obj)
+                if notif and '<status>' in notif:
+                    tm = NOTIF_TOOL_ID_RE.search(notif)
+                    if tm:
+                        completed_toolids.add(tm.group(1))
+                        om = NOTIF_OUTFILE_RE.search(notif)
+                        if om:
+                            outfile_by_toolid[tm.group(1)] = om.group(1).strip()
+                    continue
+
                 msg = obj.get('message') if isinstance(obj.get('message'), dict) else obj
                 content = msg.get('content') if isinstance(msg, dict) else None
-                entry_tids = []
                 if isinstance(content, list):
-                    for block in content:
-                        if not isinstance(block, dict):
+                    for b in content:
+                        if not isinstance(b, dict):
                             continue
-                        btype = block.get('type')
-                        if btype == 'tool_use' and block.get('name') == 'Bash':
-                            cmd = (block.get('input') or {}).get('command') or ''
+                        btype = b.get('type')
+                        if btype == 'tool_use' and b.get('name') == 'Bash':
+                            cmd = (b.get('input') or {}).get('command') or ''
+                            if (b.get('input') or {}).get('run_in_background'):
+                                for wm in WATCH_ARG_RE.finditer(cmd):
+                                    num = pr_number(wm.group(1))
+                                    if num:
+                                        launch_pr_by_toolid[b.get('id')] = num
                             if _is_pr_create(cmd):
-                                create_ids.append(block.get('id'))
+                                create_ids.append(b.get('id'))
                             concluded |= _pr_close_targets(cmd)
                         elif btype == 'tool_result':
-                            tid = block.get('tool_use_id')
-                            text = '\n'.join(_block_texts(block.get('content')))
+                            tid = b.get('tool_use_id')
                             if tid is not None:
-                                entry_tids.append(tid)
-                                result_text[tid] = result_text.get(tid, '') + '\n' + text
-                # Structured Bash stdout/stderr is attached to this entry's
-                # tool_result id(s), and also feeds the event-marker scan.
-                tur_text = _tool_use_result_text(obj)
-                if tur_text:
-                    for tid in entry_tids:
-                        result_text[tid] = result_text.get(tid, '') + '\n' + tur_text
-                    all_text.append(tur_text)
-                # Collect all text (result blocks, background-task output, etc.)
-                # for the loose concluded-event scan.
-                for text in _block_texts(content):
-                    all_text.append(text)
+                                result_text[tid] = result_text.get(tid, '') \
+                                    + '\n' + '\n'.join(_block_texts(b.get('content')))
+
+                fp = _read_file_path(obj)
+                if fp:
+                    reads.append((fp, _entry_text(obj, content)))
     except OSError:
         return set()
 
-    # Created PRs: the number gh printed in the create command's own output.
+    # Opened PRs: the number gh printed in the create command's own output.
     for tid in create_ids:
         for m in PR_URL_RE.finditer(result_text.get(tid, '')):
             created.add(m.group(1))
 
-    # Concluded PRs: watcher ready/closed reports anywhere in the transcript.
-    corpus = '\n'.join(all_text)
-    for m in CONCLUDED_EVENT_RE.finditer(corpus):
-        # The `PR: <ref>` line sits a couple of lines below the event marker.
-        window = corpus[m.end():m.end() + 200]
-        pm = PR_LINE_RE.search(window)
-        if pm:
-            num = pr_number(pm.group(1))
-            if num:
-                concluded.add(num)
+    # Handed off: a watcher `ready`/`closed` report, trusted ONLY when read from
+    # that watcher's own output file (path from the completion notification).
+    outfile_pr = {outfile_by_toolid[t]: launch_pr_by_toolid[t]
+                  for t in outfile_by_toolid if t in launch_pr_by_toolid}
+    for fp, text in reads:
+        pr = outfile_pr.get(fp)
+        if pr and CONCLUDED_EVENT_RE.search(text):
+            concluded.add(pr)
 
-    return created - concluded
+    # Live: a watcher launch whose task has not reported completion.
+    live = {pr for tid, pr in launch_pr_by_toolid.items()
+            if tid not in completed_toolids}
 
-
-def watcher_prs_from_ps(ps_output):
-    """Parse `ps` output into the set of PR numbers that have a live
-    `pr-sentinel-watch.sh <PR>` process."""
-    prs = set()
-    for line in ps_output.splitlines():
-        for m in WATCH_ARG_RE.finditer(line):
-            num = pr_number(m.group(1))
-            if num:
-                prs.add(num)
-    return prs
-
-
-# `-ww` disables command-line truncation (BSD/macOS + GNU/Linux); `ax` is the
-# portable "all processes, full args" fallback if `-o` is unsupported.
-_PS_INVOCATIONS = (['ps', '-A', '-ww', '-o', 'args='], ['ps', 'ax'])
-
-
-def running_watcher_prs():
-    """PR numbers with a live watcher process, or None if we cannot tell (no
-    `ps`, or it errored) — the caller treats None as 'unknown -> allow'."""
-    for argv in _PS_INVOCATIONS:
-        try:
-            proc = subprocess.run(argv, capture_output=True, text=True,
-                                  timeout=5, check=False)
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if proc.returncode == 0:
-            return watcher_prs_from_ps(proc.stdout)
-    return None
+    return created - concluded - live
 
 
 def watcher_command(pr):
@@ -266,19 +281,11 @@ def main():
     transcript = data.get('transcript_path')
     if not transcript:
         return
-    active = parse_transcript(transcript)
-    if not active:
-        return  # no created-and-unconcluded PR: allow
-
-    running = running_watcher_prs()
-    if running is None:
-        return  # can't confirm watcher liveness: fail-open, allow
-    unwatched = active - running
+    unwatched = prs_needing_watcher(transcript)
     if not unwatched:
-        return  # every active PR already has a live watcher: allow
+        return  # no opened-and-unwatched PR: allow
 
-    reason = build_reason(unwatched)
-    print(json.dumps({'decision': 'block', 'reason': reason}))
+    print(json.dumps({'decision': 'block', 'reason': build_reason(unwatched)}))
 
 
 if __name__ == '__main__':
