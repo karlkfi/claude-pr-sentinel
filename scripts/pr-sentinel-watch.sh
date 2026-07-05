@@ -39,6 +39,12 @@ TIMEOUT="${PR_SENTINEL_TIMEOUT:-3600}"           # overall watch budget, seconds
 LOG_MAX_BYTES="${PR_SENTINEL_LOG_MAX_BYTES:-8192}"  # CI log excerpt cap, bytes
 GH_RETRIES="${PR_SENTINEL_GH_RETRIES:-3}"        # gh failures tolerated per poll
 
+# Conflict/behind heal strategy the report recommends: rebase (default) or
+# merge. Normalise to lowercase (bash 3.2: use tr, not ${var,,}) and fail safe
+# to rebase on any unrecognised value.
+HEAL=$(printf '%s' "${PR_SENTINEL_HEAL:-rebase}" | tr '[:upper:]' '[:lower:]')
+[[ "$HEAL" == "merge" ]] || HEAL="rebase"
+
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
@@ -164,9 +170,18 @@ emit_conflict() {
 	echo "mergeStateStatus: ${MERGE} (CONFLICTING)"
 	echo "Base branch: ${BASE}"
 	echo
-	echo "Next action: heal the conflict by merging the base INTO this branch —"
-	echo "  git fetch origin ${BASE} && git merge origin/${BASE}"
-	echo "Use merge, NOT rebase, so the push stays a fast-forward (no --force)."
+	if [[ "$HEAL" == "merge" ]]; then
+		echo "Next action: heal the conflict by merging the base INTO this branch —"
+		echo "  git fetch origin ${BASE} && git merge origin/${BASE}"
+		echo "Use merge, NOT rebase, so the push stays a fast-forward (no --force)."
+	else
+		echo "Next action: heal the conflict by rebasing this branch onto the base —"
+		echo "  git fetch origin ${BASE} && git rebase origin/${BASE}"
+		echo "  ... resolve conflicts commit-by-commit ..."
+		echo "  git push --force-with-lease"
+		echo "Rebase keeps history linear (no sync-merge commits); it rewrites SHAs,"
+		echo "so the push is a force-push (--force-with-lease, not --force)."
+	fi
 	echo "Resolve conflicts, run the local gate, push, then relaunch this watcher."
 	exit 0
 }
@@ -177,10 +192,18 @@ emit_behind() {
 	echo "mergeStateStatus: ${MERGE} (branch is behind base)"
 	echo "Base branch: ${BASE}"
 	echo
-	echo "Next action: bring the branch up to date by merging the base IN —"
-	echo "  git fetch origin ${BASE} && git merge origin/${BASE}"
-	echo "Merge, NOT rebase, so the push stays a fast-forward. Then push and"
-	echo "relaunch this watcher."
+	if [[ "$HEAL" == "merge" ]]; then
+		echo "Next action: bring the branch up to date by merging the base IN —"
+		echo "  git fetch origin ${BASE} && git merge origin/${BASE}"
+		echo "Merge, NOT rebase, so the push stays a fast-forward."
+	else
+		echo "Next action: bring the branch up to date by rebasing onto the base —"
+		echo "  git fetch origin ${BASE} && git rebase origin/${BASE}"
+		echo "  git push --force-with-lease"
+		echo "Rebase keeps history linear (no sync-merge commits); it rewrites SHAs,"
+		echo "so the push is a force-push (--force-with-lease, not --force)."
+	fi
+	echo "Run the local gate, push, then relaunch this watcher."
 	exit 0
 }
 

@@ -98,19 +98,54 @@ class WatcherCase(unittest.TestCase):
         self.assertIn("State: MERGED", out)
 
     def test_conflict_event(self):
+        """Default heal mode is rebase: recommend rebase onto base + force-with-lease."""
         rc, out, _ = self.run_watcher({"pr_view": "OPEN\tDIRTY\tmain\n"})
         self.assertEqual(rc, 0)
         self.assertIn("PR-SENTINEL EVENT: conflict", out)
-        self.assertIn("merge origin/main", out)
-        # Conflict guidance must say merge, not rebase.
+        # Default (no PR_SENTINEL_HEAL set) recommends rebase.
+        self.assertIn("git rebase origin/main", out)
+        self.assertIn("--force-with-lease", out)
+        self.assertNotIn("git merge origin/main", out)
+
+    def test_conflict_event_merge_mode(self):
+        """PR_SENTINEL_HEAL=merge restores the merge-base-in / fast-forward guidance."""
+        rc, out, _ = self.run_watcher(
+            {"pr_view": "OPEN\tDIRTY\tmain\n"},
+            env={"PR_SENTINEL_HEAL": "merge"},
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: conflict", out)
+        self.assertIn("git merge origin/main", out)
         self.assertIn("NOT rebase", out)
         self.assertNotIn("git rebase", out)
 
+    def test_heal_mode_unrecognized_falls_back_to_rebase(self):
+        """Any unrecognised PR_SENTINEL_HEAL value fails safe to the rebase default."""
+        rc, out, _ = self.run_watcher(
+            {"pr_view": "OPEN\tDIRTY\tmain\n"},
+            env={"PR_SENTINEL_HEAL": "cherry-pick"},
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("git rebase origin/main", out)
+        self.assertNotIn("git merge origin/main", out)
+
     def test_behind_event(self):
+        """Default heal mode is rebase for the behind event too."""
         rc, out, _ = self.run_watcher({"pr_view": "OPEN\tBEHIND\tmain\n"})
         self.assertEqual(rc, 0)
         self.assertIn("PR-SENTINEL EVENT: behind", out)
-        self.assertIn("merge origin/main", out)
+        self.assertIn("git rebase origin/main", out)
+        self.assertIn("--force-with-lease", out)
+        self.assertNotIn("git merge origin/main", out)
+
+    def test_behind_event_merge_mode(self):
+        rc, out, _ = self.run_watcher(
+            {"pr_view": "OPEN\tBEHIND\tmain\n"},
+            env={"PR_SENTINEL_HEAL": "merge"},
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: behind", out)
+        self.assertIn("git merge origin/main", out)
         self.assertIn("NOT rebase", out)
 
     def test_check_failure_event(self):

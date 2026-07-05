@@ -164,15 +164,31 @@ session without the working context; a foreground loop holds the current
 session but burns tokens and blocks all other work. A sleeping background bash
 process is free, and its exit is a clean, first-class wake.
 
-### Why merge, not rebase, to heal conflicts
+### How conflicts are healed: rebase by default, merge on request
 
 When the watcher reports `CONFLICTING` or `BEHIND`, the recommended fix is
-`git merge origin/<base>` **into** the PR branch — never a rebase. A merge
-keeps the branch a **fast-forward descendant** of what was already pushed, so
-the subsequent `git push` needs no force and can't clobber a concurrent push
-or another session's work. A rebase rewrites already-pushed history and
-requires `--force`, which is exactly the destructive shape the sibling
-branch-guard exists to stop.
+**configurable** via `PR_SENTINEL_HEAL`, defaulting to **rebase**. The watcher
+never runs git itself — this only changes the commands the wake report
+recommends to the foreground session.
+
+- **`rebase` (default)** — `git rebase origin/<base>` then
+  `git push --force-with-lease`. This fits the common case for AI agents: a
+  **single-owner `claude/`-prefixed branch in its own worktree**, one task per
+  branch. Rebasing gives clean linear history (no sync-merge commits polluting
+  the branch) and deliberate, per-commit conflict resolution. The cost is that
+  it rewrites already-pushed SHAs, so the push must be a force-push — bounded to
+  `--force-with-lease` so it still refuses to clobber a concurrent push.
+- **`merge`** — `git merge origin/<base>` **into** the branch, then a plain
+  `git push`. This fits **shared/collaborative or already-reviewed** PRs: the
+  merge keeps the branch a fast-forward descendant of what was already pushed,
+  so the push needs no force and can't clobber another session's work, and it
+  preserves CI results and review comments anchored to the existing commit SHAs.
+  The cost is sync-merge commits cluttering the branch history.
+
+The force-push a rebase requires is exactly the destructive shape the sibling
+branch-guard governs; `--force-with-lease` is the bounded form it permits on a
+`claude/` branch. Teams that can't force-push, or want to preserve review
+anchoring, set `PR_SENTINEL_HEAL=merge`.
 
 ### Why the watcher uses `gh` but the hook does not
 
