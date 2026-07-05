@@ -27,6 +27,7 @@ comments, issue comments, or the PR body.
 - [Install](#install)
 - [How it works](#how-it-works)
 - [Security invariants](#security-invariants)
+- [Why not just auto-fix CI?](#why-not-just-auto-fix-ci)
 - [Configuration](#configuration)
 - [Agent guidance](#agent-guidance)
 - [Limitations](#limitations)
@@ -149,6 +150,32 @@ These are the point of the plugin.
   ([#68083](https://github.com/anthropics/claude-code/issues/68083)).
 - **Secure by default.** Any knob that *loosens* behaviour is opt-in and
   documented as a trade-off.
+
+## Why not just auto-fix CI?
+
+pr-sentinel *does* fix CI — it wakes your session to do it. What it deliberately
+does **not** do is fix CI the way Claude Desktop's "Autofix pull requests" does.
+Three differences, and they are the whole point:
+
+- **Trigger: check metadata, not comments.** Autofix wakes on the PR
+  review-comment stream — an indirect prompt-injection channel, since anyone who
+  can comment can plant text the agent then treats as instructions
+  ([#66097](https://github.com/anthropics/claude-code/issues/66097)).
+  pr-sentinel triggers on your own `gh pr create` / `git push` and reads only
+  GitHub-controlled check results and merge state — never comments or the PR
+  body.
+- **Fixes run in the visible local session, not a hidden agent.** Every fix
+  executes in the session you're watching, under the normal permission system
+  and any installed guard hooks. The plugin grants no authority you didn't
+  already give the session.
+- **It never merges.** A green PR is handed back to you for review. The human
+  merge gate stays the trust boundary — there is no auto-merge, by design, and
+  the CI log excerpt that drives a fix is treated as untrusted data, not
+  instructions.
+
+If you want a fully hands-off "fix it and merge it" loop, this isn't that — that
+is the trade pr-sentinel refuses to make. See [`docs/DESIGN.md`](docs/DESIGN.md)
+for the full rationale.
 
 ## Configuration
 
