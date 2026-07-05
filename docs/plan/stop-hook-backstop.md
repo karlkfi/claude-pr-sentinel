@@ -10,25 +10,36 @@ body/comments (the excluded injection channel). Both are hard invariants.
 
 ## Design decisions (the open problems from R1/STATUS)
 
-### 1. Detect a running watcher without a network call — process enumeration
+### 1. Detect a running watcher without a network call — from the transcript
 
-A live watcher is a running `pr-sentinel-watch.sh <PR>` OS process (a sleeping
-background bash task launched by the session). We enumerate local processes with
-`ps` and look for a command line containing `pr-sentinel-watch.sh` and the PR
-identifier. This is:
+> **Revised after review.** The first cut enumerated local processes with `ps`.
+> That was dropped: for a security-posture plugin, shelling out to read the whole
+> process table (every app's / user's command line, some carrying secrets in
+> argv) is off-brand even when we only grep for our own script name, and it adds
+> a subprocess plus flag-portability and false-match warts. The signal is
+> available in the transcript we already parse, so we use that instead.
 
-- **Decisive** — it answers "is a watcher running *right now*", not "was one
-  ever launched", so a watcher that exited (delivered its event) and wasn't
-  relaunched correctly reads as *not live*.
-- **Local** — `ps` reads the local process table; no network, no PR text.
-- **Schema-independent** — no dependence on the transcript's background-task
-  completion representation.
+A `run_in_background` launch of `pr-sentinel-watch.sh <PR>` records a `tool_use`
+id; when that background task exits, the harness records a `<task-notification>`
+(a `queue-operation`/`attachment`) carrying the same `<tool-use-id>`, an
+`<output-file>`, and a `<status>`. So a watcher is **live** iff its launch id has
+no task-notification yet. This is:
 
-`ps` is factored behind a seam: a pure `watcher_prs_from_ps(ps_output)` parser
-plus a thin `running_watcher_prs()` that shells out to `ps ax`. Tests drive the
-parser directly and drive end-to-end runs with a **stub `ps` on PATH** (mirrors
-`test_watcher.py`'s stub-`gh`). If `ps` is missing or errors, we cannot confirm
-liveness → **fail-open: allow the stop** (never falsely block a watched session).
+- **Decisive** — it answers "did this watcher exit", not "was one ever launched",
+  so a watcher that already exited (and wasn't relaunched) reads as *not live*
+  and a session that stopped mid-fix is nudged.
+- **Confined** — reads only the transcript the hook is already handed; no process
+  table, no subprocess, no new capability beyond PR identification.
+- **Spoof-resistant** — the task-notification is harness-generated, so untrusted
+  CI-log text can't forge a "completion". The `ready`/`closed` handed-off signal
+  is trusted only when read back from that watcher's *own* output file (path from
+  the notification), not from a free-text corpus scan.
+
+`prs_needing_watcher(transcript)` returns the block set directly (opened −
+concluded − live). A line pre-filter (only JSON-parse lines carrying a needle:
+`pr-link`, `pr-sentinel-watch.sh`, `PR-SENTINEL EVENT`, `task-notification`, a
+`gh pr` verb, `/pull/`) keeps it fast on large transcripts. Any I/O trouble →
+**fail-open: allow the stop**.
 
 ### 2. Identify the session's own PR without a network call or comments
 
@@ -64,7 +75,7 @@ already green. Worst case: one extra, non-looping nudge.
   a stop that is itself a continuation of a prior stop-hook block never blocks
   again.
 - Any uncertainty — unparseable stdin, unreadable transcript, no created PR, a
-  concluded PR, a live watcher, or `ps` unavailable — → **emit nothing / allow**.
+  concluded PR, or a still-live watcher — → **emit nothing / allow**.
 - `PR_SENTINEL_DEBUG=1` re-raises; otherwise the hook exits 0 on any exception.
 - `PR_SENTINEL_DISABLE=1` disables the hook (parity with the PostToolUse nudge).
 
@@ -72,7 +83,7 @@ already green. Worst case: one extra, non-looping nudge.
 
 1. `stop_hook_active` is not true, and `PR_SENTINEL_DISABLE` is unset.
 2. The transcript shows ≥1 **active** created PR (created, not concluded).
-3. **None** of those active PRs has a live watcher process.
+3. **None** of those active PRs has a live watcher (launch with no completion).
 4. → emit `{"decision": "block", "reason": <nudge naming the watcher command>}`.
 
 Otherwise emit nothing (allow the stop).
@@ -82,9 +93,10 @@ Otherwise emit nothing (allow the stop).
 - **`scripts/pr-sentinel-stop-hook.py`** — new, stdlib-only, fail-open. Single
   responsibility: the Stop backstop. Mirrors the existing hook's structure.
 - **`hooks/hooks.json`** — add a `"Stop"` key (Stop hooks take no matcher).
-- **`tests/test_stop_hook.py`** — new suite: unit tests for the transcript
-  parser and the `ps` parser; subprocess end-to-end tests with a stub `ps` and a
-  synthetic transcript covering block / allow paths.
+- **`tests/test_stop_hook.py`** — new suite: unit tests for the classifiers and
+  `prs_needing_watcher` over synthetic transcripts (launch / completion /
+  scoped-read / spoof cases); subprocess end-to-end tests for the stdin, block
+  decision, `stop_hook_active`, disable, and exit-code behavior.
 - **`tests/test_wiring.py`** — assert the `Stop` registration points at the real
   script.
 - **Docs** — `README.md` (Stop-hook row in the decision tables, move it out of
@@ -93,16 +105,20 @@ Otherwise emit nothing (allow the stop).
 
 ## Test scenarios
 
-- created PR + no watcher process + not concluded → **block** (reason names the
+- opened PR + no watcher launched + not concluded → **block** (reason names the
   watcher and the PR).
-- created PR + live watcher process (stub `ps` shows it) → **allow**.
-- created PR + watcher reported `ready`/`closed` in transcript → **allow**.
+- opened PR + launched watcher, no completion notification → **allow** (live).
+- opened PR + watcher exited (notification) but not relaunched → **block**
+  (Scenario C: stopped mid-fix).
+- opened PR + watcher exited, relaunched → **allow** (relaunch is live).
+- opened PR + `ready`/`closed` read from the watcher's own output file → **allow**.
+- opened PR + spoofed `ready` in a *different* file (CI log) → **block** (scoped
+  concluded ignores it).
+- concluded via `gh pr merge`/`close` → **allow**.
 - `stop_hook_active: true` → **allow** (no-loop).
 - `PR_SENTINEL_DISABLE=1` → **allow**.
-- no `gh pr create` in transcript → **allow**.
+- no opened PR in transcript → **allow**.
 - unparseable stdin / missing transcript → **allow**, exit 0.
-- parser units: correlate create→URL; ps line → PR set; concluded via event and
-  via `gh pr merge`.
 
 ## Coordination with Q2
 

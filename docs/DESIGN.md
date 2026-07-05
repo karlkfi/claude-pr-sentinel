@@ -200,10 +200,16 @@ PR body or comments**:
   harness's own `pr-link` record (a canonical `prNumber`/`prUrl` marker) and, as
   a fallback, the session's own `gh pr create` correlated with the PR URL `gh`
   printed. Both are GitHub-controlled metadata the session already surfaced.
-- **Detect a live watcher** by enumerating local processes (`ps`) for a running
-  `pr-sentinel-watch.sh <PR>`. A watcher that already exited (delivered its
-  event) correctly reads as *not live*, so a session that stopped mid-fix
-  without relaunching is nudged too.
+- **Detect a live watcher** from the same transcript: a `run_in_background`
+  launch of `pr-sentinel-watch.sh <PR>` records a `tool_use` id, and when that
+  background task exits the harness records a `<task-notification>` carrying the
+  same id. A watcher is *live* only while its launch has no completion
+  notification — so a watcher that already exited (delivered its event) reads as
+  *not live*, and a session that stopped mid-fix without relaunching is nudged
+  too. This is a harness-generated record, so untrusted CI-log text can't forge
+  it; and the `ready`/`closed` "handed off" signal is trusted only when read
+  back from that watcher's own output file (path learned from the
+  notification), not from a free-text scan.
 
 Check status can't be verified locally (that needs a network call), so "checks
 pending" is approximated as "opened, not handed off, unwatched"; the block is
@@ -211,7 +217,7 @@ safe because it fires at most once and only asks the session to launch the
 watcher, which then authoritatively determines check state. It respects
 `stop_hook_active` — a stop that is itself the continuation of a prior block is
 allowed straight through — so it can never loop, and it **fails open** on any
-uncertainty (unparseable input, unreadable transcript, `ps` unavailable).
+uncertainty (unparseable input, unreadable transcript, no resolvable PR).
 
 ### Why fail-open in the hook, fail-safe in the watcher
 

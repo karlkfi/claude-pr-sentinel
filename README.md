@@ -83,18 +83,20 @@ watcher before stopping:
 | Session state at end of turn (Stop) | Hook action |
 | --- | --- |
 | opened a PR this session, **no** live watcher, PR not handed off | **block once** — launch the watcher for `#N` |
-| a live watcher process is already running for the PR | silent (already covered) |
+| a launched watcher hasn't reported completion yet (still running) | silent (already covered) |
 | PR handed off (watcher `ready`/`closed`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
 | no PR opened this session | silent |
 | `stop_hook_active` already set (a prior block) | silent — **never loops** |
-| `ps` unavailable / any uncertainty | silent (fail-open) |
+| unreadable transcript / any uncertainty | silent (fail-open) |
 | `PR_SENTINEL_DISABLE=1` set | silent (disabled) |
 
-It identifies the session's own PR from the transcript (the harness's `pr-link`
-record and the session's own `gh pr create` output URL) and detects a live
-watcher by enumerating local processes — **no network call, and never the PR
-body or comments** (see [Security invariants](#security-invariants)). It respects
-`stop_hook_active` so it blocks once and then lets the stop proceed.
+Everything it decides comes from the one file the harness already hands it — the
+session's own transcript. It identifies the PR from the transcript (the harness's
+`pr-link` record and the session's own `gh pr create` output URL) and treats a
+watcher as live when its background-task launch has no completion notification
+yet — **no network call, no process table, and never the PR body or comments**
+(see [Security invariants](#security-invariants)). It respects `stop_hook_active`
+so it blocks once and then lets the stop proceed.
 
 **The watcher** polls the PR and exits with exactly one event when attention is
 needed:
@@ -268,7 +270,7 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
   the session ignores the nudge, no watcher starts. The **Stop-hook backstop**
   closes this gap — it blocks the stop once if the turn ends with an unwatched
   open PR — but it too is best-effort: it fails open on any uncertainty (no PR
-  resolvable, `ps` unavailable) and never blocks twice.
+  resolvable, unreadable transcript) and never blocks twice.
 - **Success detection is heuristic.** The hook infers a failed push from output
   text (`fatal:`, `! [rejected]`, `error:`, `Everything up-to-date`). An
   unusual success string could be misread as failure (nudge skipped) — never

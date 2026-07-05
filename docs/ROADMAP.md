@@ -13,12 +13,13 @@ Implemented as `scripts/pr-sentinel-stop-hook.py` (registered under `Stop` in
 PR it opened, no live watcher, and no local evidence the PR was handed off. This
 is what turns "advisory" into "reliable."
 
-The two open problems were solved locally: the session's own PR is identified
-from the transcript (the harness's `pr-link` record and the session's own
-`gh pr create` output URL), and a live watcher is detected by enumerating local
-processes (`ps`) for a running `pr-sentinel-watch.sh <PR>` — no network call and
-no PR body/comment ingestion. Check status can't be checked without a network
-call, so "checks pending" is approximated as "opened, not handed off, unwatched";
+The two open problems were solved from the session's own transcript alone: the
+PR is identified from the harness's `pr-link` record (and the session's own
+`gh pr create` output URL), and a watcher is treated as live only while its
+`run_in_background` launch has no matching `<task-notification>` completion
+record — no network call, no process table, and no PR body/comment ingestion.
+Check status can't be checked without a network call, so "checks pending" is
+approximated as "opened, not handed off, unwatched";
 the block is safe because it fires at most once and only asks the session to
 launch the watcher, which then authoritatively determines check state. See
 [`DESIGN.md`](DESIGN.md#why-the-nudge-is-advisory) for the mechanism.
