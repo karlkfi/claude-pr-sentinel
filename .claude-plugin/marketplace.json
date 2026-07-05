@@ -1,0 +1,17 @@
+{
+  "name": "pr-sentinel",
+  "owner": { "name": "karlkfi", "url": "https://github.com/karlkfi" },
+  "description": "Secure post-PR babysitting for Claude Code: hook-nudged background watcher for CI failures and merge conflicts.",
+  "plugins": [
+    {
+      "name": "pr-sentinel",
+      "version": "0.1.0",
+      "description": "Wake your session on CI failures and merge conflicts via a background watcher — no foreground polling, no PR-comment ingestion.",
+      "author": { "name": "Karl" },
+      "source": {
+        "source": "github",
+        "repo": "karlkfi/claude-pr-sentinel"
+      }
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "pr-sentinel",
+  "version": "0.1.0",
+  "description": "Wake your session on CI failures and merge conflicts — no foreground polling, no comment-channel injection.",
+  "author": {
+    "name": "Karl",
+    "url": "https://github.com/karlkfi"
+  },
+  "homepage": "https://github.com/karlkfi/claude-pr-sentinel",
+  "repository": "https://github.com/karlkfi/claude-pr-sentinel",
+  "license": "MIT",
+  "keywords": ["claude-code", "hooks", "ci", "pull-request", "github", "gh", "merge-conflict", "background-task", "watcher", "security", "prompt-injection", "automation"]
+}
