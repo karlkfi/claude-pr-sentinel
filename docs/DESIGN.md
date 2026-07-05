@@ -89,7 +89,18 @@ foreground-poll deny** ([`scripts/pr-sentinel-guard.py`](../scripts/pr-sentinel-
 enforces the other side of the nudge: it *denies* a Bash command that would
 foreground-poll CI (`gh pr checks --watch`, `gh run watch`, a `while/until …
 sleep` loop) and points the fix-it at the watcher, with
-`PR_SENTINEL_OVERRIDE=<reason>` as the escape hatch. The **Stop-hook backstop**
+`PR_SENTINEL_OVERRIDE=<reason>` as the escape hatch. The **same** PreToolUse
+hook also *allows* the plugin's own watcher launch (`bash <own-watch.sh> <PR>`),
+so the read-only command the nudge asks for isn't met by a base Bash permission
+prompt on every (re)launch — removing pure friction on a first-party command the
+user already opted into by installing the plugin. That allow is deliberately
+narrow: it fires **only** on a single simple command whose script path
+realpath-equals this plugin's own watcher and whose sole other argument is a
+bare PR number — no operators, redirects, substitutions, or globs. Anything
+ambiguous falls through to normal permissions (fail-safe: defer, never allow on
+doubt), so the convenience can't be weaponised into approving a chained or
+look-alike command. It's gated by `PR_SENTINEL_AUTOALLOW` (default on) and
+suppressed when the plugin is disabled. The **Stop-hook backstop**
 ([`scripts/pr-sentinel-stop-hook.py`](../scripts/pr-sentinel-stop-hook.py))
 turns the advisory nudge into a reliable one — see [Why the nudge is
 advisory](#why-the-nudge-is-advisory). Both stayed out of the initial MVP so it
@@ -148,10 +159,15 @@ These are the point of the plugin, not a footnote.
    pr-sentinel gets none of its behaviour — the opposite of the global
    "Autofix" switch (#68083).
 
-4. **Secure by default.** Every configuration knob that *loosens* behaviour is
-   opt-in and documented as a trade-off. The escape hatch for the
-   foreground-poll deny is `PR_SENTINEL_OVERRIDE=<reason>`, mirroring
-   prod-guard's `PROD_GUARD_OVERRIDE`.
+4. **Secure by default.** Every knob that loosens a *security* property — what
+   the plugin reads, what authority it grants — is opt-in and documented as a
+   trade-off. The escape hatch for the foreground-poll deny is
+   `PR_SENTINEL_OVERRIDE=<reason>`, mirroring prod-guard's `PROD_GUARD_OVERRIDE`.
+   The watcher-launch auto-allow (`PR_SENTINEL_AUTOALLOW`, default on) is *not*
+   such a knob: it grants no new authority and widens nothing the plugin reads —
+   it only suppresses a base permission prompt for the plugin's own read-only
+   watcher launch, under an airtight realpath match. Turning it off reinstates
+   the prompt but changes no security property. So it is safe to default on.
 
 ## Why these specific choices
 

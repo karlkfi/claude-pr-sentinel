@@ -68,13 +68,22 @@ fix-it at the background watcher. Unlike the advisory nudge, a deny is
 | `gh run watch` | **deny** — launch the background watcher instead |
 | `while …; do … sleep …; done` / `until …; do … sleep …; done` | **deny** — hand-rolled poll loop |
 | any of the above with `PR_SENTINEL_OVERRIDE=<reason>` set | **allow** (deferred to normal permissions) |
-| `gh pr checks` · `gh run view` · `bash …/pr-sentinel-watch.sh N` | allow (not a blocking poll) |
+| `bash …/pr-sentinel-watch.sh N` (the plugin's own watcher) | **allow** — auto-approved (no base Bash prompt), gated by `PR_SENTINEL_AUTOALLOW` |
+| `gh pr checks` · `gh run view` | allow (not a blocking poll — deferred to normal permissions) |
 | a bare `sleep N` (no loop) · unrecognised shape | allow (fail-open — never deny when unsure) |
 
 The deny is a hard **deny**, not an `ask` — even in `bypassPermissions` mode —
 so a headless run self-corrects instead of stalling on an unanswerable prompt.
 Set `PR_SENTINEL_OVERRIDE=<reason>` to allow one legitimate poll (see
 [Configuration](#configuration)).
+
+The watcher-launch **allow** is an explicit decision, not a mere defer: it
+short-circuits the base Bash permission prompt for the first-party, read-only
+watcher launch you opted into by installing the plugin. The match is airtight —
+only a single simple `bash <this-plugin's-watch.sh> <PR-number>` (no operators,
+redirects, substitutions, or globs; the script path is compared by resolved
+realpath) is approved; anything else falls through to normal permissions. Set
+`PR_SENTINEL_AUTOALLOW=0` to keep the prompt (see [Configuration](#configuration)).
 
 **The Stop hook** is the backstop that makes the advisory nudge reliable. When
 the session tries to end its turn, it **blocks the stop at most once** if the
@@ -278,7 +287,8 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_GH_RETRIES` | `3` | `gh` failures tolerated per poll before an `error` event |
 | `PR_SENTINEL_HEAL` | `rebase` | conflict/behind heal the report recommends: `rebase` or `merge` (see below); unrecognised values fall back to `rebase` |
 | `PR_SENTINEL_BACKOFF_NUM` / `_DEN` | `3` / `2` | backoff multiplier (interval × num ÷ den each idle poll) |
-| `PR_SENTINEL_DISABLE` | (unset) | `1` disables the PostToolUse nudge and the Stop backstop |
+| `PR_SENTINEL_AUTOALLOW` | (on) | auto-approve the plugin's own watcher launch so it isn't prompted by the base Bash permission; `0`/`false`/empty keeps the prompt (see below) |
+| `PR_SENTINEL_DISABLE` | (unset) | `1` disables the PostToolUse nudge, the Stop backstop, and the watcher-launch auto-allow |
 | `PR_SENTINEL_SESSIONS_ROOT` | (platform default) | overrides the session-store path the [migration helper](#migrating-from-desktop-auto-fix) scans (same as its `--root`) |
 | `PR_SENTINEL_ASSUME_APP_QUIT` | (unset) | `1` asserts the desktop app is quit, so the migration helper's `--apply` skips live-app detection (use only after quitting it) |
 | `PR_SENTINEL_OVERRIDE` | (unset) | a non-empty `<reason>` allows one otherwise-denied foreground poll (see the [PreToolUse table](#what-it-does)) |
@@ -288,6 +298,18 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 documented escape hatch for the foreground-poll deny. Set it to a short reason
 (e.g. `PR_SENTINEL_OVERRIDE="watcher can't reach this run"`) for a single
 legitimate poll; an empty value does **not** downgrade the deny.
+
+`PR_SENTINEL_AUTOALLOW` is **on by default** and removes the base Bash approval
+prompt for the one first-party, read-only command the plugin asks you to run —
+`bash …/pr-sentinel-watch.sh <PR>` — on every (re)launch. Only that exact shape
+is approved (single simple command, the script matched by resolved realpath, a
+bare PR number); anything else defers to normal permissions. Set it to `0` to
+keep the prompt if you'd rather see each launch. Disabling it does **not** widen
+what the plugin reads or does — it only reinstates the prompt. Users who disable
+it but still want no prompt can instead add a Bash allowlist entry
+`Bash(bash */.claude/plugins/cache/pr-sentinel/pr-sentinel/*/scripts/pr-sentinel-watch.sh:*)`
+— mid-path and trailing globs are supported and shell-operator-aware, so it
+won't allow chained commands.
 
 `PR_SENTINEL_HEAL` picks how the `conflict` and `behind` reports tell the
 session to heal a diverged branch. The watcher itself never runs git — this
@@ -364,6 +386,10 @@ Shipped since the MVP:
   `gh run watch`, and `while/until … sleep` poll loops with a fix-it pointing at
   the watcher; `PR_SENTINEL_OVERRIDE=<reason>` allows a one-off (see the
   [PreToolUse table](#what-it-does)).
+- **PreToolUse watcher-launch auto-allow** — auto-approves the plugin's own
+  `bash …/pr-sentinel-watch.sh <PR>` (airtight, realpath-matched) so it isn't
+  prompted by the base Bash permission on every launch; `PR_SENTINEL_AUTOALLOW=0`
+  keeps the prompt (see the [PreToolUse table](#what-it-does)).
 - **Stop-hook backstop** — blocks the stop **once** if the turn ends with an
   open PR it opened, no live watcher, and the PR not handed off — nudging the
   session to launch the watcher (see the [Stop table](#what-it-does)).

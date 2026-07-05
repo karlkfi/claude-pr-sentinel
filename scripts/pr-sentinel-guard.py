@@ -1,13 +1,25 @@
 #!/usr/bin/env python3
-"""PreToolUse hook: DENY foreground CI-poll commands and point the session at
-the pr-sentinel background watcher instead.
+"""PreToolUse hook: DENY foreground CI-poll commands and ALLOW the plugin's own
+background watcher launch, pointing the session at the watcher either way.
 
-Fires on a `Bash` command the session is *about to run*. If the command is a
-blocking foreground poll — `gh pr checks --watch`, `gh run watch`, or a
-`while/until … sleep …` poll loop — it returns a PreToolUse `deny` whose reason
-points at the watcher. The deny is UNIFORM across permission modes: a hard
-`deny` (never `ask`), so a `bypassPermissions`/headless run self-corrects
-instead of stalling on an unanswerable prompt.
+Fires on a `Bash` command the session is *about to run*. Two branches:
+
+* **Auto-allow** — if the command is *unambiguously* this plugin's own watcher
+  launch (`bash <own-watcher> <PR>`), it returns a PreToolUse `allow` so the
+  session isn't prompted by the base Bash permission on every (re)launch. The
+  match is airtight and fail-safe: a single simple command, no operators /
+  redirects / substitutions / globs, `argv[1]` resolving (via realpath) to this
+  plugin's own `pr-sentinel-watch.sh`, and `argv[2]` a bare positive integer.
+  ANY doubt -> defer (emit nothing), never allow. Gated by
+  `PR_SENTINEL_AUTOALLOW` (default on; `0`/`false`/empty disables) and off when
+  `PR_SENTINEL_DISABLE=1`.
+
+* **Deny** — if the command is a blocking foreground poll (`gh pr checks
+  --watch`, `gh run watch`, or a `while/until … sleep …` poll loop), it returns
+  a PreToolUse `deny` whose reason points at the watcher. The deny is UNIFORM
+  across permission modes: a hard `deny` (never `ask`), so a
+  `bypassPermissions`/headless run self-corrects instead of stalling on an
+  unanswerable prompt.
 
 Escape hatch: `PR_SENTINEL_OVERRIDE=<reason>` (any non-empty value) downgrades
 the deny — the hook defers, letting the command proceed under the normal
@@ -33,6 +45,73 @@ import sys
 # Shell keywords that can lead a simple-command group but aren't the command
 # word itself (e.g. `do sleep 5`). Stripped before reading the leading word.
 _LEADING_KEYWORDS = ('do', 'then', 'else', '{', '(', '!')
+
+# Any of these in the raw command string means it is NOT a single simple
+# command we can safely auto-allow: command separators / operators (`;` `|`
+# `&`), redirects (`<` `>`), command/parameter substitution (`$` backtick),
+# subshell / process substitution (`(` `)`), brace expansion (`{` `}`), a
+# backslash escape, or globs (`*` `?` `[`). Presence of any -> defer, never
+# allow. (Newlines are covered by the separators too.) Quotes are allowed so
+# the nudge's `bash "<path>" N` form matches.
+_AUTOALLOW_FORBIDDEN = set(';|&<>$`()*?[]{}\\\n\r')
+
+
+def _autoallow_enabled():
+    """Whether the watcher-launch auto-allow is active. On by default; off when
+    `PR_SENTINEL_AUTOALLOW` is `0`/`false`/empty, or the plugin is disabled via
+    `PR_SENTINEL_DISABLE=1` (disabled plugin -> no auto-allow)."""
+    if os.environ.get('PR_SENTINEL_DISABLE') == '1':
+        return False
+    val = os.environ.get('PR_SENTINEL_AUTOALLOW')
+    if val is None:
+        return True  # default on
+    return val.strip().lower() not in ('', '0', 'false')
+
+
+def _expected_watcher_path():
+    """The realpath of THIS plugin's own watcher script, derived from the hook's
+    own location (`<root>/scripts/pr-sentinel-guard.py`) or `CLAUDE_PLUGIN_ROOT`.
+    No version to hardcode -> upgrade-proof. None on any resolution failure."""
+    root = os.environ.get('CLAUDE_PLUGIN_ROOT')
+    if root and root.strip():
+        scripts_dir = os.path.join(root, 'scripts')
+    else:
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+    try:
+        return os.path.realpath(
+            os.path.join(scripts_dir, 'pr-sentinel-watch.sh'))
+    except OSError:
+        return None
+
+
+def is_watcher_launch(command):
+    """True ONLY if `command` is unambiguously `bash <own-watcher> <PR>`:
+
+      * no shell operator / redirect / substitution / glob (`_AUTOALLOW_FORBIDDEN`)
+      * exactly three tokens, `argv[0]` basename `bash`
+      * `argv[1]` realpath-equals this plugin's own watcher script
+      * `argv[2]` a bare positive integer (the PR number)
+
+    Any doubt returns False so the caller defers rather than allows."""
+    if any(c in _AUTOALLOW_FORBIDDEN for c in command):
+        return False
+    try:
+        argv = shlex.split(command)  # posix; respects quotes
+    except ValueError:
+        return False
+    if len(argv) != 3:
+        return False
+    if os.path.basename(argv[0]) != 'bash':
+        return False
+    if not re.match(r'\A[1-9][0-9]*\Z', argv[2]):
+        return False
+    expected = _expected_watcher_path()
+    if expected is None:
+        return False
+    try:
+        return os.path.realpath(argv[1]) == expected
+    except OSError:
+        return False
 
 
 def simple_commands(command):
@@ -151,6 +230,16 @@ def build_reason(shape):
     )
 
 
+def build_allow_reason():
+    """The reason attached to the watcher-launch auto-allow."""
+    return (
+        'pr-sentinel: auto-approving the first-party PR Sentinel watcher launch '
+        '— a read-only background task that polls GitHub-controlled check state '
+        'and wakes this session on a failure, conflict, green, or close. Gated '
+        'by PR_SENTINEL_AUTOALLOW (set it to 0 to keep the base Bash prompt).'
+    )
+
+
 def main():
     try:
         data = json.load(sys.stdin)
@@ -158,12 +247,24 @@ def main():
         return  # unparseable input: defer
     if data.get('tool_name') != 'Bash':
         return
-    override = os.environ.get('PR_SENTINEL_OVERRIDE', '')
-    if override.strip():
-        return  # escape hatch: defer to the normal permission system
     command = (data.get('tool_input') or {}).get('command') or ''
     if not command.strip():
         return
+
+    # Auto-allow the plugin's OWN watcher launch (default on) so the session
+    # isn't prompted by the base Bash permission on every (re)launch. The match
+    # is airtight and fail-safe (see is_watcher_launch): any doubt falls through
+    # to the normal permission system rather than allowing.
+    if _autoallow_enabled() and is_watcher_launch(command):
+        print(json.dumps({'hookSpecificOutput': {
+            'hookEventName': 'PreToolUse',
+            'permissionDecision': 'allow',
+            'permissionDecisionReason': build_allow_reason()}}))
+        return
+
+    override = os.environ.get('PR_SENTINEL_OVERRIDE', '')
+    if override.strip():
+        return  # escape hatch: defer to the normal permission system
 
     shape = classify_poll(command)
     if shape is None:
