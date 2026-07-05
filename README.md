@@ -56,6 +56,25 @@ nudge to (re)launch the watcher after a PR-opening or branch-push command:
 The nudge is **advisory** — a hook can inject context but can't force the model
 to call a tool. It names the exact background-task command to run.
 
+**The PreToolUse hook** goes the other way: it **denies** a Bash command that
+would foreground-poll CI (the anti-pattern this plugin replaces) and points the
+fix-it at the background watcher. Unlike the advisory nudge, a deny is
+*enforced* — the command never runs.
+
+| Command (PreToolUse) | Hook action |
+| --- | --- |
+| `gh pr checks --watch` (or `-w`) | **deny** — launch the background watcher instead |
+| `gh run watch` | **deny** — launch the background watcher instead |
+| `while …; do … sleep …; done` / `until …; do … sleep …; done` | **deny** — hand-rolled poll loop |
+| any of the above with `PR_SENTINEL_OVERRIDE=<reason>` set | **allow** (deferred to normal permissions) |
+| `gh pr checks` · `gh run view` · `bash …/pr-sentinel-watch.sh N` | allow (not a blocking poll) |
+| a bare `sleep N` (no loop) · unrecognised shape | allow (fail-open — never deny when unsure) |
+
+The deny is a hard **deny**, not an `ask` — even in `bypassPermissions` mode —
+so a headless run self-corrects instead of stalling on an unanswerable prompt.
+Set `PR_SENTINEL_OVERRIDE=<reason>` to allow one legitimate poll (see
+[Configuration](#configuration)).
+
 **The watcher** polls the PR and exits with exactly one event when attention is
 needed:
 
@@ -189,10 +208,13 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_GH_RETRIES` | `3` | `gh` failures tolerated per poll before an `error` event |
 | `PR_SENTINEL_BACKOFF_NUM` / `_DEN` | `3` / `2` | backoff multiplier (interval × num ÷ den each idle poll) |
 | `PR_SENTINEL_DISABLE` | (unset) | `1` disables the PostToolUse nudge |
+| `PR_SENTINEL_OVERRIDE` | (unset) | a non-empty `<reason>` allows one otherwise-denied foreground poll (see the [PreToolUse table](#what-it-does)) |
 | `PR_SENTINEL_DEBUG` | (unset) | `1` re-raises hook errors instead of failing open |
 
-`PR_SENTINEL_OVERRIDE=<reason>` is reserved for the roadmapped foreground-poll
-deny (see [Roadmap](#roadmap)); it mirrors prod-guard's `PROD_GUARD_OVERRIDE`.
+`PR_SENTINEL_OVERRIDE` mirrors prod-guard's `PROD_GUARD_OVERRIDE`: it's the
+documented escape hatch for the foreground-poll deny. Set it to a short reason
+(e.g. `PR_SENTINEL_OVERRIDE="watcher can't reach this run"`) for a single
+legitimate poll; an empty value does **not** downgrade the deny.
 
 ## Agent guidance
 
@@ -245,10 +267,14 @@ Scaffolded, not yet built — see [`docs/ROADMAP.md`](docs/ROADMAP.md):
 
 - **Stop-hook backstop** — block the stop **once** if the session ends its turn
   with an open PR it created, checks pending, and no live watcher.
-- **PreToolUse foreground-poll deny** — deny `gh pr checks --watch`,
-  `gh run watch`, and `until/sleep` poll loops with a fix-it pointing at the
-  watcher; `PR_SENTINEL_OVERRIDE=<reason>` downgrades it.
 - **Friction/activity report** — a read-only analyzer over local transcripts.
+
+Shipped since the MVP:
+
+- **PreToolUse foreground-poll deny** — denies `gh pr checks --watch`,
+  `gh run watch`, and `while/until … sleep` poll loops with a fix-it pointing at
+  the watcher; `PR_SENTINEL_OVERRIDE=<reason>` allows a one-off (see the
+  [PreToolUse table](#what-it-does)).
 
 ## Companion plugins
 

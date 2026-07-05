@@ -41,6 +41,18 @@ class Wiring(unittest.TestCase):
         self.assertIn("pr-sentinel-hook.py", cmd)
         self.assertTrue((REPO / "scripts" / "pr-sentinel-hook.py").is_file())
 
+    def test_pretooluse_guard_registered(self):
+        hooks = load("hooks/hooks.json")
+        entries = hooks["hooks"]["PreToolUse"]
+        self.assertTrue(entries)
+        self.assertEqual(entries[0]["matcher"], "Bash")
+        cmd = entries[0]["hooks"][0]["command"]
+        self.assertIn("pr-sentinel-guard.py", cmd)
+        guard = REPO / "scripts" / "pr-sentinel-guard.py"
+        self.assertTrue(guard.is_file())
+        self.assertTrue(os.access(guard, os.X_OK),
+                        "guard script must be executable")
+
     def test_watcher_present_and_executable(self):
         watcher = REPO / "scripts" / "pr-sentinel-watch.sh"
         self.assertTrue(watcher.is_file())
