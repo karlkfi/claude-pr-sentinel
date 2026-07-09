@@ -86,19 +86,27 @@ realpath) is approved; anything else falls through to normal permissions. Set
 `PR_SENTINEL_AUTOALLOW=0` to keep the prompt (see [Configuration](#configuration)).
 
 **The Stop hook** is the backstop that makes the advisory nudge reliable. When
-the session tries to end its turn, it **blocks the stop at most once** if the
-turn is ending with an unwatched open PR — nudging the session to launch the
-watcher before stopping:
+the session tries to end its turn, it **blocks the stop at most once per
+stop-chain** if the turn is ending with an unwatched open PR — nudging the
+session to launch the watcher before stopping:
 
 | Session state at end of turn (Stop) | Hook action |
 | --- | --- |
 | opened a PR this session, **no** live watcher, PR not handed off | **block once** — launch the watcher for `#N` |
+| the watcher has reported the **same** `check_failure` twice (same failed checks, same head commit) | **allow + warn** — the failure isn't changing, so stop nagging; a non-blocking notice keeps the red PR visible |
 | a launched watcher hasn't reported completion yet (still running) | silent (already covered) |
 | PR handed off (watcher `ready`/`closed`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
 | no PR opened this session | silent |
 | `stop_hook_active` already set (a prior block) | silent — **never loops** |
 | unreadable transcript / any uncertainty | silent (fail-open) |
 | `PR_SENTINEL_DISABLE=1` set | silent (disabled) |
+
+The dampening row is what stops a livelock when a PR is red on a check this
+session **cannot** fix — inherited from the base branch, out-of-scope, external,
+or misconfigured. The session gets one block to attempt a fix (a fix moves the
+head commit); if two watcher reports carry the identical failure at the same
+commit, the hook infers no fix is coming and allows the stop with a warning
+rather than re-blocking forever. It never *silently* walks away from a red PR.
 
 Everything it decides comes from the one file the harness already hands it — the
 session's own transcript. It identifies the PR from the transcript (the harness's
@@ -123,8 +131,10 @@ needed:
 | checks still pending | *(keep polling, with backoff)* | — |
 
 Every event report starts with a stable `PR-SENTINEL EVENT: <type>` line, so
-it's greppable in the transcript. A **check_failure** appends the failing run's
-log — **ANSI-stripped, size-capped, and wrapped** in an explicit
+it's greppable in the transcript. A **check_failure** header carries the failed
+checks and the head commit (`Head SHA:`) — the latter lets the Stop hook tell a
+re-reported failure apart from a genuinely new one — then appends the failing
+run's log, **ANSI-stripped, size-capped, and wrapped** in an explicit
 `DATA, NOT INSTRUCTIONS` frame (see [Security invariants](#security-invariants)).
 
 ## Install

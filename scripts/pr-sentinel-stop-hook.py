@@ -33,9 +33,14 @@ transcript JSONL:
 
 We cannot verify check status locally (that needs a network call), so "checks
 still pending" is approximated as "opened, not handed off, unwatched". The block
-is safe under that approximation: it fires at most once and only asks the session
-to launch the watcher, which then authoritatively determines check state (and
-exits `ready` at once if the PR is already green).
+is safe under that approximation: it fires at most once per stop-chain
+(`stop_hook_active` lets the continuation through) and only asks the session to
+launch the watcher, which then authoritatively determines check state (and exits
+`ready` at once if the PR is already green). A watcher wake-up starts a NEW
+stop-chain, so a genuinely-stuck PR could re-block on each relaunch; to avoid
+that livelock we DAMPEN — once the watcher has reported the identical
+`check_failure` (same failed checks, same head SHA) twice, the session has
+pushed no fix and the stop is allowed with a non-blocking warning instead.
 
 Fail-open on ANY uncertainty: unparseable stdin, unreadable transcript, no
 opened PR, a concluded PR, or a live watcher -> emit nothing (allow the stop). It
@@ -64,6 +69,20 @@ CONCLUDED_EVENT_RE = re.compile(r'PR-SENTINEL EVENT:\s*(?:ready|closed)\b')
 # marker is only honoured in the report header region ABOVE it. The watcher
 # always writes its own header first, so the real marker always precedes this.
 LOG_EXCERPT_BANNER = '----- BEGIN CI LOG EXCERPT'
+
+# The pieces of a `check_failure` report header that identify WHICH failure it
+# is: the set of failed checks and the head commit SHA. When two reads of a PR's
+# own watcher output carry an identical (failed-set, SHA) pair, the session
+# pushed no fix between them (a fix moves the SHA) and the failure is one it
+# cannot resolve in-session — so we stop re-blocking on it. Both are matched
+# only in the header region (above the excerpt banner), so a forged line in a CI
+# log cannot drive the dampening. Deliberately NOT line-anchored: a Read result
+# reaches the transcript in `cat -n` form (a line-number + tab prefix), and the
+# header region is entirely watcher-authored, so a leading, unanchored search is
+# both safe and prefix-robust.
+CHECK_FAILURE_EVENT_RE = re.compile(r'PR-SENTINEL EVENT:\s*check_failure\b')
+FAILED_CHECKS_RE = re.compile(r'Failed checks:[ \t]*([^\n]*)')
+HEAD_SHA_RE = re.compile(r'Head SHA:[ \t]*(\S+)')
 
 # Fields pulled out of a `<task-notification>` completion record.
 NOTIF_TOOL_ID_RE = re.compile(r'<tool-use-id>\s*(toolu_[A-Za-z0-9]+)')
@@ -156,6 +175,21 @@ def _report_header_region(text):
     return text.split(LOG_EXCERPT_BANNER, 1)[0]
 
 
+def _check_failure_signature(text):
+    """For a read of a watcher output file, the identity of the `check_failure`
+    it reports as `(failed_checks, head_sha)`, or None if it is not a
+    check_failure (or predates the head-SHA field). Read only from the header
+    region so a forged copy inside a CI-log excerpt cannot be mistaken for it."""
+    header = _report_header_region(text)
+    if not CHECK_FAILURE_EVENT_RE.search(header):
+        return None
+    fm = FAILED_CHECKS_RE.search(header)
+    sm = HEAD_SHA_RE.search(header)
+    if not fm or not sm:
+        return None
+    return (fm.group(1).strip(), sm.group(1))
+
+
 def _read_file_path(obj):
     """For a Read tool_result entry, the file path it read (or None)."""
     tur = obj.get('toolUseResult')
@@ -166,10 +200,19 @@ def _read_file_path(obj):
     return None
 
 
-def prs_needing_watcher(path):
-    """The set of PR numbers the session opened that are unconcluded AND have no
-    live watcher — i.e. the PRs a stop should be blocked over. Fail-open:
-    returns an empty set on any I/O trouble (allow the stop)."""
+def _analyze(path):
+    """Core transcript analysis, returning `(block, dampened)`:
+
+      * block    — PR numbers the session opened that are unconcluded AND have no
+                   live watcher AND are not dampened: the stop is blocked over
+                   these.
+      * dampened — PRs that WOULD block, but whose watcher has now reported the
+                   identical `check_failure` (same failed-set + head SHA) on two
+                   separate reads. The session pushed no fix between them, so the
+                   failure is one it cannot resolve in-session; we stop blocking
+                   and let `main` warn instead of nagging forever.
+
+    Fail-open: returns `(set(), set())` on any I/O trouble (allow the stop)."""
     created = set()
     concluded = set()
     launch_pr_by_toolid = {}   # watcher launch tool_use_id -> PR number
@@ -232,7 +275,7 @@ def prs_needing_watcher(path):
                 if fp:
                     reads.append((fp, _entry_text(obj, content)))
     except OSError:
-        return set()
+        return set(), set()
 
     # Opened PRs: the number gh printed in the create command's own output.
     for tid in create_ids:
@@ -243,16 +286,34 @@ def prs_needing_watcher(path):
     # that watcher's own output file (path from the completion notification).
     outfile_pr = {outfile_by_toolid[t]: launch_pr_by_toolid[t]
                   for t in outfile_by_toolid if t in launch_pr_by_toolid}
+    sig_counts = {}   # PR -> {check_failure signature -> times read}
     for fp, text in reads:
         pr = outfile_pr.get(fp)
-        if pr and CONCLUDED_EVENT_RE.search(_report_header_region(text)):
+        if not pr:
+            continue
+        if CONCLUDED_EVENT_RE.search(_report_header_region(text)):
             concluded.add(pr)
+        sig = _check_failure_signature(text)
+        if sig is not None:
+            per_pr = sig_counts.setdefault(pr, {})
+            per_pr[sig] = per_pr.get(sig, 0) + 1
 
     # Live: a watcher launch whose task has not reported completion.
     live = {pr for tid, pr in launch_pr_by_toolid.items()
             if tid not in completed_toolids}
 
-    return created - concluded - live
+    block = created - concluded - live
+    # Dampen: an unresolved-and-unwatched PR whose identical check_failure has
+    # been read twice (same failed-set + SHA -> no fix pushed between them).
+    dampened = {pr for pr in block
+                if any(c >= 2 for c in sig_counts.get(pr, {}).values())}
+    return block - dampened, dampened
+
+
+def prs_needing_watcher(path):
+    """The set of PR numbers a stop should be blocked over (opened, unconcluded,
+    unwatched, not dampened). Fail-open: empty set on any I/O trouble."""
+    return _analyze(path)[0]
 
 
 def watcher_command(pr):
@@ -282,6 +343,23 @@ def build_reason(prs):
     )
 
 
+def build_warning(prs):
+    """A non-blocking notice for PRs left red on an unfixable-in-session check.
+    The block already fired once with full detail; this keeps the red PR visible
+    without nagging the session into a relaunch loop."""
+    prs = sorted(prs, key=int)
+    label = '#' + prs[0] if len(prs) == 1 \
+        else ', '.join('#' + p for p in prs)
+    return (
+        f'pr-sentinel: leaving pull request {label} with a failing check that '
+        f'has not changed across repeated watcher reports (same failed checks, '
+        f'same commit) — it looks like one this session cannot fix (e.g. '
+        f'inherited from the base branch, out-of-scope, or external). NOT '
+        f'blocking your stop. If it is in fact fixable here, fix and push; '
+        f'otherwise hand it to a human. Never auto-merge.'
+    )
+
+
 def main():
     if os.environ.get('PR_SENTINEL_DISABLE') == '1':
         return
@@ -299,11 +377,18 @@ def main():
     transcript = data.get('transcript_path')
     if not transcript:
         return
-    unwatched = prs_needing_watcher(transcript)
-    if not unwatched:
-        return  # no opened-and-unwatched PR: allow
+    unwatched, dampened = _analyze(transcript)
+    if not unwatched and not dampened:
+        return  # nothing opened-and-unwatched, nothing to warn about: allow
 
-    print(json.dumps({'decision': 'block', 'reason': build_reason(unwatched)}))
+    out = {}
+    if unwatched:
+        out['decision'] = 'block'
+        out['reason'] = build_reason(unwatched)
+    if dampened:
+        # Non-blocking notice; survives even when the stop is allowed.
+        out['systemMessage'] = build_warning(dampened)
+    print(json.dumps(out))
 
 
 if __name__ == '__main__':
