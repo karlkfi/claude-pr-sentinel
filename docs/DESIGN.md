@@ -115,8 +115,11 @@ greppable marker so the report is transcript-parseable:
 PR-SENTINEL EVENT: check_failure
 ```
 
-followed by human/agent-readable fields (PR number, state,
-`mergeStateStatus`, the failing check names) and a recommended next action.
+followed by human/agent-readable fields (PR number, state, `mergeStateStatus`,
+the head commit `Head SHA:`, the failing check names) and a recommended next
+action. `Head SHA:` sits in the header, above the CI-log excerpt, so the Stop
+hook can trust it (see the dampening note below) — a copy planted inside the
+excerpt cannot be mistaken for it.
 
 For a **check failure**, the report appends a CI log excerpt. That excerpt is
 the single most dangerous input this tool handles, so it is treated as
@@ -245,11 +248,25 @@ PR body or comments**:
 
 Check status can't be verified locally (that needs a network call), so "checks
 pending" is approximated as "opened, not handed off, unwatched"; the block is
-safe because it fires at most once and only asks the session to launch the
-watcher, which then authoritatively determines check state. It respects
-`stop_hook_active` — a stop that is itself the continuation of a prior block is
-allowed straight through — so it can never loop, and it **fails open** on any
-uncertainty (unparseable input, unreadable transcript, no resolvable PR).
+safe because it fires **at most once per stop-chain** and only asks the session
+to launch the watcher, which then authoritatively determines check state. It
+respects `stop_hook_active` — a stop that is itself the continuation of a prior
+block is allowed straight through — so a single chain can never loop, and it
+**fails open** on any uncertainty (unparseable input, unreadable transcript, no
+resolvable PR).
+
+But a watcher wake-up starts a *new* stop-chain, so a PR that is red on a check
+this session **cannot** fix — inherited from the base branch, out-of-scope,
+external, or a misconfigured required check — would re-block on every relaunch:
+fix → push → relaunch silently assumes a fix exists in-session. To bound that,
+the hook **dampens**. It reads each `check_failure` report's signature — the
+failed-check set and the head commit (`Head SHA:`), both from the report's
+header region so a forged copy in a CI-log excerpt can't drive it — and once two
+reports carry the identical signature (a real fix would have moved the SHA), it
+infers no fix is coming and allows the stop, emitting a non-blocking
+`systemMessage` so the red PR stays visible. One block to try; no livelock; never
+a *silent* walk-away. This is the general fix: it covers the out-of-scope,
+external, and misconfigured cases that no base-branch inspection could detect.
 
 ### Why fail-open in the hook, fail-safe in the watcher
 

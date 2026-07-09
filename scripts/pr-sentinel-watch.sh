@@ -67,13 +67,15 @@ strip_ansi() {
 }
 
 # Read the PR scalars we care about as one tab-separated line, using gh's
-# built-in jq (`-q`) so no external jq is required. Prints "state\tmerge\tbase"
-# on success; returns non-zero on gh failure. NOTE: the --json field list is
-# intentionally limited to GitHub-controlled metadata — never body/comments.
+# built-in jq (`-q`) so no external jq is required. Prints
+# "state\tmerge\tbase\thead-sha" on success; returns non-zero on gh failure.
+# NOTE: the --json field list is intentionally limited to GitHub-controlled
+# metadata — never body/comments. headRefOid is the head commit SHA; the stop
+# hook uses it to tell a re-reported failure apart from a genuinely new one.
 gh_pr_state() {
 	gh pr view "$PR" \
-		--json state,mergeStateStatus,baseRefName \
-		-q '[.state, .mergeStateStatus, .baseRefName] | @tsv'
+		--json state,mergeStateStatus,baseRefName,headRefOid \
+		-q '[.state, .mergeStateStatus, .baseRefName, .headRefOid] | @tsv'
 }
 
 # Emit one "bucket\tname\tlink" line per check. gh's exit code is non-zero when
@@ -138,6 +140,7 @@ emit_check_failure() {
 	report_header check_failure
 	echo "State: OPEN"
 	echo "mergeStateStatus: ${MERGE}"
+	echo "Head SHA: ${HEAD_SHA}"
 	echo "Failed checks: ${failed}"
 	echo
 	echo "Next action: diagnose and fix the failing check(s) below in this local"
@@ -277,7 +280,7 @@ main() {
 		done
 		(( ok == 1 )) || emit_error "gh pr view failed"
 
-		IFS=$'\t' read -r STATE MERGE BASE <<<"$gh_state"
+		IFS=$'\t' read -r STATE MERGE BASE HEAD_SHA <<<"$gh_state"
 
 		# (d) closed / merged
 		if [[ "$STATE" != "OPEN" ]]; then emit_closed; fi
