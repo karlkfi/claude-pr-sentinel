@@ -5,7 +5,7 @@
   "plugins": [
     {
       "name": "pr-sentinel",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "description": "Wake your session on CI failures and merge conflicts via a background watcher — no foreground polling, no PR-comment ingestion.",
       "author": { "name": "Karl" },
       "source": {
