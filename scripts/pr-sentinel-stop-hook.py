@@ -26,8 +26,10 @@ transcript JSONL:
   * Was the PR handed off?  -> a `gh pr merge`/`close`, or a watcher
     `ready`/`closed` report. The report text only reaches the transcript when the
     session READS the watcher's own output file, so we trust a `ready`/`closed`
-    marker only when it appears in a read of THAT file (path learned from the
-    task-notification) — a fake marker in a CI-log excerpt cannot satisfy it.
+    marker only when it appears (a) in a read of THAT file (path learned from the
+    task-notification) AND (b) in the report's own header region, above the first
+    embedded CI-log excerpt. Both are required: a report embeds semi-untrusted CI
+    logs, so file-provenance alone would let a log line forge the marker.
 
 We cannot verify check status locally (that needs a network call), so "checks
 still pending" is approximated as "opened, not handed off, unwatched". The block
@@ -55,6 +57,13 @@ WATCH_ARG_RE = re.compile(r'pr-sentinel-watch\.sh["\']?\s+(\S+)')
 
 # A watcher terminal report that means "nothing left to babysit" for a PR.
 CONCLUDED_EVENT_RE = re.compile(r'PR-SENTINEL EVENT:\s*(?:ready|closed)\b')
+
+# The banner the watcher prints before every embedded CI-log excerpt. Everything
+# from the FIRST such banner onward is semi-untrusted log text (a compromised
+# dependency's test output can reach it), so a trusted `PR-SENTINEL EVENT:`
+# marker is only honoured in the report header region ABOVE it. The watcher
+# always writes its own header first, so the real marker always precedes this.
+LOG_EXCERPT_BANNER = '----- BEGIN CI LOG EXCERPT'
 
 # Fields pulled out of a `<task-notification>` completion record.
 NOTIF_TOOL_ID_RE = re.compile(r'<tool-use-id>\s*(toolu_[A-Za-z0-9]+)')
@@ -136,6 +145,15 @@ def _notification_text(obj):
         if isinstance(p, str) and '<task-notification>' in p:
             return p
     return ''
+
+
+def _report_header_region(text):
+    """The part of a watcher report ABOVE its first CI-log excerpt — the region
+    the watcher itself writes, before any semi-untrusted log text. Splitting at
+    the FIRST banner is what makes it forgery-proof: the real header always
+    precedes all excerpts, so a marker planted inside a log cannot climb above
+    one. If no banner is present the whole text is header."""
+    return text.split(LOG_EXCERPT_BANNER, 1)[0]
 
 
 def _read_file_path(obj):
@@ -227,7 +245,7 @@ def prs_needing_watcher(path):
                   for t in outfile_by_toolid if t in launch_pr_by_toolid}
     for fp, text in reads:
         pr = outfile_pr.get(fp)
-        if pr and CONCLUDED_EVENT_RE.search(text):
+        if pr and CONCLUDED_EVENT_RE.search(_report_header_region(text)):
             concluded.add(pr)
 
     # Live: a watcher launch whose task has not reported completion.
