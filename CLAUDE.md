@@ -59,7 +59,9 @@ response.
      and `.claude-plugin/plugin.json` keywords/description.
    - Update `docs/STATUS.md`: remove the completed Queue row.
 5. **Commit when done** — small, focused, Conventional Commits. Commit
-   `docs/STATUS.md` changes in their own isolated commit.
+   `docs/STATUS.md` changes in their own isolated commit; a pre-commit gate
+   lints them (one-time `git config core.hooksPath .githooks` per clone).
+   Backlog format and process: `docs/development/maintaining-backlog.md`.
 
 ## Code standards
 
