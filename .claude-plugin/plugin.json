@@ -1,6 +1,6 @@
 {
   "name": "pr-sentinel",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Wake your session on CI failures and merge conflicts — no foreground polling, no comment-channel injection.",
   "author": {
     "name": "Karl",
