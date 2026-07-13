@@ -242,9 +242,12 @@ PR body or comments**:
   notification — so a watcher that already exited (delivered its event) reads as
   *not live*, and a session that stopped mid-fix without relaunching is nudged
   too. This is a harness-generated record, so untrusted CI-log text can't forge
-  it; and the `ready`/`closed` "handed off" signal is trusted only when read
-  back from that watcher's own output file (path learned from the
-  notification), not from a free-text scan.
+  it; and the `ready`/`closed` "handed off" signal is read straight from that
+  watcher's own output file — the hook opens the file itself (its path is in the
+  completion notification), so the signal holds however the session surfaced the
+  output, whether with the `Read` tool, a Bash `cat`/`tail`, or not at all. The
+  marker is trusted only in the report's header region, above the first embedded
+  CI-log excerpt, so a forged line in the semi-untrusted log can't fake it.
 
 Check status can't be verified locally (that needs a network call), so "checks
 pending" is approximated as "opened, not handed off, unwatched"; the block is

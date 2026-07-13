@@ -7,11 +7,11 @@ session to launch the pr-sentinel background watcher before stopping. It respect
 `stop_hook_active` so it can never loop: a stop that is itself the continuation
 of a prior stop-hook block is allowed straight through.
 
-Everything it needs is in the ONE file the harness already hands it — the
-session's own transcript (`transcript_path`). It makes NO network call, reads no
+Its inputs are all LOCAL: the session's own transcript (`transcript_path`) and
+each watcher's own output file (its path learned from the harness's completion
+notification for that background task). It makes NO network call, reads no
 process table, writes nothing, and never touches the PR body or comment stream
-(the excluded injection channel — see docs/DESIGN.md). Signals used, all from the
-transcript JSONL:
+(the excluded injection channel — see docs/DESIGN.md). Signals used:
 
   * Which PR did the session open?  -> the harness's own `pr-link` records (a
     canonical `prNumber`/`prUrl` marker), plus a `gh pr create` correlated with
@@ -24,12 +24,14 @@ transcript JSONL:
     task-notification yet. This is a harness-generated record — untrusted CI-log
     text cannot forge it.
   * Was the PR handed off?  -> a `gh pr merge`/`close`, or a watcher
-    `ready`/`closed` report. The report text only reaches the transcript when the
-    session READS the watcher's own output file, so we trust a `ready`/`closed`
-    marker only when it appears (a) in a read of THAT file (path learned from the
-    task-notification) AND (b) in the report's own header region, above the first
-    embedded CI-log excerpt. Both are required: a report embeds semi-untrusted CI
-    logs, so file-provenance alone would let a log line forge the marker.
+    `ready`/`closed` report. For each completed watcher the hook reads that
+    watcher's OWN output file DIRECTLY (path from the task-notification), so the
+    signal does not depend on how — or whether — the session surfaced the output:
+    a Bash `cat`/`tail` of it counts, not only the Read tool (issue #14). A
+    `ready`/`closed` marker is trusted only in the report's header region, above
+    the first embedded CI-log excerpt: a report embeds semi-untrusted CI logs, so
+    a marker below that banner could be a forged log line. If the file is gone,
+    we fall back to a transcript Read of it.
 
 We cannot verify check status locally (that needs a network call), so "checks
 still pending" is approximated as "opened, not handed off, unwatched". The block
@@ -38,8 +40,8 @@ is safe under that approximation: it fires at most once per stop-chain
 launch the watcher, which then authoritatively determines check state (and exits
 `ready` at once if the PR is already green). A watcher wake-up starts a NEW
 stop-chain, so a genuinely-stuck PR could re-block on each relaunch; to avoid
-that livelock we DAMPEN — once the watcher has reported the identical
-`check_failure` (same failed checks, same head SHA) twice, the session has
+that livelock we DAMPEN — once two separate watcher runs have reported the
+identical `check_failure` (same failed checks, same head SHA), the session has
 pushed no fix and the stop is allowed with a non-blocking warning instead.
 
 Fail-open on ANY uncertainty: unparseable stdin, unreadable transcript, no
@@ -87,6 +89,13 @@ HEAD_SHA_RE = re.compile(r'Head SHA:[ \t]*(\S+)')
 # Fields pulled out of a `<task-notification>` completion record.
 NOTIF_TOOL_ID_RE = re.compile(r'<tool-use-id>\s*(toolu_[A-Za-z0-9]+)')
 NOTIF_OUTFILE_RE = re.compile(r'<output-file>\s*([^<\s]+)')
+
+# The hook reads only the HEADER of a watcher output file (the marker and the
+# check_failure signature both sit above the first CI-log excerpt), so a byte cap
+# bounds the read: it comfortably spans the fixed-template header plus the first
+# excerpt banner, and a truncated read only ever yields watcher-authored header
+# text, which is safe.
+_OUTFILE_READ_CAP = 65536
 
 # Cheap line pre-filter: only JSON-parse transcript lines that can carry a
 # signal we care about. Everything else (the bulk of a session) is skipped.
@@ -200,6 +209,21 @@ def _read_file_path(obj):
     return None
 
 
+def _outfile_text(path, fallback_by_path):
+    """The terminal report text of a watcher output file. Read DIRECTLY from the
+    file — the hook always learns the path from the completion notification, so
+    this does not depend on how (or whether) the session surfaced the output (a
+    Bash `cat`/`tail` counts, not only the Read tool; issue #14). Only the header
+    prefix is needed, so the read is byte-capped. If the file is gone, fall back
+    to a transcript Read of that path. Empty string if neither is available;
+    fail-open on any I/O error (treated as 'no terminal report')."""
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            return fh.read(_OUTFILE_READ_CAP)
+    except OSError:
+        return fallback_by_path.get(path, '')
+
+
 def _analyze(path):
     """Core transcript analysis, returning `(block, dampened)`:
 
@@ -282,31 +306,45 @@ def _analyze(path):
         for m in PR_URL_RE.finditer(result_text.get(tid, '')):
             created.add(m.group(1))
 
-    # Handed off: a watcher `ready`/`closed` report, trusted ONLY when read from
-    # that watcher's own output file (path from the completion notification).
+    # Map each watcher's output file to the PR it watches (path from the
+    # completion notification, PR from the launch's `pr-sentinel-watch.sh` arg).
     outfile_pr = {outfile_by_toolid[t]: launch_pr_by_toolid[t]
                   for t in outfile_by_toolid if t in launch_pr_by_toolid}
-    sig_counts = {}   # PR -> {check_failure signature -> times read}
+
+    # Fallback text for each watcher output file: any Read-tool read of it. Used
+    # only if the file itself is gone; the direct read below is authoritative.
+    read_text_by_outfile = {}
     for fp, text in reads:
-        pr = outfile_pr.get(fp)
-        if not pr:
+        if fp in outfile_pr:
+            read_text_by_outfile[fp] = \
+                read_text_by_outfile.get(fp, '') + '\n' + text
+
+    # Handed off / dampening: read each completed watcher's OWN output file
+    # DIRECTLY (issue #14 — no longer hostage to the session's read method), and
+    # judge only its header region so an embedded CI-log excerpt cannot forge the
+    # marker or the signature.
+    sig_outfiles = {}   # PR -> {check_failure signature -> set of output files}
+    for outfile, pr in outfile_pr.items():
+        text = _outfile_text(outfile, read_text_by_outfile)
+        if not text:
             continue
         if CONCLUDED_EVENT_RE.search(_report_header_region(text)):
             concluded.add(pr)
         sig = _check_failure_signature(text)
         if sig is not None:
-            per_pr = sig_counts.setdefault(pr, {})
-            per_pr[sig] = per_pr.get(sig, 0) + 1
+            sig_outfiles.setdefault(pr, {}).setdefault(sig, set()).add(outfile)
 
     # Live: a watcher launch whose task has not reported completion.
     live = {pr for tid, pr in launch_pr_by_toolid.items()
             if tid not in completed_toolids}
 
     block = created - concluded - live
-    # Dampen: an unresolved-and-unwatched PR whose identical check_failure has
-    # been read twice (same failed-set + SHA -> no fix pushed between them).
+    # Dampen: an unresolved-and-unwatched PR whose identical check_failure was
+    # reported by two separate watcher runs (two distinct output files, same
+    # failed-set + SHA -> no fix pushed between them).
     dampened = {pr for pr in block
-                if any(c >= 2 for c in sig_counts.get(pr, {}).values())}
+                if any(len(files) >= 2
+                       for files in sig_outfiles.get(pr, {}).values())}
     return block - dampened, dampened
 
 
