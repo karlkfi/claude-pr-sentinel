@@ -108,13 +108,17 @@ head commit); if two watcher reports carry the identical failure at the same
 commit, the hook infers no fix is coming and allows the stop with a warning
 rather than re-blocking forever. It never *silently* walks away from a red PR.
 
-Everything it decides comes from the one file the harness already hands it — the
-session's own transcript. It identifies the PR from the transcript (the harness's
-`pr-link` record and the session's own `gh pr create` output URL) and treats a
-watcher as live when its background-task launch has no completion notification
-yet — **no network call, no process table, and never the PR body or comments**
-(see [Security invariants](#security-invariants)). It respects `stop_hook_active`
-so it blocks once and then lets the stop proceed.
+Everything it decides comes from local files the harness already points it at —
+the session's own transcript, plus each watcher's own output file (its path is in
+the completion notification). It identifies the PR from the transcript (the
+harness's `pr-link` record and the session's own `gh pr create` output URL),
+treats a watcher as live when its background-task launch has no completion
+notification yet, and reads the watcher's output file directly to see whether the
+PR was handed off — so that signal holds whether the session surfaced the output
+with the `Read` tool or a Bash `cat`/`tail`. Throughout: **no network call, no
+process table, and never the PR body or comments** (see
+[Security invariants](#security-invariants)). It respects `stop_hook_active` so it
+blocks once and then lets the stop proceed.
 
 **The watcher** polls the PR and exits with exactly one event when attention is
 needed:
