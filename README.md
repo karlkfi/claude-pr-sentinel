@@ -24,6 +24,7 @@ comments, issue comments, or the PR body.
 
 - [What it does](#what-it-does)
 - [Install](#install)
+- [Updating](#updating)
 - [Migrating from Desktop auto-fix](#migrating-from-desktop-auto-fix)
 - [How it works](#how-it-works)
 - [Security invariants](#security-invariants)
@@ -165,8 +166,43 @@ After installing with either method:
   the watcher) on your PATH. Run `gh auth status` to confirm.
 - Restart Claude Code (or `/reload-plugins`) so the hook is registered.
 
+**Turn on auto-update while you're here** (recommended). This is a third-party
+git marketplace, so it does **not** refresh on its own — an install pins its
+version until you act ([Updating](#updating) explains the trap). Install time is
+the decision point, so add this to `~/.claude/settings.json` now (the file is
+shared across the CLI, IDE extensions, and Desktop):
+
+```json
+"extraKnownMarketplaces": {
+  "pr-sentinel": {
+    "source": { "source": "git", "url": "https://github.com/karlkfi/claude-pr-sentinel.git" },
+    "autoUpdate": true
+  }
+}
+```
+
 To verify, ask Claude to open a PR (or push a PR branch); after the command you
 should see an injected pr-sentinel nudge describing the watcher command to run.
+
+## Updating
+
+Claude Code auto-updates the **official Anthropic marketplaces only**.
+pr-sentinel installs from a **third-party git marketplace**, which never
+refreshes unless you act — so your install stays pinned to the version you first
+got, and behaviour fixes shipped here reach you only after you update. Pick one
+of the two remedies:
+
+- **Recommended — set-and-forget auto-update.** Add the `autoUpdate` snippet
+  from [Install](#install) to `~/.claude/settings.json`. Once it's there, Claude
+  Code keeps the marketplace current on its own, on every surface (the file is
+  shared, Desktop included).
+- **Manual, when you want it.**
+  - **Claude Code (CLI or IDE extension):** `/plugin marketplace update pr-sentinel`
+    then `/reload-plugins`.
+  - **Claude Desktop** — `/plugin` isn't available there. Use the CLI, which runs
+    headlessly and shares Desktop's plugin state: `claude plugin marketplace update`
+    then `claude plugin update pr-sentinel@pr-sentinel`, and restart the app to
+    apply.
 
 ## Migrating from Desktop auto-fix
 
