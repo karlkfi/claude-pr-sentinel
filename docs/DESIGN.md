@@ -275,11 +275,16 @@ external, and misconfigured cases that no base-branch inspection could detect.
 
 The hook **defers silently** (emits nothing) on any uncertainty — unparseable
 input, an unrecognised command, a disabled flag — so it can never break a
-session. The watcher **fails safe**: on a `gh` or network error it retries a
-bounded number of times, and if it still can't determine state it exits with an
-`error` event rather than hanging forever, handing the decision back to the
-session. Neither component ever silently swallows a real attention-needed
-event.
+session. The watcher **fails safe**, but distinguishes *permanent* from
+*transient* `gh` failures. A permanent failure — auth broken (`gh auth status`
+fails) or the PR unresolvable (a definitive "could not resolve") — exits with
+an `error` event at once, handing the decision back to the session. A transient
+failure (a network blip, a 5xx, rate limiting) is retried with backoff for a
+generous horizon (`PR_SENTINEL_GH_RETRY_HORIZON`, default 15 min) before giving
+up — a poll loop can afford to miss cycles, and a brief API hiccup must not fire
+a false `error` that wakes the session for nothing. The gap is logged to the
+task's stderr (never the event stdout that wakes the session). Neither component
+ever silently swallows a real attention-needed event.
 
 ## Design rationale in the issue tracker
 

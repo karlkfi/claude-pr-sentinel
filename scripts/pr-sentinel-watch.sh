@@ -37,7 +37,12 @@ BACKOFF_NUM="${PR_SENTINEL_BACKOFF_NUM:-3}"      # backoff multiplier numerator
 BACKOFF_DEN="${PR_SENTINEL_BACKOFF_DEN:-2}"      # backoff multiplier denominator
 TIMEOUT="${PR_SENTINEL_TIMEOUT:-3600}"           # overall watch budget, seconds
 LOG_MAX_BYTES="${PR_SENTINEL_LOG_MAX_BYTES:-8192}"  # CI log excerpt cap, bytes
-GH_RETRIES="${PR_SENTINEL_GH_RETRIES:-3}"        # gh failures tolerated per poll
+# Transient-failure retry horizon: a `gh` query that keeps failing (but with
+# auth healthy and the PR still resolvable) is retried with backoff for up to
+# this many seconds before giving up with an `error` event. A poll loop can
+# afford to miss cycles, so this is generous — a brief GitHub API hiccup must
+# not kill the watch and wake the session for nothing.
+GH_RETRY_HORIZON="${PR_SENTINEL_GH_RETRY_HORIZON:-900}"  # transient-retry horizon, seconds
 
 # Conflict/behind heal strategy the report recommends: rebase (default) or
 # merge. Normalise to lowercase (bash 3.2: use tr, not ${var,,}) and fail safe
@@ -52,6 +57,13 @@ HEAL=$(printf '%s' "${PR_SENTINEL_HEAL:-rebase}" | tr '[:upper:]' '[:lower:]')
 die() {
 	echo "pr-sentinel-watch: $*" >&2
 	exit 2
+}
+
+# Low-priority note to stderr only. Used for transient gh hiccups so the task
+# log shows the gap WITHOUT waking the session (only an exit wakes it, and only
+# stdout is the wake payload).
+warn() {
+	echo "pr-sentinel-watch: WARNING: $*" >&2
 }
 
 # Monotonic-ish seconds. `date +%s` is fine for a coarse budget.
@@ -76,6 +88,39 @@ gh_pr_state() {
 	gh pr view "$PR" \
 		--json state,mergeStateStatus,baseRefName,headRefOid \
 		-q '[.state, .mergeStateStatus, .baseRefName, .headRefOid] | @tsv'
+}
+
+# Fetch the PR scalars, classifying any failure as permanent or transient.
+# Sets `gh_state` and returns 0 on success. On a PERMANENT failure — a failing
+# `gh auth status`, or a definitive "PR/repo not resolvable" — it calls
+# emit_error (which exits). On a TRANSIENT failure (auth healthy, PR still
+# resolvable in principle: a network blip, a 5xx, rate limiting) it returns 1
+# so the caller can back off and retry. One `gh pr view` call on the hot path;
+# the extra `gh auth status` runs only when a query has already failed.
+gh_state_fetch() {
+	local out
+	# Merge stderr into the capture so a failure's diagnostics are classifiable.
+	# On success gh emits only the tsv to stdout (nothing to stderr). Keep the
+	# assignment in the `if` condition so `set -e` doesn't abort on gh failure.
+	if out=$(gh_pr_state 2>&1); then
+		gh_state="$out"
+		return 0
+	fi
+	# Auth is the clearest permanent signal: if the token is gone/expired, no
+	# amount of retrying helps — hand back so the human can re-auth.
+	if ! gh auth status >/dev/null 2>&1; then
+		emit_error "gh auth status is failing — re-authenticate with 'gh auth login'"
+	fi
+	# A definitive not-found (bad PR number, wrong repo) is also permanent.
+	case "$out" in
+		*"Could not resolve to a PullRequest"* \
+		| *"Could not resolve to a Repository"* \
+		| *"no pull requests found"* \
+		| *"No pull requests found"*)
+			emit_error "PR ${PR} is not resolvable — verify the PR id and repo" ;;
+	esac
+	# Anything else is treated as transient.
+	return 1
 }
 
 # Emit one "bucket\tname\tlink" line per check. gh's exit code is non-zero when
@@ -245,9 +290,10 @@ emit_error() {
 	report_header error
 	echo "Detail: $1"
 	echo
-	echo "Next action: pr-sentinel could not query GitHub for this PR (gh error"
-	echo "after ${GH_RETRIES} retries). Verify 'gh auth status' and the PR id,"
-	echo "then relaunch the watcher."
+	echo "Next action: pr-sentinel could not query GitHub for this PR. This is a"
+	echo "permanent failure (auth or an unresolvable PR) or transient failures that"
+	echo "persisted past the ${GH_RETRY_HORIZON}s retry horizon. Verify 'gh auth"
+	echo "status' and the PR id, then relaunch the watcher."
 	exit 0
 }
 
@@ -275,13 +321,24 @@ main() {
 
 	while :; do
 		# --- fetch PR state (GitHub-controlled metadata only) ---
-		local attempt=0 ok=0
-		while (( attempt < GH_RETRIES )); do
-			if gh_state=$(gh_pr_state 2>/dev/null); then ok=1; break; fi
-			attempt=$((attempt + 1))
-			sleep 1
-		done
-		(( ok == 1 )) || emit_error "gh pr view failed"
+		# gh_state_fetch exits immediately on a PERMANENT failure. A TRANSIENT
+		# failure returns 1; retry with backoff until the horizon elapses so a
+		# brief API hiccup can't kill the watch and wake the session.
+		if ! gh_state_fetch; then
+			# Back off from the base poll interval (not 1s — with integer
+			# division, 1*NUM/DEN truncates back to 1 and never grows).
+			local retry_deadline retry_sleep="$INTERVAL"
+			retry_deadline=$(( $(now) + GH_RETRY_HORIZON ))
+			while :; do
+				(( retry_sleep > MAX_INTERVAL )) && retry_sleep="$MAX_INTERVAL"
+				warn "gh query failed transiently; retrying in ${retry_sleep}s"
+				sleep "$retry_sleep"
+				if gh_state_fetch; then break; fi
+				(( $(now) >= retry_deadline )) \
+					&& emit_error "gh pr view kept failing for ${GH_RETRY_HORIZON}s (transient)"
+				retry_sleep=$(( retry_sleep * BACKOFF_NUM / BACKOFF_DEN ))
+			done
+		fi
 
 		IFS=$'\t' read -r STATE MERGE BASE HEAD_SHA <<<"$gh_state"
 

@@ -215,28 +215,105 @@ class WatcherCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("PR-SENTINEL EVENT: check_failure", out)
 
-    def test_error_event_on_gh_failure(self):
-        """gh pr view returning nothing (no fixture, stub prints empty) means
-        the TSV parse yields an empty STATE; but a hard gh failure is simulated
-        by a stub that exits non-zero. Here we point gh at a scenario with no
-        pr_view file AND force failure via env to hit the retry-exhausted path."""
-        # A gh that always fails: override PATH with a failing gh.
+    def _run_with_gh(self, gh_body, pr="123", env=None, timeout=20):
+        """Run the watcher against a bespoke gh stub script body."""
         scen = tempfile.mkdtemp(prefix="pr-sentinel-test-")
         bindir = os.path.join(scen, "bin")
         os.makedirs(bindir)
         gh = os.path.join(bindir, "gh")
         with open(gh, "w", encoding="utf-8") as f:
-            f.write("#!/usr/bin/env bash\nexit 1\n")
+            f.write(gh_body)
         os.chmod(gh, 0o755)
-        env = dict(os.environ)
-        env["PATH"] = bindir + os.pathsep + env["PATH"]
-        env["PR_SENTINEL_GH_RETRIES"] = "1"
+        run_env = dict(os.environ)
+        run_env["PATH"] = bindir + os.pathsep + run_env["PATH"]
+        run_env["GH_STUB_DIR"] = scen
+        run_env.setdefault("PR_SENTINEL_INTERVAL", "1")
+        run_env.setdefault("PR_SENTINEL_MAX_INTERVAL", "1")
+        run_env.setdefault("PR_SENTINEL_TIMEOUT", "30")
+        if env:
+            run_env.update(env)
         proc = subprocess.run(
-            ["bash", str(WATCHER), "123"],
-            capture_output=True, text=True, env=env, timeout=20, check=False,
+            ["bash", str(WATCHER), pr],
+            capture_output=True, text=True, env=run_env, timeout=timeout,
+            check=False,
         )
-        self.assertEqual(proc.returncode, 0)
-        self.assertIn("PR-SENTINEL EVENT: error", proc.stdout)
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def test_error_event_on_auth_failure(self):
+        """A gh that always fails, including `gh auth status`, is a PERMANENT
+        auth failure — hand back immediately with an `error` event."""
+        rc, out, err = self._run_with_gh(
+            "#!/usr/bin/env bash\nexit 1\n",
+            env={"PR_SENTINEL_GH_RETRY_HORIZON": "60"},
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: error", out)
+        self.assertIn("auth", out.lower())
+
+    def test_error_event_on_unresolvable_pr(self):
+        """`gh pr view` failing with 'Could not resolve to a PullRequest' while
+        auth is healthy is a PERMANENT not-found failure — exit immediately."""
+        gh = textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -u
+            case "${1:-}:${2:-}" in
+              auth:status) exit 0 ;;
+              pr:view) echo "GraphQL: Could not resolve to a PullRequest with the number 123." >&2; exit 1 ;;
+              *) exit 0 ;;
+            esac
+            """
+        )
+        rc, out, err = self._run_with_gh(gh, env={"PR_SENTINEL_GH_RETRY_HORIZON": "60"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: error", out)
+        self.assertIn("not resolvable", out)
+
+    def test_transient_failure_recovers_no_error(self):
+        """A few transient gh failures (auth healthy, PR resolvable) must NOT
+        wake the session: the watcher retries with backoff and continues once
+        gh recovers — here to a normal `closed` event."""
+        gh = textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -u
+            case "${1:-}:${2:-}" in
+              auth:status) exit 0 ;;
+              pr:view)
+                c="$GH_STUB_DIR/.c"; n=0; [[ -f "$c" ]] && n=$(cat "$c")
+                n=$((n + 1)); echo "$n" > "$c"
+                if (( n <= 2 )); then echo "HTTP 503: server error" >&2; exit 1; fi
+                printf 'MERGED\\tUNKNOWN\\tmain\\t\\n'; exit 0 ;;
+              *) exit 0 ;;
+            esac
+            """
+        )
+        rc, out, err = self._run_with_gh(gh, env={"PR_SENTINEL_GH_RETRY_HORIZON": "30"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: closed", out)
+        self.assertNotIn("EVENT: error", out)
+        # The transient gap is noted on stderr, not the (session-waking) stdout.
+        self.assertIn("WARNING", err)
+        self.assertIn("transiently", err)
+
+    def test_transient_failure_exhausts_horizon(self):
+        """Transient failures that never recover eventually give up with an
+        `error` event once the retry horizon elapses."""
+        gh = textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -u
+            case "${1:-}:${2:-}" in
+              auth:status) exit 0 ;;
+              pr:view) echo "HTTP 503: server error" >&2; exit 1 ;;
+              *) exit 0 ;;
+            esac
+            """
+        )
+        rc, out, err = self._run_with_gh(gh, env={"PR_SENTINEL_GH_RETRY_HORIZON": "2"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: error", out)
+        self.assertIn("transient", out)
 
     # -- input validation ----------------------------------------------------
 

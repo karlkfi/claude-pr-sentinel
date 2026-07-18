@@ -132,7 +132,7 @@ needed:
 | all checks green, no conflict | **ready** | hand back to a human for merge review — **never auto-merge** |
 | PR merged or closed | **closed** | done; stop watching |
 | watch budget elapsed | **timeout** | re-check and relaunch if still open |
-| `gh` unreachable after retries | **error** | check `gh auth status`, relaunch |
+| `gh` auth broken, PR unresolvable, or transient failures past the retry horizon | **error** | check `gh auth status`, relaunch |
 | checks still pending | *(keep polling, with backoff)* | — |
 
 Every event report starts with a stable `PR-SENTINEL EVENT: <type>` line, so
@@ -334,7 +334,7 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_MAX_INTERVAL` | `300` | backoff ceiling, seconds |
 | `PR_SENTINEL_TIMEOUT` | `3600` | overall watch budget before a `timeout` event, seconds |
 | `PR_SENTINEL_LOG_MAX_BYTES` | `8192` | CI log excerpt cap (tail kept), bytes |
-| `PR_SENTINEL_GH_RETRIES` | `3` | `gh` failures tolerated per poll before an `error` event |
+| `PR_SENTINEL_GH_RETRY_HORIZON` | `900` | how long (seconds) to retry *transient* `gh` failures with backoff before an `error` event; permanent failures (bad auth, unresolvable PR) exit at once |
 | `PR_SENTINEL_HEAL` | `rebase` | conflict/behind heal the report recommends: `rebase` or `merge` (see below); unrecognised values fall back to `rebase` |
 | `PR_SENTINEL_BACKOFF_NUM` / `_DEN` | `3` / `2` | backoff multiplier (interval × num ÷ den each idle poll) |
 | `PR_SENTINEL_AUTOALLOW` | (on) | auto-approve the plugin's own watcher launch so it isn't prompted by the base Bash permission; `0`/`false`/empty keeps the prompt (see below) |
@@ -416,8 +416,12 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
 - **`git push` without a PR URL** can't resolve the PR number locally (the hook
   makes no network call), so the nudge asks the session to resolve it. A PR
   created earlier and pushed to later still gets a (branch-scoped) nudge.
-- **The watcher needs an authenticated `gh`.** On `gh`/network failure it
-  retries, then exits with an `error` event rather than hanging.
+- **The watcher needs an authenticated `gh`.** It separates *permanent*
+  failures (broken auth, an unresolvable PR) — which exit with an `error` event
+  at once — from *transient* ones (a network blip, a 5xx, rate limiting), which
+  it retries with backoff for `PR_SENTINEL_GH_RETRY_HORIZON` seconds (default
+  15 min) before giving up. A brief GitHub API hiccup no longer wakes the
+  session; the gap is noted on the task's stderr, not the wake payload.
 - **ANSI stripping is best-effort.** It removes the common CSI escape family;
   exotic terminal sequences may survive. The size cap and the human merge gate
   remain.
