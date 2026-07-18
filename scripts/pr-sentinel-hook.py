@@ -128,12 +128,16 @@ def looks_failed(text):
     return any(sig in low for sig in FAILURE_SIGNALS)
 
 
-def build_context(action, pr_ref):
-    """The advisory nudge injected as additionalContext."""
+def build_context(action, pr_num):
+    """The advisory nudge injected as additionalContext. `pr_num` is the bare
+    PR number (no `#`) or None."""
     plugin_root = os.environ.get('CLAUDE_PLUGIN_ROOT', '')
     watcher = os.path.join(plugin_root, 'scripts', 'pr-sentinel-watch.sh') \
         if plugin_root else 'scripts/pr-sentinel-watch.sh'
-    target = pr_ref if pr_ref else '<the PR number for this branch>'
+    # The watcher accepts a bare number or a github.com PR URL, NOT `#N` — so
+    # the Command line interpolates the bare number, never a `#`-prefixed ref.
+    target = pr_num if pr_num else '<the PR number for this branch>'
+    pr_ref = f'#{pr_num}' if pr_num else None
     if action == 'pr_create':
         lead = f'You just opened pull request {pr_ref or "(number in the output above)"}.'
     else:
@@ -172,9 +176,9 @@ def main():
         return  # the command appears to have failed: defer
 
     m = PR_URL_RE.search(text)
-    pr_ref = f'#{m.group(1)}' if m else None
+    pr_num = m.group(1) if m else None
 
-    context = build_context(action, pr_ref)
+    context = build_context(action, pr_num)
     print(json.dumps({'hookSpecificOutput': {
         'hookEventName': 'PostToolUse',
         'additionalContext': context}}))

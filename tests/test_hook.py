@@ -90,8 +90,12 @@ class HookEndToEnd(unittest.TestCase):
         obj = json.loads(out)
         ctx = obj["hookSpecificOutput"]["additionalContext"]
         self.assertEqual(obj["hookSpecificOutput"]["hookEventName"], "PostToolUse")
-        self.assertIn("#42", ctx)
+        self.assertIn("#42", ctx)  # prose may reference the PR as #42
         self.assertIn("pr-sentinel-watch.sh", ctx)
+        # The Command line must interpolate the BARE number — the watcher
+        # rejects `#N`, so a `#`-prefixed arg would make a verbatim copy fail.
+        self.assertIn('pr-sentinel-watch.sh" 42', ctx)
+        self.assertNotIn('pr-sentinel-watch.sh" #42', ctx)
         self.assertIn("/opt/plugins/pr-sentinel", ctx)  # CLAUDE_PLUGIN_ROOT
         self.assertIn("background", ctx.lower())
         self.assertIn("Never auto-merge", ctx)

@@ -254,6 +254,16 @@ class WatcherCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("PR-SENTINEL EVENT: closed", out)
 
+    def test_accepts_hash_prefixed_number(self):
+        """`#N` is the universal human notation for a PR; a single leading `#`
+        is stripped so a pasted `#123` validates as the number 123."""
+        rc, out, _ = self.run_watcher(
+            {"pr_view": "MERGED\tUNKNOWN\tmain\n"},
+            pr="#123",
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: closed", out)
+
     # -- report sanitization -------------------------------------------------
 
     def test_ansi_stripped_and_capped(self):

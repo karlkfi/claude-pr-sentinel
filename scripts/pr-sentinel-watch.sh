@@ -258,6 +258,9 @@ emit_error() {
 main() {
 	[[ $# -eq 1 ]] || die "usage: pr-sentinel-watch.sh <pr-number-or-url>"
 	PR="$1"
+	# Tolerate the universal `#N` human notation for a PR by stripping a single
+	# leading `#`, so a pasted `#673` validates as the number 673.
+	PR="${PR#\#}"
 	# Validate the PR identifier before it reaches gh: a bare number or a
 	# github.com PR URL. Anything else is refused rather than passed through.
 	if [[ ! "$PR" =~ ^[0-9]+$ ]] \
