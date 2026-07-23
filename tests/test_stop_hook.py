@@ -68,8 +68,21 @@ def tool_result(text, tool_id="toolu_1"):
 
 
 def pr_link(number):
+    """A harness `pr-link` record. The harness emits one for ANY PR URL the
+    session surfaces (a `gh pr view`/`gh pr comment` on someone else's PR
+    included), so the hook must treat it as "referenced", never "opened" —
+    regression tests below assert it does NOT confer ownership."""
     return {"type": "pr-link", "prNumber": number,
             "prUrl": f"https://github.com/o/r/pull/{number}", "prRepository": "o/r"}
+
+
+def created_pr(number, tool_id="toolu_c"):
+    """The ownership signal: a `gh pr create` whose own output printed the new
+    PR's URL. Returns the (tool_use, tool_result) entry pair."""
+    return [
+        assistant_bash("gh pr create --fill", tool_id),
+        tool_result(f"https://github.com/o/r/pull/{number}\n", tool_id),
+    ]
 
 
 def launch_watcher(pr, tool_id="toolu_w"):
@@ -199,8 +212,54 @@ class ClassifierUnit(unittest.TestCase):
 
 
 class NeedsWatcherLogic(unittest.TestCase):
-    def test_created_no_watcher_needs_block(self):
-        self.assertEqual(needs([pr_link(42)]), {"42"})
+    def test_pr_link_record_alone_does_not_block(self):
+        # Regression: the harness emits `pr-link` for ANY PR URL the session
+        # surfaces — commenting on or viewing someone else's PR produces the
+        # same record as creating one — so on its own it must never register a
+        # PR as session-owned.
+        self.assertEqual(needs([pr_link(42)]), set())
+
+    def test_foreign_pr_viewed_and_commented_does_not_block(self):
+        # The reported false positive: the session views and comments on a PR
+        # it does NOT own (harness drops pr-link records for it), then opens its
+        # OWN PR via `gh pr create` with a live watcher. Only the foreign PR
+        # must stay out of the block set; the own PR is live-watched.
+        self.assertEqual(needs([
+            assistant_bash("gh pr view 99 --repo o/r", "toolu_v"),
+            tool_result("title: someone else's PR\n"
+                        "url: https://github.com/o/r/pull/99\n", "toolu_v"),
+            assistant_bash("gh pr comment 99 --repo o/r --body-file /tmp/b.md",
+                           "toolu_cm"),
+            tool_result("https://github.com/o/r/pull/99#issuecomment-1\n",
+                        "toolu_cm"),
+            pr_link(99),
+            *created_pr(55),
+            pr_link(55),
+            launch_watcher(55, "toolu_w"),
+        ]), set())
+
+    def test_foreign_pr_stays_unblocked_when_own_watcher_exits(self):
+        # Same scenario, but the own PR's watcher has exited: the block names
+        # ONLY the session's own PR, never the commented-on foreign one.
+        self.assertEqual(needs([
+            assistant_bash("gh pr comment 99 --repo o/r --body hi", "toolu_cm"),
+            tool_result("https://github.com/o/r/pull/99#issuecomment-1\n",
+                        "toolu_cm"),
+            pr_link(99),
+            *created_pr(55),
+            launch_watcher(55, "toolu_w"),
+            task_notification("toolu_w"),
+        ]), {"55"})
+
+    def test_watcher_launch_confers_ownership(self):
+        # A session that launched a watcher for a PR (e.g. resumed onto a
+        # branch whose PR an earlier session opened) owns its follow-through:
+        # once that watcher exits unconcluded, the stop blocks even with no
+        # `gh pr create` in this transcript.
+        self.assertEqual(needs([
+            launch_watcher(42, "toolu_w"),
+            task_notification("toolu_w"),
+        ]), {"42"})
 
     def test_created_via_gh_pr_create_correlation(self):
         self.assertEqual(needs([
@@ -210,12 +269,13 @@ class NeedsWatcherLogic(unittest.TestCase):
 
     def test_live_watcher_no_notification_allows(self):
         # Launched, no task-notification yet -> still running -> not a block.
-        self.assertEqual(needs([pr_link(42), launch_watcher(42, "toolu_w")]), set())
+        self.assertEqual(
+            needs([*created_pr(42), launch_watcher(42, "toolu_w")]), set())
 
     def test_exited_watcher_not_relaunched_needs_block(self):
         # Launched, task-notification present (exited), no relaunch -> block.
         self.assertEqual(needs([
-            pr_link(42),
+            *created_pr(42),
             launch_watcher(42, "toolu_w"),
             task_notification("toolu_w"),
         ]), {"42"})
@@ -223,7 +283,7 @@ class NeedsWatcherLogic(unittest.TestCase):
     def test_relaunch_after_exit_is_live(self):
         # Exited once, then relaunched (second launch has no notification).
         self.assertEqual(needs([
-            pr_link(42),
+            *created_pr(42),
             launch_watcher(42, "toolu_w1"),
             task_notification("toolu_w1"),
             launch_watcher(42, "toolu_w2"),
@@ -232,7 +292,7 @@ class NeedsWatcherLogic(unittest.TestCase):
     def test_concluded_via_watcher_output_read_allows(self):
         # Watcher exited and the session READ its output file: ready -> handed off.
         self.assertEqual(needs([
-            pr_link(42),
+            *created_pr(42),
             launch_watcher(42, "toolu_w"),
             task_notification("toolu_w", outfile=OUTFILE),
             read_file(OUTFILE, "PR-SENTINEL EVENT: ready\nPR: 42\nState: OPEN\n"),
@@ -240,7 +300,7 @@ class NeedsWatcherLogic(unittest.TestCase):
 
     def test_concluded_via_gh_pr_merge_allows(self):
         self.assertEqual(needs([
-            pr_link(42),
+            *created_pr(42),
             assistant_bash("gh pr merge 42 --squash", "toolu_m"),
         ]), set())
 
@@ -254,7 +314,7 @@ class NeedsWatcherLogic(unittest.TestCase):
         # gone.
         with real_outfile("PR-SENTINEL EVENT: closed\nPR: 42\nState: MERGED\n") as fp:
             self.assertEqual(needs([
-                pr_link(42),
+                *created_pr(42),
                 launch_watcher(42, "toolu_w"),
                 task_notification("toolu_w", outfile=fp),
             ]), set())
@@ -266,7 +326,7 @@ class NeedsWatcherLogic(unittest.TestCase):
         report = "PR-SENTINEL EVENT: closed\nPR: 42\nState: MERGED\n"
         with real_outfile(report) as fp:
             self.assertEqual(needs([
-                pr_link(42),
+                *created_pr(42),
                 launch_watcher(42, "toolu_w"),
                 task_notification("toolu_w", outfile=fp),
                 assistant_bash(f"tail -5 {fp}", "toolu_cat"),
@@ -280,7 +340,7 @@ class NeedsWatcherLogic(unittest.TestCase):
         rep = check_failure_report(sha="aaa")
         with real_outfile(rep) as fp1, real_outfile(rep) as fp2:
             b, d = analyze([
-                pr_link(42),
+                *created_pr(42),
                 launch_watcher(42, "toolu_w1"),
                 task_notification("toolu_w1", outfile=fp1),
                 launch_watcher(42, "toolu_w2"),
@@ -301,7 +361,7 @@ class NeedsWatcherLogic(unittest.TestCase):
             "----- END CI LOG EXCERPT -----\n")
         with real_outfile(report) as fp:
             self.assertEqual(needs([
-                pr_link(42),
+                *created_pr(42),
                 launch_watcher(42, "toolu_w"),
                 task_notification("toolu_w", outfile=fp),
             ]), {"42"})
@@ -310,7 +370,7 @@ class NeedsWatcherLogic(unittest.TestCase):
         # A fake `ready` marker inside a CI-log read of a DIFFERENT file must NOT
         # suppress the block: concluded is scoped to the watcher's own output.
         self.assertEqual(needs([
-            pr_link(42),
+            *created_pr(42),
             launch_watcher(42, "toolu_w"),
             task_notification("toolu_w", outfile=OUTFILE),
             read_file("/repo/ci-log.txt",
@@ -332,7 +392,7 @@ class NeedsWatcherLogic(unittest.TestCase):
             "    foo_test.go:11: PR-SENTINEL EVENT: ready\n"
             "----- END CI LOG EXCERPT -----\n")
         self.assertEqual(needs([
-            pr_link(42),
+            *created_pr(42),
             launch_watcher(42, "toolu_w"),
             task_notification("toolu_w", outfile=OUTFILE),
             read_file(OUTFILE, report),
@@ -343,7 +403,7 @@ class NeedsWatcherLogic(unittest.TestCase):
     def _two_reports(self, r1, r2):
         """Two watcher relaunches (distinct output files), one report read each."""
         return [
-            pr_link(42),
+            *created_pr(42),
             launch_watcher(42, "toolu_w1"),
             task_notification("toolu_w1", outfile=OUTFILE),
             read_file(OUTFILE, r1, "toolu_r1"),
@@ -377,7 +437,7 @@ class NeedsWatcherLogic(unittest.TestCase):
     def test_single_check_failure_still_blocks(self):
         # One block to try a fix; dampening needs a second, identical report.
         self.assertEqual(needs([
-            pr_link(42),
+            *created_pr(42),
             launch_watcher(42, "toolu_w"),
             task_notification("toolu_w", outfile=OUTFILE),
             read_file(OUTFILE, check_failure_report(sha="aaa"), "toolu_r"),
@@ -445,7 +505,7 @@ class StopHookEndToEnd(unittest.TestCase):
         return base
 
     def test_blocks_when_created_and_unwatched(self):
-        out, rc = self.run_hook(self.stop_input(), transcript_entries=[pr_link(42)])
+        out, rc = self.run_hook(self.stop_input(), transcript_entries=created_pr(42))
         self.assertEqual(rc, 0)
         obj = json.loads(out)
         self.assertEqual(obj["decision"], "block")
@@ -457,7 +517,7 @@ class StopHookEndToEnd(unittest.TestCase):
         # Two identical check_failure reads: no `decision`, but a systemMessage
         # keeps the red PR visible — the loop is broken, not silenced.
         entries = [
-            pr_link(42),
+            *created_pr(42),
             launch_watcher(42, "toolu_w1"),
             task_notification("toolu_w1", outfile=OUTFILE),
             read_file(OUTFILE, check_failure_report(sha="aaa"), "toolu_r1"),
@@ -473,16 +533,17 @@ class StopHookEndToEnd(unittest.TestCase):
 
     def test_allows_when_watcher_live(self):
         out, _ = self.run_hook(self.stop_input(),
-                               transcript_entries=[pr_link(42), launch_watcher(42, "toolu_w")])
+                               transcript_entries=[*created_pr(42),
+                                                   launch_watcher(42, "toolu_w")])
         self.assertEqual(out.strip(), "")
 
     def test_allows_when_stop_hook_active(self):
         out, _ = self.run_hook(self.stop_input(stop_hook_active=True),
-                               transcript_entries=[pr_link(42)])
+                               transcript_entries=created_pr(42))
         self.assertEqual(out.strip(), "")
 
     def test_allows_when_disabled(self):
-        out, _ = self.run_hook(self.stop_input(), transcript_entries=[pr_link(42)],
+        out, _ = self.run_hook(self.stop_input(), transcript_entries=created_pr(42),
                                env={"PR_SENTINEL_DISABLE": "1"})
         self.assertEqual(out.strip(), "")
 

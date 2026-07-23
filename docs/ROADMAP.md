@@ -14,8 +14,10 @@ PR it opened, no live watcher, and no local evidence the PR was handed off. This
 is what turns "advisory" into "reliable."
 
 The two open problems were solved from the session's own transcript alone: the
-PR is identified from the harness's `pr-link` record (and the session's own
-`gh pr create` output URL), and a watcher is treated as live only while its
+PR is identified from the session's own `gh pr create` output URL and its
+watcher launches (the harness's `pr-link` record turned out to mark any PR the
+session *references*, not ones it opened, so it is not used), and a watcher is
+treated as live only while its
 `run_in_background` launch has no matching `<task-notification>` completion
 record — no network call, no process table, and no PR body/comment ingestion.
 Check status can't be checked without a network call, so "checks pending" is

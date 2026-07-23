@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Stop hook: the backstop that makes the advisory PostToolUse nudge reliable.
 
-When a session ends its turn having opened a pull request it has not concluded,
+When a session ends its turn responsible for a pull request it has not concluded
+(one it opened with `gh pr create`, or one it launched a watcher for),
 with no live watcher tracking it, this hook BLOCKS the stop ONCE and tells the
 session to launch the pr-sentinel background watcher before stopping. It respects
 `stop_hook_active` so it can never loop: a stop that is itself the continuation
@@ -13,10 +14,14 @@ notification for that background task). It makes NO network call, reads no
 process table, writes nothing, and never touches the PR body or comment stream
 (the excluded injection channel — see docs/DESIGN.md). Signals used:
 
-  * Which PR did the session open?  -> the harness's own `pr-link` records (a
-    canonical `prNumber`/`prUrl` marker), plus a `gh pr create` correlated with
-    the PR URL that command printed. Both are GitHub-controlled metadata the
-    session already surfaced.
+  * Which PR is this session responsible for?  -> a `gh pr create` correlated
+    with the PR URL that command printed, plus any PR the session launched a
+    watcher for (a session that babysits a PR owns its follow-through, e.g. one
+    resumed onto a branch whose PR an earlier session opened). The harness's
+    `pr-link` records are deliberately NOT used: the harness emits one for ANY
+    PR URL the session surfaces — a `gh pr view`/`gh pr comment` on someone
+    else's PR produces the same record as a create — so it marks "referenced",
+    not "opened", and treating it as ownership caused false-positive blocks.
   * Is a watcher still running?  -> a `run_in_background` launch of
     `pr-sentinel-watch.sh <PR>` records a `tool_use` id; when that background
     task exits, the harness records a `<task-notification>` carrying the same
@@ -34,7 +39,7 @@ process table, writes nothing, and never touches the PR body or comment stream
     we fall back to a transcript Read of it.
 
 We cannot verify check status locally (that needs a network call), so "checks
-still pending" is approximated as "opened, not handed off, unwatched". The block
+still pending" is approximated as "owned, not handed off, unwatched". The block
 is safe under that approximation: it fires at most once per stop-chain
 (`stop_hook_active` lets the continuation through) and only asks the session to
 launch the watcher, which then authoritatively determines check state (and exits
@@ -99,7 +104,7 @@ _OUTFILE_READ_CAP = 65536
 
 # Cheap line pre-filter: only JSON-parse transcript lines that can carry a
 # signal we care about. Everything else (the bulk of a session) is skipped.
-_NEEDLES = ('pr-link', 'pr-sentinel-watch.sh', 'PR-SENTINEL EVENT',
+_NEEDLES = ('pr-sentinel-watch.sh', 'PR-SENTINEL EVENT',
             'task-notification', 'pr create', 'pr merge', 'pr close', '/pull/')
 
 
@@ -227,9 +232,10 @@ def _outfile_text(path, fallback_by_path):
 def _analyze(path):
     """Core transcript analysis, returning `(block, dampened)`:
 
-      * block    — PR numbers the session opened that are unconcluded AND have no
-                   live watcher AND are not dampened: the stop is blocked over
-                   these.
+      * block    — PR numbers the session is responsible for (opened via
+                   `gh pr create`, or babysat via a watcher launch) that are
+                   unconcluded AND have no live watcher AND are not dampened:
+                   the stop is blocked over these.
       * dampened — PRs that WOULD block, but whose watcher has now reported the
                    identical `check_failure` (same failed-set + head SHA) on two
                    separate reads. The session pushed no fix between them, so the
@@ -254,12 +260,6 @@ def _analyze(path):
                 try:
                     obj = json.loads(raw)
                 except ValueError:
-                    continue
-
-                if obj.get('type') == 'pr-link':
-                    num = pr_number(obj.get('prNumber', ''))
-                    if num:
-                        created.add(num)
                     continue
 
                 notif = _notification_text(obj)
@@ -338,7 +338,14 @@ def _analyze(path):
     live = {pr for tid, pr in launch_pr_by_toolid.items()
             if tid not in completed_toolids}
 
-    block = created - concluded - live
+    # The session's own PRs: ones it created, plus ones it launched a watcher
+    # for (babysitting a PR is taking responsibility for it — this covers a
+    # session resumed onto a branch whose PR an earlier session opened). A PR
+    # merely referenced — `gh pr view`/`gh pr comment` on someone else's PR —
+    # is in neither set and never blocks.
+    owned = created | set(launch_pr_by_toolid.values())
+
+    block = owned - concluded - live
     # Dampen: an unresolved-and-unwatched PR whose identical check_failure was
     # reported by two separate watcher runs (two distinct output files, same
     # failed-set + SHA -> no fix pushed between them).
@@ -349,7 +356,7 @@ def _analyze(path):
 
 
 def prs_needing_watcher(path):
-    """The set of PR numbers a stop should be blocked over (opened, unconcluded,
+    """The set of PR numbers a stop should be blocked over (owned, unconcluded,
     unwatched, not dampened). Fail-open: empty set on any I/O trouble."""
     return _analyze(path)[0]
 
@@ -368,8 +375,8 @@ def build_reason(prs):
         else 'pull requests ' + ', '.join('#' + p for p in prs)
     commands = '\n'.join(watcher_command(p) for p in prs)
     return (
-        f'pr-sentinel: you are ending your turn with an open {label} you opened '
-        f'this session, but no watcher is tracking it and CI may still be '
+        f'pr-sentinel: you are ending your turn with an open {label} this '
+        f'session opened or was watching, but no watcher is tracking it and CI may still be '
         f'running. Launch the PR Sentinel watcher as a BACKGROUND task '
         f'(run_in_background) before you stop, so a CI failure or merge conflict '
         f'wakes this session — do NOT foreground-poll with `gh pr checks '
