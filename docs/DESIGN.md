@@ -232,9 +232,14 @@ It solves its two sub-problems **without a network call and without reading the
 PR body or comments**:
 
 - **Identify the session's own PR** by parsing the local transcript JSONL — the
-  harness's own `pr-link` record (a canonical `prNumber`/`prUrl` marker) and, as
-  a fallback, the session's own `gh pr create` correlated with the PR URL `gh`
-  printed. Both are GitHub-controlled metadata the session already surfaced.
+  session's own `gh pr create` correlated with the PR URL `gh` printed, plus any
+  PR the session launched a watcher for (babysitting a PR is taking
+  responsibility for it, which covers a session resumed onto a branch whose PR
+  an earlier session opened). The harness's `pr-link` record is deliberately
+  **not** used as an ownership signal: the harness emits one for *any* PR URL
+  the session surfaces, so a `gh pr view`/`gh pr comment` on someone else's PR
+  produces the same record as a create — treating it as "opened this session"
+  caused false-positive blocks over PRs the session had merely commented on.
 - **Detect a live watcher** from the same transcript: a `run_in_background`
   launch of `pr-sentinel-watch.sh <PR>` records a `tool_use` id, and when that
   background task exits the harness records a `<task-notification>` carrying the

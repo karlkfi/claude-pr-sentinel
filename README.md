@@ -93,11 +93,11 @@ session to launch the watcher before stopping:
 
 | Session state at end of turn (Stop) | Hook action |
 | --- | --- |
-| opened a PR this session, **no** live watcher, PR not handed off | **block once** — launch the watcher for `#N` |
+| opened a PR this session (or watched one), **no** live watcher, PR not handed off | **block once** — launch the watcher for `#N` |
 | the watcher has reported the **same** `check_failure` twice (same failed checks, same head commit) | **allow + warn** — the failure isn't changing, so stop nagging; a non-blocking notice keeps the red PR visible |
 | a launched watcher hasn't reported completion yet (still running) | silent (already covered) |
 | PR handed off (watcher `ready`/`closed`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
-| no PR opened this session | silent |
+| no PR opened or watched this session | silent (a PR merely viewed or commented on is not yours) |
 | `stop_hook_active` already set (a prior block) | silent — **never loops** |
 | unreadable transcript / any uncertainty | silent (fail-open) |
 | `PR_SENTINEL_DISABLE=1` set | silent (disabled) |
@@ -111,8 +111,12 @@ rather than re-blocking forever. It never *silently* walks away from a red PR.
 
 Everything it decides comes from local files the harness already points it at —
 the session's own transcript, plus each watcher's own output file (its path is in
-the completion notification). It identifies the PR from the transcript (the
-harness's `pr-link` record and the session's own `gh pr create` output URL),
+the completion notification). It identifies the session's own PRs from the
+transcript — the session's `gh pr create` correlated with the PR URL that
+command printed, plus any PR the session launched a watcher for. (The harness's
+`pr-link` records are deliberately ignored: the harness emits one for *any* PR
+URL the session surfaces, so a `gh pr view` or `gh pr comment` on someone else's
+PR would otherwise read as "opened this session".) It
 treats a watcher as live when its background-task launch has no completion
 notification yet, and reads the watcher's output file directly to see whether the
 PR was handed off — so that signal holds whether the session surfaced the output
