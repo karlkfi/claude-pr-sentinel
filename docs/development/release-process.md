@@ -21,6 +21,25 @@ bumping:
 grep -rn '"version"' .claude-plugin/
 ```
 
+## Run the release in an interactive permission mode
+
+Steps 4 and 5 are the only place this repo touches `main` directly, and
+[branch-guard](https://github.com/karlkfi/claude-branch-guard) classifies both
+the commit and the push as `ask`. In a **non-interactive** permission mode
+(`auto`, `dontAsk`, `bypassPermissions`) branch-guard converts that `ask` into a
+hard **deny** so the guard fails safe with no human at the prompt — no dialog
+reaches you, and approving in chat cannot unblock it. The release stalls with
+the version bump committed but unpushed.
+
+Switch to an interactive mode — **Accepts edits** (`acceptEdits`) or the default
+— before step 4, and approve the two prompts.
+
+Do **not** reach for `BRANCH_GUARD_PUSH_POLICY` to get around this. Its
+protected-target check runs before the policy branch, so `strict` and
+`protected` both ask on a `main` target; only `off` gets through, and that
+disables push guarding for the whole session. One prompt per release is the
+cheaper trade.
+
 ## Steps
 
 1. **Start from a fresh `main`.** Releases must include everything merged:
