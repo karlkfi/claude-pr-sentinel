@@ -16,6 +16,14 @@
 #   timeout        the overall watch budget elapsed with no other event
 #   error          gh could not be queried after retries (fail-safe hand-back)
 #
+# Non-exiting notice (PR_SENTINEL_WATCH_UNTIL=closed only):
+#   ready_watching  the PR is green, reported ONCE, and the watch continues so a
+#                   sibling merge that later dirties it still wakes the session.
+#                   Deliberately a DISTINCT name from `ready`: `ready` means
+#                   "handed off, stop watching" to the Stop hook, and this does
+#                   not. Re-reporting `ready` on a still-green PR would exit
+#                   immediately on every relaunch — a spin loop, not a watch.
+#
 # SECURITY: this script queries ONLY GitHub-controlled check metadata and
 # mergeable state. It never requests or parses the PR body, PR review
 # comments, or issue comments — those are human/attacker-writable and are the
@@ -49,6 +57,17 @@ GH_RETRY_HORIZON="${PR_SENTINEL_GH_RETRY_HORIZON:-900}"  # transient-retry horiz
 # to rebase on any unrecognised value.
 HEAL=$(printf '%s' "${PR_SENTINEL_HEAL:-rebase}" | tr '[:upper:]' '[:lower:]')
 [[ "$HEAL" == "merge" ]] || HEAL="rebase"
+
+# Stopping condition: `ready` (default — exit when the PR goes green, handing it
+# to a human) or `closed` (report green once and KEEP polling, so a sibling PR
+# merging afterwards still wakes the session). Same normalise-and-fail-safe
+# shape as HEAL: any unrecognised value falls back to the default.
+WATCH_UNTIL=$(printf '%s' "${PR_SENTINEL_WATCH_UNTIL:-ready}" | tr '[:upper:]' '[:lower:]')
+[[ "$WATCH_UNTIL" == "closed" ]] || WATCH_UNTIL="ready"
+
+# Set to 1 once a `ready_watching` notice has been emitted, so it is reported
+# exactly once per run (WATCH_UNTIL=closed only).
+READY_REPORTED=0
 
 # --------------------------------------------------------------------------
 # Helpers
@@ -266,6 +285,25 @@ emit_ready() {
 	exit 0
 }
 
+# The non-terminal counterpart of emit_ready, used only when
+# PR_SENTINEL_WATCH_UNTIL=closed. It does NOT exit: the PR is green but still
+# open, which is exactly the window in which a sibling PR merging turns it
+# DIRTY, so the watch continues. It is emitted at most once per run — a green
+# PR stays green across polls, and re-reporting would just be noise.
+notice_ready_watching() {
+	report_header ready_watching
+	echo "State: OPEN"
+	echo "mergeStateStatus: ${MERGE}"
+	echo
+	echo "All checks are green and the PR has no merge conflict. Hand it back to a"
+	echo "human for merge review; do NOT auto-merge."
+	echo
+	echo "This is a NOTICE, not a wake-up: PR_SENTINEL_WATCH_UNTIL=closed, so the"
+	echo "watcher keeps polling and will exit (waking this session) only if the PR"
+	echo "later needs attention — e.g. a sibling PR merges and conflicts with it —"
+	echo "or the PR is merged/closed. Nothing to do right now."
+}
+
 emit_closed() {
 	local lower
 	lower=$(printf '%s' "$STATE" | tr '[:upper:]' '[:lower:]')
@@ -282,6 +320,10 @@ emit_timeout() {
 	echo "mergeStateStatus: ${MERGE:-UNKNOWN}"
 	echo
 	echo "The watch budget (${TIMEOUT}s) elapsed without a terminal event."
+	if (( READY_REPORTED == 1 )); then
+		echo "The PR was green when last polled (see the ready_watching notice above);"
+		echo "it is waiting on human merge review."
+	fi
 	echo "Next action: check the PR status and relaunch the watcher if still open."
 	exit 0
 }
@@ -381,7 +423,18 @@ main() {
 		# the race window right after `gh pr create`, before CI registers.
 		if (( pending_count == 0 && fail_count == 0 )); then
 			if (( pass_count > 0 )) || [[ "$MERGE" == "CLEAN" ]]; then
-				emit_ready
+				if [[ "$WATCH_UNTIL" == "closed" ]]; then
+					# Report green once, then fall through and keep polling: the
+					# DIRTY/BEHIND checks at the top of the loop are what a
+					# sibling merge trips. Exiting here instead would re-exit
+					# immediately on every relaunch (a spin loop, not a watch).
+					if (( READY_REPORTED == 0 )); then
+						notice_ready_watching
+						READY_REPORTED=1
+					fi
+				else
+					emit_ready
+				fi
 			fi
 		fi
 

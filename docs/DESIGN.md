@@ -75,6 +75,9 @@ task's stdout to the session as the wake payload.
    `CONFLICTING`/`BEHIND`, (c) all checks are green and the PR is mergeable, or
    (d) the PR is closed/merged. On exit it prints a structured, single-event
    report (see [Report format](#report-format-and-the-data-not-instructions-frame)).
+   `PR_SENTINEL_WATCH_UNTIL=closed` turns (c) into a non-terminal notice so the
+   watch continues past green — see [Why `ready` ends the watch by
+   default](#why-ready-ends-the-watch-by-default-and-what-closed-mode-changes).
 
 2. **PostToolUse hook on `Bash`** — `scripts/pr-sentinel-hook.py`. After a
    `gh pr create` or a branch `git push` that looks successful, it injects
@@ -209,6 +212,42 @@ branch-guard governs; `--force-with-lease` is the bounded form it permits on a
 `claude/` branch. Teams that can't force-push, or want to preserve review
 anchoring, set `PR_SENTINEL_HEAL=merge`.
 
+### Why `ready` ends the watch by default, and what `closed` mode changes
+
+The watcher exits on `ready` because green normally *is* the handoff: the PR
+goes to human merge review and there is nothing left to babysit. That holds for
+one PR at a time. It stops holding under **concurrent PRs** — a batch of
+sibling PRs lands minutes apart, and each merge can turn the others
+`CONFLICTING` while they sit in review. The default watch has already ended by
+then, so nothing wakes.
+
+`PR_SENTINEL_WATCH_UNTIL=closed` is the opt-in stopping condition for that case:
+the watcher reports green **once**, as a non-terminal `ready_watching` notice,
+and keeps polling. It is a stopping condition, not new capability — the loop
+already reads `mergeStateStatus` every cycle, so no new data source and no
+change to the trust boundary (still no merge, still no comments, fixes still run
+in the visible session). The rejected shape is a mode that *exits* on a
+still-green PR and expects a relaunch: the relaunched watcher re-evaluates
+immediately, sees the same green state, and exits again with no sleep anywhere
+in the cycle — a spin loop, not a watch. Reporting green once and continuing is
+what avoids it.
+
+The notice is a **distinct event name**, not a second `ready`, and that is what
+keeps the Stop hook honest. The hook's quiet condition reads `ready`/`closed`
+out of the watcher's own output file as "handed off, stop nagging". In `closed`
+mode green is *not* a handoff — the PR is still open, and if that watcher later
+exits without a terminal event (budget elapsed, killed, or woken by a conflict
+the session then fails to re-watch), the PR is open **and** unwatched and the
+backstop must still fire. A shared `ready` marker would have gone permanently
+quiet there, trading a coverage gap for the Stop-hook livelock class fixed in
+#9/#14. So `CONCLUDED_EVENT_RE` matches the terminal markers only, and rejects
+any word-or-dash continuation of them.
+
+The cost of `closed` is that green no longer wakes the session, so the session
+cannot announce "ready for review" at the moment it happens, and a watch that
+spans human review time usually needs a larger `PR_SENTINEL_TIMEOUT`. That is
+why `ready` stays the default: the single-PR user never hits the gap.
+
 ### Why the watcher uses `gh` but the hook does not
 
 The watcher's whole function is to observe remote GitHub state, so it must talk
@@ -252,7 +291,9 @@ PR body or comments**:
   completion notification), so the signal holds however the session surfaced the
   output, whether with the `Read` tool, a Bash `cat`/`tail`, or not at all. The
   marker is trusted only in the report's header region, above the first embedded
-  CI-log excerpt, so a forged line in the semi-untrusted log can't fake it.
+  CI-log excerpt, so a forged line in the semi-untrusted log can't fake it — and
+  only the *terminal* markers count, never the `ready_watching` notice of a
+  `PR_SENTINEL_WATCH_UNTIL=closed` watch (see [above](#why-ready-ends-the-watch-by-default-and-what-closed-mode-changes)).
 
 Check status can't be verified locally (that needs a network call), so "checks
 pending" is approximated as "opened, not handed off, unwatched"; the block is

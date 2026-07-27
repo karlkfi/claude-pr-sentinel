@@ -28,8 +28,12 @@ process table, writes nothing, and never touches the PR body or comment stream
     `<tool-use-id>` and a `<status>`. A watcher is LIVE iff its launch id has no
     task-notification yet. This is a harness-generated record — untrusted CI-log
     text cannot forge it.
-  * Was the PR handed off?  -> a `gh pr merge`/`close`, or a watcher
-    `ready`/`closed` report. For each completed watcher the hook reads that
+  * Was the PR handed off?  -> a `gh pr merge`/`close`, or a watcher terminal
+    `ready`/`closed` report (NOT the non-terminal `ready_watching` notice a
+    `PR_SENTINEL_WATCH_UNTIL=closed` watcher emits on a still-open green PR —
+    that watcher keeps polling and may yet exit needing a relaunch, so treating
+    it as a handoff would reopen the coverage gap the mode exists to close).
+    For each completed watcher the hook reads that
     watcher's OWN output file DIRECTLY (path from the task-notification), so the
     signal does not depend on how — or whether — the session surfaced the output:
     a Bash `cat`/`tail` of it counts, not only the Read tool (issue #14). A
@@ -67,8 +71,14 @@ PR_URL_RE = re.compile(r'https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)')
 # A watcher launch inside a Bash command: `... pr-sentinel-watch.sh 42`.
 WATCH_ARG_RE = re.compile(r'pr-sentinel-watch\.sh["\']?\s+(\S+)')
 
-# A watcher terminal report that means "nothing left to babysit" for a PR.
-CONCLUDED_EVENT_RE = re.compile(r'PR-SENTINEL EVENT:\s*(?:ready|closed)\b')
+# A watcher TERMINAL report that means "nothing left to babysit" for a PR. The
+# trailing guard is load-bearing: under `PR_SENTINEL_WATCH_UNTIL=closed` the
+# watcher emits a non-terminal `ready_watching` NOTICE on a green PR and keeps
+# polling, and that must NOT read as a handoff — the PR is still open, still
+# owned, and the watcher may yet exit needing a relaunch. Rejecting any
+# word-or-dash continuation keeps a future `ready_*`/`closed_*` event from
+# silently inheriting "concluded" too.
+CONCLUDED_EVENT_RE = re.compile(r'PR-SENTINEL EVENT:\s*(?:ready|closed)(?![\w-])')
 
 # The banner the watcher prints before every embedded CI-log excerpt. Everything
 # from the FIRST such banner onward is semi-untrusted log text (a compromised

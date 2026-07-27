@@ -96,7 +96,8 @@ session to launch the watcher before stopping:
 | opened a PR this session (or watched one), **no** live watcher, PR not handed off | **block once** — launch the watcher for `#N` |
 | the watcher has reported the **same** `check_failure` twice (same failed checks, same head commit) | **allow + warn** — the failure isn't changing, so stop nagging; a non-blocking notice keeps the red PR visible |
 | a launched watcher hasn't reported completion yet (still running) | silent (already covered) |
-| PR handed off (watcher `ready`/`closed`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
+| PR handed off (watcher **terminal** `ready`/`closed`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
+| the watcher's output ends on a `ready_watching` **notice** (a `PR_SENTINEL_WATCH_UNTIL=closed` watch that exited without a terminal event) | **block once** — green isn't a handoff in that mode; the PR is still open and unwatched |
 | no PR opened or watched this session | silent (a PR merely viewed or commented on is not yours) |
 | `stop_hook_active` already set (a prior block) | silent — **never loops** |
 | unreadable transcript / any uncertainty | silent (fail-open) |
@@ -134,6 +135,7 @@ needed:
 | `mergeStateStatus == DIRTY` | **conflict** | rebase onto `<base>` (default), resolve, `git push --force-with-lease`, relaunch — or merge (`PR_SENTINEL_HEAL=merge`) |
 | `mergeStateStatus == BEHIND` | **behind** | rebase onto `<base>` (default) and force-push with lease, relaunch — or merge to fast-forward (`PR_SENTINEL_HEAL=merge`) |
 | all checks green, no conflict | **ready** | hand back to a human for merge review — **never auto-merge** |
+| all checks green, no conflict, **and** `PR_SENTINEL_WATCH_UNTIL=closed` | *(notice: **ready_watching**, keep polling)* | nothing — the watch continues past green (see [Configuration](#configuration)) |
 | PR merged or closed | **closed** | done; stop watching |
 | watch budget elapsed | **timeout** | re-check and relaunch if still open |
 | `gh` auth broken, PR unresolvable, or transient failures past the retry horizon | **error** | check `gh auth status`, relaunch |
@@ -340,6 +342,7 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_LOG_MAX_BYTES` | `8192` | CI log excerpt cap (tail kept), bytes |
 | `PR_SENTINEL_GH_RETRY_HORIZON` | `900` | how long (seconds) to retry *transient* `gh` failures with backoff before an `error` event; permanent failures (bad auth, unresolvable PR) exit at once |
 | `PR_SENTINEL_HEAL` | `rebase` | conflict/behind heal the report recommends: `rebase` or `merge` (see below); unrecognised values fall back to `rebase` |
+| `PR_SENTINEL_WATCH_UNTIL` | `ready` | stopping condition: `ready` ends the watch when the PR goes green; `closed` keeps watching past green so a *later* conflict still wakes you (see below); unrecognised values fall back to `ready` |
 | `PR_SENTINEL_BACKOFF_NUM` / `_DEN` | `3` / `2` | backoff multiplier (interval × num ÷ den each idle poll) |
 | `PR_SENTINEL_AUTOALLOW` | (on) | auto-approve the plugin's own watcher launch so it isn't prompted by the base Bash permission; `0`/`false`/empty keeps the prompt (see below) |
 | `PR_SENTINEL_DISABLE` | (unset) | `1` disables the PostToolUse nudge, the Stop backstop, and the watcher-launch auto-allow |
@@ -379,6 +382,26 @@ only changes the recommended commands in the wake report.
   non-destructive fast-forward, and it preserves CI results and review comments
   anchored to the existing commit SHAs. Cost: sync-merge commits clutter the
   branch history.
+
+`PR_SENTINEL_WATCH_UNTIL` decides when the watch is over. It exists for
+**concurrent PRs**: with several open at once, a green PR sitting in human merge
+review is exactly what a *sibling* PR merging turns `CONFLICTING`.
+
+- **`ready` (default)** — the watch ends when the PR goes green. Right for a
+  single PR at a time: green means handed off, and nothing else is in flight to
+  invalidate it.
+- **`closed`** — on green the watcher prints a **`ready_watching` notice** and
+  **keeps polling**. It does not exit, so it does not wake the session; it wakes
+  it later only if the PR needs attention again (a conflict, a `BEHIND` branch,
+  a newly failing check) or is merged/closed. Green is reported **once** — a
+  mode that exited on a still-green PR would re-exit instantly on every
+  relaunch, which is a spin loop, not a watch.
+
+Two trade-offs come with `closed`. The session is **not woken when the PR turns
+green**, so it can't announce "ready for review" the moment it happens — the
+notice lands in the watcher's task output instead. And a watch that now spans
+human review time usually wants a larger `PR_SENTINEL_TIMEOUT` than the 1-hour
+default, or it will wake with a `timeout` event and need a relaunch.
 
 ## Agent guidance
 

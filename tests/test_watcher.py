@@ -182,6 +182,87 @@ class WatcherCase(unittest.TestCase):
         self.assertIn("PR-SENTINEL EVENT: ready", out)
         self.assertIn("Do NOT", out)
 
+    # -- PR_SENTINEL_WATCH_UNTIL=closed (watch past green) -------------------
+
+    def _green(self):
+        return {
+            "pr_view": "OPEN\tCLEAN\tmain\n",
+            "pr_checks": "pass\tbuild\thttps://github.com/o/r/actions/runs/11/job/1\n",
+        }
+
+    def test_watch_until_closed_reports_green_without_exiting(self):
+        """A green PR must NOT end the watch in `closed` mode: it emits the
+        non-terminal ready_watching notice and keeps polling until the budget
+        elapses. The terminal event is `timeout`, never `ready`."""
+        rc, out, _ = self.run_watcher(
+            self._green(),
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed", "PR_SENTINEL_TIMEOUT": "3"},
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: ready_watching", out)
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+        # The terminal `ready` (which means "handed off" to the Stop hook) must
+        # never appear in this mode.
+        self.assertNotIn("PR-SENTINEL EVENT: ready\n", out)
+        # The timeout report names the green state so the relaunch isn't blind.
+        self.assertIn("green when last polled", out)
+
+    def test_watch_until_closed_reports_green_only_once(self):
+        """The notice fires once per run, not on every poll of a still-green PR
+        (re-reporting is the spin-loop shape this mode exists to avoid)."""
+        rc, out, _ = self.run_watcher(
+            self._green(),
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed", "PR_SENTINEL_TIMEOUT": "4"},
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.count("PR-SENTINEL EVENT: ready_watching"), 1)
+
+    def test_watch_until_closed_wakes_on_conflict_after_green(self):
+        """The whole feature: a sibling PR merging after the PR went green turns
+        it DIRTY, and that still wakes the session."""
+        files = {
+            "pr_view.1": "OPEN\tCLEAN\tmain\tabc123\n",
+            "pr_view.2": "OPEN\tCLEAN\tmain\tabc123\n",
+            "pr_view.3": "OPEN\tDIRTY\tmain\tabc123\n",
+            "pr_checks": "pass\tbuild\thttps://github.com/o/r/actions/runs/11/job/1\n",
+        }
+        rc, out, _ = self.run_watcher(
+            files, env={"PR_SENTINEL_WATCH_UNTIL": "closed"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: ready_watching", out)
+        self.assertIn("PR-SENTINEL EVENT: conflict", out)
+        # Notice first, wake second — the notice never displaces the event.
+        self.assertLess(out.index("EVENT: ready_watching"), out.index("EVENT: conflict"))
+
+    def test_watch_until_closed_terminates_on_merge(self):
+        """`closed` is the terminal event in this mode."""
+        files = {
+            "pr_view.1": "OPEN\tCLEAN\tmain\tabc123\n",
+            "pr_view.2": "MERGED\tUNKNOWN\tmain\tabc123\n",
+            "pr_checks": "pass\tbuild\thttps://github.com/o/r/actions/runs/11/job/1\n",
+        }
+        rc, out, _ = self.run_watcher(
+            files, env={"PR_SENTINEL_WATCH_UNTIL": "closed"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: ready_watching", out)
+        self.assertIn("PR-SENTINEL EVENT: closed", out)
+        self.assertIn("State: MERGED", out)
+
+    def test_watch_until_defaults_to_ready(self):
+        """Unset keeps today's behaviour: a green PR exits with `ready`."""
+        rc, out, _ = self.run_watcher(self._green())
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: ready", out)
+        self.assertNotIn("ready_watching", out)
+
+    def test_watch_until_unrecognized_falls_back_to_ready(self):
+        """Fail safe on any unrecognised value, like PR_SENTINEL_HEAL does."""
+        rc, out, _ = self.run_watcher(
+            self._green(), env={"PR_SENTINEL_WATCH_UNTIL": "forever"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: ready", out)
+        self.assertNotIn("ready_watching", out)
+
     def test_no_premature_ready_before_ci_registers(self):
         """Right after `gh pr create`: OPEN, non-CLEAN, no checks yet. Must NOT
         fire ready; it should time out instead of concluding prematurely."""

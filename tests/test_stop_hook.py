@@ -298,6 +298,61 @@ class NeedsWatcherLogic(unittest.TestCase):
             read_file(OUTFILE, "PR-SENTINEL EVENT: ready\nPR: 42\nState: OPEN\n"),
         ]), set())
 
+    # -- issue #23: `ready_watching` is a NOTICE, not a handoff ---------------
+
+    def test_ready_watching_notice_does_not_conclude(self):
+        # A `PR_SENTINEL_WATCH_UNTIL=closed` watcher reports the PR green and
+        # keeps polling. If that watcher later exits without a terminal event
+        # (killed, budget elapsed), the PR is still open and unwatched — the
+        # notice must NOT be mistaken for the terminal `ready` handoff.
+        with real_outfile("PR-SENTINEL EVENT: ready_watching\nPR: 42\n"
+                          "State: OPEN\nmergeStateStatus: CLEAN\n") as fp:
+            self.assertEqual(needs([
+                *created_pr(42),
+                launch_watcher(42, "toolu_w"),
+                task_notification("toolu_w", outfile=fp),
+            ]), {"42"})
+
+    def test_ready_watching_then_conflict_blocks(self):
+        # The feature's payload case: green, then a sibling merge dirties the PR
+        # and the watcher exits. Ending the turn without relaunching must block.
+        report = ("PR-SENTINEL EVENT: ready_watching\nPR: 42\nState: OPEN\n\n"
+                  "PR-SENTINEL EVENT: conflict\nPR: 42\n"
+                  "State: OPEN\nmergeStateStatus: DIRTY (CONFLICTING)\n")
+        with real_outfile(report) as fp:
+            self.assertEqual(needs([
+                *created_pr(42),
+                launch_watcher(42, "toolu_w"),
+                task_notification("toolu_w", outfile=fp),
+            ]), {"42"})
+
+    def test_ready_watching_then_closed_concludes(self):
+        # `closed` stays the terminal, handed-off event in that mode.
+        report = ("PR-SENTINEL EVENT: ready_watching\nPR: 42\nState: OPEN\n\n"
+                  "PR-SENTINEL EVENT: closed\nPR: 42\nState: MERGED\n")
+        with real_outfile(report) as fp:
+            self.assertEqual(needs([
+                *created_pr(42),
+                launch_watcher(42, "toolu_w"),
+                task_notification("toolu_w", outfile=fp),
+            ]), set())
+
+    def test_ready_watching_then_check_failure_still_dampens(self):
+        # The dampening signature is read from the header region, which in this
+        # mode also carries the preceding notice. That must not break it.
+        report = ("PR-SENTINEL EVENT: ready_watching\nPR: 42\nState: OPEN\n\n"
+                  + check_failure_report(sha="abc123"))
+        with real_outfile(report) as f1, real_outfile(report) as f2:
+            block, dampened = analyze([
+                *created_pr(42),
+                launch_watcher(42, "toolu_w1"),
+                task_notification("toolu_w1", outfile=f1),
+                launch_watcher(42, "toolu_w2"),
+                task_notification("toolu_w2", outfile=f2),
+            ])
+        self.assertEqual(block, set())
+        self.assertEqual(dampened, {"42"})
+
     def test_concluded_via_gh_pr_merge_allows(self):
         self.assertEqual(needs([
             *created_pr(42),
