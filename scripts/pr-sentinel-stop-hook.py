@@ -29,15 +29,16 @@ process table, writes nothing, and never touches the PR body or comment stream
     task-notification yet. This is a harness-generated record — untrusted CI-log
     text cannot forge it.
   * Was the PR handed off?  -> a `gh pr merge`/`close`, or a watcher terminal
-    `ready`/`closed` report (NOT the non-terminal `ready_watching` notice a
-    `PR_SENTINEL_WATCH_UNTIL=closed` watcher emits on a still-open green PR —
-    that watcher keeps polling and may yet exit needing a relaunch, so treating
-    it as a handoff would reopen the coverage gap the mode exists to close).
+    `ready`/`closed`/`blocked` report (NOT the non-terminal `ready_watching` and
+    `blocked_watching` notices a `PR_SENTINEL_WATCH_UNTIL=closed` watcher emits
+    on a still-open PR — that watcher keeps polling and may yet exit needing a
+    relaunch, so treating it as a handoff would reopen the coverage gap the mode
+    exists to close).
     For each completed watcher the hook reads that
     watcher's OWN output file DIRECTLY (path from the task-notification), so the
     signal does not depend on how — or whether — the session surfaced the output:
     a Bash `cat`/`tail` of it counts, not only the Read tool (issue #14). A
-    `ready`/`closed` marker is trusted only in the report's header region, above
+    concluded marker is trusted only in the report's header region, above
     the first embedded CI-log excerpt: a report embeds semi-untrusted CI logs, so
     a marker below that banner could be a forged log line. If the file is gone,
     we fall back to a transcript Read of it.
@@ -71,14 +72,19 @@ PR_URL_RE = re.compile(r'https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)')
 # A watcher launch inside a Bash command: `... pr-sentinel-watch.sh 42`.
 WATCH_ARG_RE = re.compile(r'pr-sentinel-watch\.sh["\']?\s+(\S+)')
 
-# A watcher TERMINAL report that means "nothing left to babysit" for a PR. The
-# trailing guard is load-bearing: under `PR_SENTINEL_WATCH_UNTIL=closed` the
-# watcher emits a non-terminal `ready_watching` NOTICE on a green PR and keeps
-# polling, and that must NOT read as a handoff — the PR is still open, still
-# owned, and the watcher may yet exit needing a relaunch. Rejecting any
+# A watcher TERMINAL report that means "nothing left to babysit" for a PR.
+# `blocked` counts: its two causes — an outstanding approval, or a required
+# check that never registered — both need a human, and neither can be waited
+# out, so re-blocking the stop would only have the session relaunch a watcher
+# that re-reports it (the livelock the check_failure dampening exists to avoid).
+# The trailing guard is load-bearing: under `PR_SENTINEL_WATCH_UNTIL=closed` the
+# watcher emits non-terminal `ready_watching`/`blocked_watching` NOTICES and
+# keeps polling, and those must NOT read as a handoff — the PR is still open,
+# still owned, and the watcher may yet exit needing a relaunch. Rejecting any
 # word-or-dash continuation keeps a future `ready_*`/`closed_*` event from
 # silently inheriting "concluded" too.
-CONCLUDED_EVENT_RE = re.compile(r'PR-SENTINEL EVENT:\s*(?:ready|closed)(?![\w-])')
+CONCLUDED_EVENT_RE = re.compile(
+    r'PR-SENTINEL EVENT:\s*(?:ready|closed|blocked)(?![\w-])')
 
 # The banner the watcher prints before every embedded CI-log excerpt. Everything
 # from the FIRST such banner onward is semi-untrusted log text (a compromised

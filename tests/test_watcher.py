@@ -182,6 +182,107 @@ class WatcherCase(unittest.TestCase):
         self.assertIn("PR-SENTINEL EVENT: ready", out)
         self.assertIn("Do NOT", out)
 
+    def test_ready_event_on_unstable_merge_state(self):
+        """Only BLOCKED withholds ready. UNSTABLE (a non-required check failing)
+        is still mergeable, so gating on merge state must not swallow it."""
+        files = {
+            "pr_view": "OPEN\tUNSTABLE\tmain\tabc1234def\n",
+            "pr_checks": "pass\tbuild\thttps://github.com/o/r/actions/runs/11/job/1\n",
+        }
+        rc, out, _ = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: ready", out)
+
+    # -- BLOCKED merge state (issue #29) -------------------------------------
+
+    def _green_blocked(self):
+        """Every registered check green, but GitHub still blocks the merge —
+        the shape a required check that never registered produces, since it has
+        no check row to land in the pending bucket."""
+        return {
+            "pr_view": "OPEN\tBLOCKED\tmain\tabc1234def\n",
+            "pr_checks": "pass\tlint\thttps://github.com/o/r/actions/runs/11/job/1\n",
+        }
+
+    def test_blocked_event_instead_of_ready(self):
+        rc, out, _ = self.run_watcher(
+            self._green_blocked(), env={"PR_SENTINEL_BLOCKED_POLLS": "1"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: blocked", out)
+        self.assertNotIn("PR-SENTINEL EVENT: ready", out)
+        # The report must not read as green, and must not invite a merge.
+        self.assertIn("do NOT treat this PR as green", out)
+        self.assertIn("Do NOT auto-merge", out)
+        # Both candidate causes are named — the watcher cannot tell them apart.
+        self.assertIn("never registered", out)
+        self.assertIn("required approval", out)
+
+    def test_blocked_waits_out_the_grace_period(self):
+        """A check that is merely slow to register must not produce `blocked`:
+        it turns up as pending, and the streak has to survive to the threshold.
+        The unsuffixed pr_checks answers every call after the first, so the
+        streak tops out at one however many times the loop runs."""
+        files = {
+            "pr_view": "OPEN\tBLOCKED\tmain\tabc1234def\n",
+            "pr_checks.1": "pass\tlint\tlink\n",
+            "pr_checks": "pending\tbuild\tlink\n",
+        }
+        rc, out, _ = self.run_watcher(
+            files,
+            env={"PR_SENTINEL_BLOCKED_POLLS": "3", "PR_SENTINEL_TIMEOUT": "3"},
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+        self.assertNotIn("EVENT: blocked", out)
+
+    def test_blocked_streak_resets_on_a_non_blocked_poll(self):
+        """The streak counts CONSECUTIVE polls. Green-blocked, pending,
+        green-blocked is two streaks of one, not two in a row — so a threshold
+        of two must not fire."""
+        files = {
+            "pr_view": "OPEN\tBLOCKED\tmain\tabc1234def\n",
+            "pr_checks.1": "pass\tlint\tlink\n",
+            "pr_checks.2": "pending\tbuild\tlink\n",
+            "pr_checks.3": "pass\tlint\tlink\n",
+            "pr_checks": "pending\tbuild\tlink\n",
+        }
+        rc, out, _ = self.run_watcher(
+            files,
+            env={"PR_SENTINEL_BLOCKED_POLLS": "2", "PR_SENTINEL_TIMEOUT": "4"},
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+        self.assertNotIn("EVENT: blocked", out)
+
+    def test_blocked_still_yields_to_a_check_failure(self):
+        """A failing check outranks the block: it is actionable in-session."""
+        files = {
+            "pr_view": "OPEN\tBLOCKED\tmain\tabc1234def\n",
+            "pr_checks": "fail\tbuild\thttps://github.com/o/r/actions/runs/22/job/2\n",
+            "run_log": "boom\n",
+        }
+        rc, out, _ = self.run_watcher(
+            files, env={"PR_SENTINEL_BLOCKED_POLLS": "1"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: blocked", out)
+
+    def test_blocked_is_a_notice_in_watch_until_closed(self):
+        """Same shape as ready_watching: reported once, watch continues, and the
+        terminal event is timeout — never `blocked`."""
+        rc, out, _ = self.run_watcher(
+            self._green_blocked(),
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed",
+                 "PR_SENTINEL_BLOCKED_POLLS": "1",
+                 "PR_SENTINEL_TIMEOUT": "4"},
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.count("PR-SENTINEL EVENT: blocked_watching"), 1)
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+        self.assertNotIn("PR-SENTINEL EVENT: blocked\n", out)
+        # The timeout report names the state so the relaunch isn't blind.
+        self.assertIn("merge was BLOCKED", out)
+
     # -- PR_SENTINEL_WATCH_UNTIL=closed (watch past green) -------------------
 
     def _green(self):

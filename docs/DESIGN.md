@@ -72,11 +72,13 @@ task's stdout to the session as the wake payload.
    shellcheck-clean. Launched per-PR as a background task. Polls `gh` for check
    conclusions and `mergeStateStatus` on a configurable interval with backoff,
    and **exits** when: (a) a required check fails, (b) the PR becomes
-   `CONFLICTING`/`BEHIND`, (c) all checks are green and the PR is mergeable, or
+   `CONFLICTING`/`BEHIND`, (c) all checks are green and the PR is mergeable,
+   (c′) all checks are green but the merge stays `BLOCKED` — see [Green is not
+   ready](#green-is-not-ready-and-blocked-is-the-only-field-that-knows) — or
    (d) the PR is closed/merged. On exit it prints a structured, single-event
    report (see [Report format](#report-format-and-the-data-not-instructions-frame)).
-   `PR_SENTINEL_WATCH_UNTIL=closed` turns (c) into a non-terminal notice so the
-   watch continues past green — see [Why `ready` ends the watch by
+   `PR_SENTINEL_WATCH_UNTIL=closed` turns (c) and (c′) into non-terminal notices
+   so the watch continues past green — see [Why `ready` ends the watch by
    default](#why-ready-ends-the-watch-by-default-and-what-closed-mode-changes).
 
 2. **PostToolUse hook on `Bash`** — `scripts/pr-sentinel-hook.py`. After a
@@ -252,6 +254,52 @@ cannot announce "ready for review" at the moment it happens, and a watch that
 spans human review time usually needs a larger `PR_SENTINEL_TIMEOUT`. That is
 why `ready` stays the default: the single-PR user never hits the gap.
 
+### Green is not ready, and `BLOCKED` is the only field that knows
+
+`gh pr checks` emits one row per check that **exists**. A required check whose
+workflow never registered produces no row, so it lands in no bucket: the pending
+count is zero because the check is absent, not because it reported. Nothing
+derived from those buckets can see the hole, and the surviving checks all read
+green. The concrete case is a path-filtered heavy gate on a PR that opened
+docs-only and later got code — the gate is required, never triggered, and
+therefore invisible.
+
+`mergeStateStatus` is the one field already fetched that observes it. `BLOCKED`
+with nothing failing and nothing pending is GitHub saying a merge requirement is
+unsatisfied, so it must not satisfy `ready`. Until #29 it was fetched and
+printed in every report header, then compared only against `DIRTY` and
+`BEHIND` — displayed, never consulted.
+
+What `BLOCKED` will not tell you is *which* requirement. An outstanding approval
+produces the identical state, and it is far more common. Two shapes were
+rejected for that reason:
+
+- **Refuse `ready` on `BLOCKED` and say nothing more.** In any review-gated repo
+  a fully green PR would then never fire `ready` at all — the watcher burns the
+  whole budget and wakes with `timeout`. The regression lands on exactly the
+  repos that also have path-gated required checks.
+- **Read the branch's required-check list and count a required-but-absent check
+  as pending.** Correct in general, but it costs an extra API call per poll and
+  a token scope that can read branch protection. Tracked as Q4 in
+  `docs/STATUS.md`, deliberately not the fix here.
+
+Instead the two causes are separated by **persistence**, which needs no new data
+source. A check that is merely slow to register turns up as `pending` inside a
+poll or two; a stuck requirement doesn't move. After `PR_SENTINEL_BLOCKED_POLLS`
+consecutive green-but-`BLOCKED` polls (default 3), the watcher emits a distinct
+terminal **`blocked`** event that names both candidate causes and explicitly
+refuses to call the PR green. Any poll that isn't green-and-blocked resets the
+streak, so the signal means "still blocked", not "was blocked once".
+
+`blocked` joins `ready`/`closed` in the Stop hook's concluded set. Both causes
+need a human — a review gate is the human's turn by definition, and a gate that
+never registered can't be waited out, since the branch protection or the trigger
+paths have to change. Leaving it out would have the hook re-block every stop and
+the session relaunch a watcher that reports the same thing — the livelock class
+#9 fixed for `check_failure`. The `closed`-mode notice is `blocked_watching`, and the
+`(?![\w-])` guard keeps it out of the concluded set for the same reason it keeps
+`ready_watching` out.
+
 ### Why the watcher uses `gh` but the hook does not
 
 The watcher's whole function is to observe remote GitHub state, so it must talk
@@ -290,14 +338,15 @@ PR body or comments**:
   notification — so a watcher that already exited (delivered its event) reads as
   *not live*, and a session that stopped mid-fix without relaunching is nudged
   too. This is a harness-generated record, so untrusted CI-log text can't forge
-  it; and the `ready`/`closed` "handed off" signal is read straight from that
+  it; and the `ready`/`closed`/`blocked` "handed off" signal is read straight from that
   watcher's own output file — the hook opens the file itself (its path is in the
   completion notification), so the signal holds however the session surfaced the
   output, whether with the `Read` tool, a Bash `cat`/`tail`, or not at all. The
   marker is trusted only in the report's header region, above the first embedded
   CI-log excerpt, so a forged line in the semi-untrusted log can't fake it — and
-  only the *terminal* markers count, never the `ready_watching` notice of a
-  `PR_SENTINEL_WATCH_UNTIL=closed` watch (see [above](#why-ready-ends-the-watch-by-default-and-what-closed-mode-changes)).
+  only the *terminal* markers count, never the `ready_watching` /
+  `blocked_watching` notices of a `PR_SENTINEL_WATCH_UNTIL=closed` watch (see
+  [above](#why-ready-ends-the-watch-by-default-and-what-closed-mode-changes)).
 
 Check status can't be verified locally (that needs a network call), so "checks
 pending" is approximated as "opened, not handed off, unwatched"; the block is

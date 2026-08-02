@@ -12,6 +12,9 @@
 #   conflict       the PR is CONFLICTING (mergeStateStatus == DIRTY)
 #   behind         the PR branch is BEHIND its base (needs a base merge)
 #   ready          all checks are green and the PR is mergeable (no conflict)
+#   blocked        every check that reported is green, but GitHub still reports
+#                  mergeStateStatus == BLOCKED — a merge requirement the checks
+#                  cannot see is unsatisfied (see the green branch in `main`)
 #   closed         the PR was merged or closed
 #   timeout        the overall watch budget elapsed with no other event
 #   error          gh could not be queried after retries (fail-safe hand-back)
@@ -23,6 +26,7 @@
 #                   "handed off, stop watching" to the Stop hook, and this does
 #                   not. Re-reporting `ready` on a still-green PR would exit
 #                   immediately on every relaunch — a spin loop, not a watch.
+#   blocked_watching  the same relationship to `blocked`, for the same reason.
 #
 # SECURITY: this script queries ONLY GitHub-controlled check metadata and
 # mergeable state. It never requests or parses the PR body, PR review
@@ -51,6 +55,11 @@ LOG_MAX_BYTES="${PR_SENTINEL_LOG_MAX_BYTES:-8192}"  # CI log excerpt cap, bytes
 # afford to miss cycles, so this is generous — a brief GitHub API hiccup must
 # not kill the watch and wake the session for nothing.
 GH_RETRY_HORIZON="${PR_SENTINEL_GH_RETRY_HORIZON:-900}"  # transient-retry horizon, seconds
+# Consecutive polls a green-but-BLOCKED PR must hold before the watcher reports
+# `blocked`. BLOCKED can mean a required check has not registered yet, which
+# resolves on its own within a poll or two once the workflow appears; the streak
+# is what tells that apart from a requirement that is genuinely stuck.
+BLOCKED_POLLS="${PR_SENTINEL_BLOCKED_POLLS:-3}"  # green+BLOCKED polls before `blocked`
 
 # Conflict/behind heal strategy the report recommends: rebase (default) or
 # merge. Normalise to lowercase (bash 3.2: use tr, not ${var,,}) and fail safe
@@ -65,9 +74,14 @@ HEAL=$(printf '%s' "${PR_SENTINEL_HEAL:-rebase}" | tr '[:upper:]' '[:lower:]')
 WATCH_UNTIL=$(printf '%s' "${PR_SENTINEL_WATCH_UNTIL:-ready}" | tr '[:upper:]' '[:lower:]')
 [[ "$WATCH_UNTIL" == "closed" ]] || WATCH_UNTIL="ready"
 
-# Set to 1 once a `ready_watching` notice has been emitted, so it is reported
-# exactly once per run (WATCH_UNTIL=closed only).
+# Set to 1 once a `ready_watching` / `blocked_watching` notice has been emitted,
+# so each is reported exactly once per run (WATCH_UNTIL=closed only).
 READY_REPORTED=0
+BLOCKED_REPORTED=0
+
+# Consecutive polls the PR has been green-but-BLOCKED. Reset by any poll that is
+# not, so the streak means "still blocked", not "was blocked once".
+BLOCKED_SEEN=0
 
 # --------------------------------------------------------------------------
 # Helpers
@@ -304,6 +318,47 @@ notice_ready_watching() {
 	echo "or the PR is merged/closed. Nothing to do right now."
 }
 
+# Shared body of the `blocked` event and its `blocked_watching` notice: the
+# checks all reported green, but GitHub still will not let the PR merge. The
+# report deliberately does not guess which requirement it is — the watcher
+# cannot see the branch's required-check list — and it must not read as green.
+blocked_detail() {
+	echo "State: OPEN"
+	echo "mergeStateStatus: ${MERGE} (merge requirement unsatisfied)"
+	echo "Head SHA: ${HEAD_SHA}"
+	echo
+	echo "Every check that reported is green, but GitHub has reported this merge"
+	echo "BLOCKED on ${BLOCKED_SEEN} consecutive polls, so a merge requirement the"
+	echo "check list cannot show is unsatisfied. The two usual causes:"
+	echo "  - a required check never registered — e.g. a path-filtered workflow"
+	echo "    this PR's files never triggered. It has no check row at all, so it"
+	echo "    cannot show up as pending; the PR looks green because the gate is"
+	echo "    missing, not because it passed."
+	echo "  - a required approval or an unresolved conversation is outstanding."
+	echo
+	echo "Next action: do NOT treat this PR as green. Confirm which requirement"
+	echo "is unmet — the merge box on the PR page names it — and compare the"
+	echo "branch's required checks against the ones that actually ran. Hand back"
+	echo "to a human. Do NOT auto-merge."
+}
+
+emit_blocked() {
+	report_header blocked
+	blocked_detail
+	exit 0
+}
+
+# The non-terminal counterpart of emit_blocked, for PR_SENTINEL_WATCH_UNTIL=
+# closed. Same once-per-run, keep-polling shape as notice_ready_watching.
+notice_blocked_watching() {
+	report_header blocked_watching
+	blocked_detail
+	echo
+	echo "This is a NOTICE, not a wake-up: PR_SENTINEL_WATCH_UNTIL=closed, so the"
+	echo "watcher keeps polling and will exit (waking this session) only if the PR"
+	echo "later needs attention or is merged/closed."
+}
+
 emit_closed() {
 	local lower
 	lower=$(printf '%s' "$STATE" | tr '[:upper:]' '[:lower:]')
@@ -323,6 +378,10 @@ emit_timeout() {
 	if (( READY_REPORTED == 1 )); then
 		echo "The PR was green when last polled (see the ready_watching notice above);"
 		echo "it is waiting on human merge review."
+	fi
+	if (( BLOCKED_REPORTED == 1 )); then
+		echo "Its checks were green but the merge was BLOCKED (see the"
+		echo "blocked_watching notice above); a merge requirement is unsatisfied."
 	fi
 	echo "Next action: check the PR status and relaunch the watcher if still open."
 	exit 0
@@ -418,23 +477,56 @@ main() {
 			emit_check_failure "$failed_names" "$failed_links"
 		fi
 
-		# (c) all green AND mergeable. Require evidence that checks actually ran
-		# (a passing check, or a CLEAN merge state) so we don't fire "ready" in
-		# the race window right after `gh pr create`, before CI registers.
+		# (c) every check that reported is green. Require evidence that checks
+		# actually ran (a passing check, or a CLEAN merge state) so we don't
+		# call the race window right after `gh pr create` green, before CI
+		# registers.
+		local green=0
 		if (( pending_count == 0 && fail_count == 0 )); then
 			if (( pass_count > 0 )) || [[ "$MERGE" == "CLEAN" ]]; then
+				green=1
+			fi
+		fi
+
+		# Green is not the same as ready. A required check whose workflow has
+		# not registered emits no `gh pr checks` row, so it lands in no bucket
+		# and pending_count is blind to it — the counts above cannot tell an
+		# absent gate from a passed one. mergeStateStatus is the only field
+		# fetched that sees it. BLOCKED with nothing failing and nothing pending
+		# means a merge requirement is unsatisfied, so it must not fire `ready`;
+		# but it does NOT identify which requirement, since an outstanding
+		# approval reads identically. Hold it for a few consecutive polls — a
+		# check that is merely slow to register turns up as `pending` well
+		# inside that window — then report `blocked` and let a human resolve the
+		# ambiguity. See docs/plan/blocked-merge-state.md.
+		if (( green == 1 )) && [[ "$MERGE" == "BLOCKED" ]]; then
+			BLOCKED_SEEN=$(( BLOCKED_SEEN + 1 ))
+			if (( BLOCKED_SEEN >= BLOCKED_POLLS )); then
 				if [[ "$WATCH_UNTIL" == "closed" ]]; then
-					# Report green once, then fall through and keep polling: the
-					# DIRTY/BEHIND checks at the top of the loop are what a
-					# sibling merge trips. Exiting here instead would re-exit
-					# immediately on every relaunch (a spin loop, not a watch).
-					if (( READY_REPORTED == 0 )); then
-						notice_ready_watching
-						READY_REPORTED=1
+					if (( BLOCKED_REPORTED == 0 )); then
+						notice_blocked_watching
+						BLOCKED_REPORTED=1
 					fi
 				else
-					emit_ready
+					emit_blocked
 				fi
+			fi
+		else
+			BLOCKED_SEEN=0
+		fi
+
+		if (( green == 1 )) && [[ "$MERGE" != "BLOCKED" ]]; then
+			if [[ "$WATCH_UNTIL" == "closed" ]]; then
+				# Report green once, then fall through and keep polling: the
+				# DIRTY/BEHIND checks at the top of the loop are what a
+				# sibling merge trips. Exiting here instead would re-exit
+				# immediately on every relaunch (a spin loop, not a watch).
+				if (( READY_REPORTED == 0 )); then
+					notice_ready_watching
+					READY_REPORTED=1
+				fi
+			else
+				emit_ready
 			fi
 		fi
 
