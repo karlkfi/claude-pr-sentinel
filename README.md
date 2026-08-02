@@ -140,7 +140,7 @@ needed:
 | the same, **and** `PR_SENTINEL_WATCH_UNTIL=closed` | *(notice: **blocked_watching**, keep polling)* | nothing — the watch continues |
 | PR merged or closed | **closed** | done; stop watching |
 | watch budget elapsed | **timeout** | re-check and relaunch if still open |
-| `gh` auth broken, PR unresolvable, or transient failures past the retry horizon | **error** | check `gh auth status`, relaunch |
+| no `gh` credentials, PR unresolvable, or transient failures past the retry horizon | **error** | check `gh auth status`, relaunch |
 | checks still pending | *(keep polling, with backoff)* | — |
 
 Every event report starts with a stable `PR-SENTINEL EVENT: <type>` line, so
@@ -342,7 +342,7 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_MAX_INTERVAL` | `300` | backoff ceiling, seconds |
 | `PR_SENTINEL_TIMEOUT` | `3600` | overall watch budget before a `timeout` event, seconds |
 | `PR_SENTINEL_LOG_MAX_BYTES` | `8192` | CI log excerpt cap (tail kept), bytes |
-| `PR_SENTINEL_GH_RETRY_HORIZON` | `900` | how long (seconds) to retry *transient* `gh` failures with backoff before an `error` event; permanent failures (bad auth, unresolvable PR) exit at once |
+| `PR_SENTINEL_GH_RETRY_HORIZON` | `900` | how long (seconds) to retry *transient* `gh` failures with backoff before an `error` event; permanent failures (no credentials, unresolvable PR) exit at once |
 | `PR_SENTINEL_HEAL` | `rebase` | conflict/behind heal the report recommends: `rebase` or `merge` (see below); unrecognised values fall back to `rebase` |
 | `PR_SENTINEL_WATCH_UNTIL` | `ready` | stopping condition: `ready` ends the watch when the PR goes green; `closed` keeps watching past green so a *later* conflict still wakes you (see below); unrecognised values fall back to `ready` |
 | `PR_SENTINEL_BLOCKED_POLLS` | `3` | consecutive polls an all-green-but-`BLOCKED` PR must hold before the `blocked` event fires (see [Green is not the same as ready](#green-is-not-the-same-as-ready)) |
@@ -486,11 +486,18 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
   makes no network call), so the nudge asks the session to resolve it. A PR
   created earlier and pushed to later still gets a (branch-scoped) nudge.
 - **The watcher needs an authenticated `gh`.** It separates *permanent*
-  failures (broken auth, an unresolvable PR) — which exit with an `error` event
-  at once — from *transient* ones (a network blip, a 5xx, rate limiting), which
-  it retries with backoff for `PR_SENTINEL_GH_RETRY_HORIZON` seconds (default
-  15 min) before giving up. A brief GitHub API hiccup no longer wakes the
-  session; the gap is noted on the task's stderr, not the wake payload.
+  failures (no credentials at all, an unresolvable PR) — which exit with an
+  `error` event at once — from *transient* ones (a network blip, a 5xx, rate
+  limiting), which it retries with backoff for `PR_SENTINEL_GH_RETRY_HORIZON`
+  seconds (default 15 min) before giving up. A brief GitHub API hiccup no
+  longer wakes the session; the gap is noted on the task's stderr, not the wake
+  payload.
+- **An expired token takes the retry horizon to report, not an instant.** Only
+  a total absence of credentials is treated as immediately permanent, because
+  that is the one auth answer `gh` gives without a network round-trip — with the
+  network down it reports a valid token as invalid. So a revoked token is
+  retried like any other transient failure first; the give-up report names auth
+  when `gh auth status` was failing alongside the query.
 - **ANSI stripping is best-effort.** It removes the common CSI escape family;
   exotic terminal sequences may survive. The size cap and the human merge gate
   remain.

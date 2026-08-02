@@ -375,15 +375,32 @@ external, and misconfigured cases that no base-branch inspection could detect.
 The hook **defers silently** (emits nothing) on any uncertainty — unparseable
 input, an unrecognised command, a disabled flag — so it can never break a
 session. The watcher **fails safe**, but distinguishes *permanent* from
-*transient* `gh` failures. A permanent failure — auth broken (`gh auth status`
-fails) or the PR unresolvable (a definitive "could not resolve") — exits with
-an `error` event at once, handing the decision back to the session. A transient
-failure (a network blip, a 5xx, rate limiting) is retried with backoff for a
-generous horizon (`PR_SENTINEL_GH_RETRY_HORIZON`, default 15 min) before giving
-up — a poll loop can afford to miss cycles, and a brief API hiccup must not fire
-a false `error` that wakes the session for nothing. The gap is logged to the
+*transient* `gh` failures. A permanent failure — no credentials at all, or the
+PR unresolvable (a definitive "could not resolve") — exits with an `error` event
+at once, handing the decision back to the session. A transient failure (a
+network blip, a 5xx, rate limiting) is retried with backoff for a generous
+horizon (`PR_SENTINEL_GH_RETRY_HORIZON`, default 15 min) before giving up — a
+poll loop can afford to miss cycles, and a brief API hiccup must not fire a
+false `error` that wakes the session for nothing. The gap is logged to the
 task's stderr (never the event stdout that wakes the session). Neither component
 ever silently swallows a real attention-needed event.
+
+Classifying that permanent/transient split takes some care around auth, because
+the evidence arrives at the worst possible moment. The watcher probes
+`gh auth status` only after a query has already failed — so whatever killed the
+query is the likeliest thing to kill the probe. Worse, `gh` does not
+distinguish: with the network unreachable it reports `The token in keyring is
+invalid.` for a token that is perfectly valid. Treating the probe's exit code as
+proof therefore diagnoses permanent auth loss on healthy auth and wakes the
+session for nothing, skipping the retry horizon entirely.
+
+So the watcher acts on the probe only where the probe is conclusive: **having no
+credentials configured at all**, which `gh` answers from local config with no
+network round-trip. Every other probe failure is ambiguous and falls through to
+the same backoff loop as any other transient error. A revoked or expired token
+still gets reported — it just has to prove itself by failing for the whole
+horizon rather than for one instant, and the give-up report names auth when the
+probe was failing alongside the query.
 
 ## Design rationale in the issue tracker
 
