@@ -68,15 +68,15 @@ fix-it at the background watcher. Unlike the advisory nudge, a deny is
 | `gh pr checks --watch` (or `-w`) | **deny** — launch the background watcher instead |
 | `gh run watch` | **deny** — launch the background watcher instead |
 | `while …; do … sleep …; done` / `until …; do … sleep …; done` | **deny** — hand-rolled poll loop |
-| any of the above with `PR_SENTINEL_OVERRIDE=<reason>` set | **allow** (deferred to normal permissions) |
+| any of the above with an inline `PR_SENTINEL_OVERRIDE=<reason>` prefix (or the variable set in the session env) | **allow** (deferred to normal permissions) |
 | `bash …/pr-sentinel-watch.sh N` (the plugin's own watcher) | **allow** — auto-approved (no base Bash prompt), gated by `PR_SENTINEL_AUTOALLOW` |
 | `gh pr checks` · `gh run view` | allow (not a blocking poll — deferred to normal permissions) |
 | a bare `sleep N` (no loop) · unrecognised shape | allow (fail-open — never deny when unsure) |
 
 The deny is a hard **deny**, not an `ask` — even in `bypassPermissions` mode —
 so a headless run self-corrects instead of stalling on an unanswerable prompt.
-Set `PR_SENTINEL_OVERRIDE=<reason>` to allow one legitimate poll (see
-[Configuration](#configuration)).
+Prefix the command with `PR_SENTINEL_OVERRIDE=<reason>` to allow one legitimate
+poll (see [Configuration](#configuration)).
 
 The watcher-launch **allow** is an explicit decision, not a mere defer: it
 short-circuits the base Bash permission prompt for the first-party, read-only
@@ -348,13 +348,28 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_DISABLE` | (unset) | `1` disables the PostToolUse nudge, the Stop backstop, and the watcher-launch auto-allow |
 | `PR_SENTINEL_SESSIONS_ROOT` | (platform default) | overrides the session-store path the [migration helper](#migrating-from-desktop-auto-fix) scans (same as its `--root`) |
 | `PR_SENTINEL_ASSUME_APP_QUIT` | (unset) | `1` asserts the desktop app is quit, so the migration helper's `--apply` skips live-app detection (use only after quitting it) |
-| `PR_SENTINEL_OVERRIDE` | (unset) | a non-empty `<reason>` allows one otherwise-denied foreground poll (see the [PreToolUse table](#what-it-does)) |
+| `PR_SENTINEL_OVERRIDE` | (unset) | a non-empty `<reason>`, inline on the command or in the session env, allows one otherwise-denied foreground poll (see the [PreToolUse table](#what-it-does)) |
 | `PR_SENTINEL_DEBUG` | (unset) | `1` re-raises hook errors instead of failing open |
 
 `PR_SENTINEL_OVERRIDE` mirrors prod-guard's `PROD_GUARD_OVERRIDE`: it's the
 documented escape hatch for the foreground-poll deny. Set it to a short reason
-(e.g. `PR_SENTINEL_OVERRIDE="watcher can't reach this run"`) for a single
-legitimate poll; an empty value does **not** downgrade the deny.
+for a single legitimate poll; an empty value does **not** downgrade the deny.
+It is read from two places:
+
+- **inline on the command** —
+  `PR_SENTINEL_OVERRIDE="watcher can't reach this run" gh run watch 123`. The
+  prefix may sit on any link of a chain (`mkdir -p out &&
+  PR_SENTINEL_OVERRIDE=… gh run watch 123 > out/log`), and redirects, pipes,
+  and other env assignments around it don't hide it. Only a real leading
+  assignment counts — the name inside an argument (`echo
+  PR_SENTINEL_OVERRIDE=x && gh run watch 123`) does not.
+- **in the session environment** — a `settings.json` `env` entry or your shell
+  profile, for a whole session rather than one command.
+
+The inline form is the one the deny message names, because it's the only one a
+session can reach from inside a Bash call: a hook reads the environment
+Claude Code launched it with, which an `export` in some earlier Bash call never
+touched.
 
 `PR_SENTINEL_AUTOALLOW` is **on by default** and removes the base Bash approval
 prompt for the one first-party, read-only command the plugin asks you to run —
