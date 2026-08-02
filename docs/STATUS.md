@@ -19,4 +19,4 @@ next task from the top of the Queue. Maintenance rules: see
 | ID | Item | Labels | Sz | Trigger to revive |
 |---|---|---|---|---|
 | <a id="Q3"></a>Q3 | Friction / activity report (Roadmap R3) | `docs` `infra` | M | **Event:** real usage data accumulates in session transcripts. Then build a read-only analyzer ranking nudge-fired vs watcher-launched wakes, mirroring the guard plugins' friction-report. |
-| <a id="Q4"></a>Q4 | Distinguish required vs optional checks | `watcher` | S | **Event:** failing *optional* checks spuriously wake sessions often enough to hurt. Then consult branch-protection required-check names; today erring toward waking is the safe direction. |
+| <a id="Q4"></a>Q4 | Distinguish required vs optional checks | `watcher` | S | **Event:** optional checks that genuinely fail their run wake sessions often (`continue-on-error` is already absorbed, #32). Then consult branch-protection required-check names. |
