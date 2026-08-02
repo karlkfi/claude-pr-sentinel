@@ -12,6 +12,8 @@ scenario is a directory of small fixture files:
   pr_view      -> tab-separated "state\\tmerge\\tbase\\thead-sha" for `gh pr view`
   pr_checks    -> lines "bucket\\tname\\tlink" for `gh pr checks`
   run_log      -> raw --log-failed output for `gh run view`
+  run_conclusion.<id> -> conclusion of run <id> for `gh api repos/.../runs/<id>`
+                 (absent = the API call fails, as an unreadable run would)
 
 Per-call variation (to test transitions like pending -> fail) is supported by
 suffixed files pr_checks.1, pr_checks.2, ... which the stub selects by a
@@ -37,6 +39,14 @@ GH_STUB = textwrap.dedent(
     # Per-key call counters live in $GH_STUB_DIR/.count.<key>.
     set -u
     dir="$GH_STUB_DIR"
+    # `gh api repos/<o>/<r>/actions/runs/<id> -q .conclusion`: answer from
+    # run_conclusion.<id>, or fail like an unreadable run when there is none.
+    if [[ "${1:-}" == "api" ]]; then
+      f="$dir/run_conclusion.${2##*/}"
+      [[ -f "$f" ]] || exit 1
+      cat "$f"
+      exit 0
+    fi
     key=""
     case "${1:-}:${2:-}" in
       pr:view)   key="pr_view" ;;
@@ -171,6 +181,87 @@ class WatcherCase(unittest.TestCase):
         self.assertIn("END CI LOG EXCERPT", out)
         # Must not auto-merge.
         self.assertIn("Do NOT auto-merge", out)
+
+    # -- continue-on-error absorbed failures (issue #32) ----------------------
+
+    def test_continue_on_error_failure_does_not_wake(self):
+        """A `continue-on-error: true` job fails its check row while the run it
+        belongs to still concludes `success`. GitHub has already ruled it
+        non-blocking, so it must not wake the session — the PR is green."""
+        files = {
+            "pr_view": "OPEN\tUNSTABLE\tmain\tabc1234def\n",
+            "pr_checks": (
+                "pass\tlint\thttps://github.com/o/r/actions/runs/22/job/1\n"
+                "fail\tunittest-windows\thttps://github.com/o/r/actions/runs/22/job/2\n"
+            ),
+            "run_conclusion.22": "success\n",
+        }
+        rc, out, err = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: ready", out)
+        self.assertNotIn("EVENT: check_failure", out)
+        # Suppressing a red check is worth recording — on stderr, which the task
+        # log keeps and which never wakes the session.
+        self.assertIn("absorbed by continue-on-error", err)
+        self.assertIn("unittest-windows", err)
+
+    def test_check_failure_when_run_concluded_failure(self):
+        """The ordinary case is untouched: the run failed, so the check did."""
+        files = {
+            "pr_view": "OPEN\tBLOCKED\tmain\tabc1234def\n",
+            "pr_checks": "fail\tbuild\thttps://github.com/o/r/actions/runs/22/job/2\n",
+            "run_conclusion.22": "failure\n",
+            "run_log": "boom\n",
+        }
+        rc, out, _ = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+
+    def test_partially_absorbed_failures_still_wake(self):
+        """Absorption is all-or-nothing: one real failure alongside an advisory
+        one is still a real failure, and both names stay in the report."""
+        files = {
+            "pr_view": "OPEN\tBLOCKED\tmain\tabc1234def\n",
+            "pr_checks": (
+                "fail\tunittest-windows\thttps://github.com/o/r/actions/runs/22/job/2\n"
+                "fail\tbuild\thttps://github.com/o/r/actions/runs/33/job/3\n"
+            ),
+            "run_conclusion.22": "success\n",
+            "run_conclusion.33": "failure\n",
+            "run_log": "boom\n",
+        }
+        rc, out, _ = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertIn("unittest-windows (fail)", out)
+        self.assertIn("build (fail)", out)
+
+    def test_unresolvable_run_conclusion_still_wakes(self):
+        """Fail safe: a failing check with no Actions run behind it (an external
+        status check) can't be proven absorbed, so it stays a wake."""
+        files = {
+            "pr_view": "OPEN\tBLOCKED\tmain\tabc1234def\n",
+            "pr_checks": "fail\tcoverage\thttps://ci.example.invalid/build/7\n",
+        }
+        rc, out, _ = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertIn("no GitHub Actions run id resolvable", out)
+
+    def test_absorbed_failure_does_not_unblock_a_blocked_pr(self):
+        """Absorbed failures count as passing for readiness, which must not talk
+        a BLOCKED merge into reading as green — `blocked` still wins."""
+        files = {
+            "pr_view": "OPEN\tBLOCKED\tmain\tabc1234def\n",
+            "pr_checks": "fail\tunittest-windows\thttps://github.com/o/r/actions/runs/22/job/2\n",
+            "run_conclusion.22": "success\n",
+        }
+        rc, out, _ = self.run_watcher(
+            files, env={"PR_SENTINEL_BLOCKED_POLLS": "1"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: blocked", out)
+        self.assertNotIn("EVENT: check_failure", out)
+        self.assertNotIn("EVENT: ready", out)
 
     def test_ready_event(self):
         files = {

@@ -131,7 +131,8 @@ needed:
 
 | PR state observed | Watcher event | What the session should do |
 | --- | --- | --- |
-| a required check concluded fail/cancel | **check_failure** | fix the failure (log excerpt attached), push, relaunch |
+| a check concluded fail/cancel and its workflow run didn't conclude `success` | **check_failure** | fix the failure (log excerpt attached), push, relaunch |
+| every failing check belongs to a run that concluded `success` (`continue-on-error: true`) | *(treated as passing, keep polling)* | nothing — GitHub already ruled the failure non-blocking; the suppression is noted on the task's stderr |
 | `mergeStateStatus == DIRTY` | **conflict** | rebase onto `<base>` (default), resolve, `git push --force-with-lease`, relaunch — or merge (`PR_SENTINEL_HEAL=merge`) |
 | `mergeStateStatus == BEHIND` | **behind** | rebase onto `<base>` (default) and force-push with lease, relaunch — or merge to fast-forward (`PR_SENTINEL_HEAL=merge`) |
 | all checks green, no conflict, `mergeStateStatus != BLOCKED` | **ready** | hand back to a human for merge review — **never auto-merge** |
@@ -502,7 +503,13 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
   exotic terminal sequences may survive. The size cap and the human merge gate
   remain.
 - **Required-vs-optional checks** aren't distinguished — any failing/cancelled
-  check triggers `check_failure`. This errs toward waking you.
+  check triggers `check_failure` unless its workflow run concluded `success`.
+  This errs toward waking you.
+- **An advisory job only stays quiet if it shares a run with passing jobs.**
+  The `continue-on-error` suppression reads the *run* conclusion, so a job
+  marked advisory inside a workflow that otherwise passes is absorbed. Put that
+  job in a workflow file of its own and the run really does conclude `failure`
+  — GitHub offers nothing to distinguish it, and it wakes you.
 - **A `blocked` report can't name the requirement.** The watcher doesn't read
   branch protection, so an unregistered required check and an outstanding
   approval produce the same event (see [Green is not the same as
