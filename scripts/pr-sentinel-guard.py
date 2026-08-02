@@ -23,8 +23,11 @@ Fires on a `Bash` command the session is *about to run*. Two branches:
 
 Escape hatch: `PR_SENTINEL_OVERRIDE=<reason>` (any non-empty value) downgrades
 the deny — the hook defers, letting the command proceed under the normal
-permission system — for the rare legitimate one-off. This mirrors prod-guard's
-`PROD_GUARD_OVERRIDE`.
+permission system — for the rare legitimate one-off. It is honoured as an
+INLINE prefix on the command itself (`PR_SENTINEL_OVERRIDE=why gh run watch 5`)
+as well as in the hook's own environment; the inline form is the only one a
+session can reach from inside a Bash call, and it's the form the deny message
+names. This mirrors prod-guard's `PROD_GUARD_OVERRIDE`.
 
 The hook is PURELY LOCAL: it inspects only the proposed command string and
 never makes a network call or reads any PR text.
@@ -138,13 +141,42 @@ def simple_commands(command):
     return groups
 
 
+_ASSIGNMENT_RE = re.compile(r'\A([A-Za-z_][A-Za-z0-9_]*)=(.*)\Z', re.S)
+
+
 def _strip_env_prefix(argv):
     """Drop leading NAME=VALUE assignments so `GH_TOKEN=x gh run watch` still
     resolves to `gh`."""
     i = 0
-    while i < len(argv) and re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', argv[i]):
+    while i < len(argv) and _ASSIGNMENT_RE.match(argv[i]):
         i += 1
     return argv[i:]
+
+
+def inline_override(command):
+    """The reason from an inline `PR_SENTINEL_OVERRIDE=<reason>` prefix on any
+    simple command in `command`, or ''. Covers the prefix on the poll itself
+    (`PR_SENTINEL_OVERRIDE=why gh run watch 5`) and on a later link of a chain
+    (`mkdir -p out && PR_SENTINEL_OVERRIDE=why gh run watch 5 > out/x`).
+
+    A session cannot set a variable in THIS hook's environment from inside a
+    Bash call, so the inline prefix is the only reachable form of the escape
+    hatch — and the one `build_reason` names. Only a real leading assignment
+    counts: the name as an argument (`echo PR_SENTINEL_OVERRIDE=x && gh run
+    watch`) does not, and neither does an empty value."""
+    for group in simple_commands(command):
+        argv = list(group)
+        while argv:
+            m = _ASSIGNMENT_RE.match(argv[0])
+            if m:
+                if m.group(1) == 'PR_SENTINEL_OVERRIDE' and m.group(2).strip():
+                    return m.group(2)
+                argv = argv[1:]
+            elif argv[0] in _LEADING_KEYWORDS:
+                argv = argv[1:]
+            else:
+                break
+    return ''
 
 
 def _leading_word(group):
@@ -225,8 +257,9 @@ def build_reason(shape):
         f'fails, a conflict appears, the PR goes green, or the PR closes. '
         f'When it wakes you, act on the reported event, push, and relaunch it. '
         f'Never auto-merge.\n'
-        f'If you genuinely need this one command, set '
-        f'PR_SENTINEL_OVERRIDE=<reason> to allow it.'
+        f'If you genuinely need this one command, re-run it with an inline '
+        f'PR_SENTINEL_OVERRIDE=<reason> prefix on the command itself '
+        f'(PR_SENTINEL_OVERRIDE="why this once" <command>).'
     )
 
 
@@ -262,8 +295,8 @@ def main():
             'permissionDecisionReason': build_allow_reason()}}))
         return
 
-    override = os.environ.get('PR_SENTINEL_OVERRIDE', '')
-    if override.strip():
+    if (os.environ.get('PR_SENTINEL_OVERRIDE', '').strip()
+            or inline_override(command)):
         return  # escape hatch: defer to the normal permission system
 
     shape = classify_poll(command)

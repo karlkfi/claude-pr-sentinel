@@ -168,7 +168,11 @@ These are the point of the plugin, not a footnote.
 4. **Secure by default.** Every knob that loosens a *security* property — what
    the plugin reads, what authority it grants — is opt-in and documented as a
    trade-off. The escape hatch for the foreground-poll deny is
-   `PR_SENTINEL_OVERRIDE=<reason>`, mirroring prod-guard's `PROD_GUARD_OVERRIDE`.
+   `PR_SENTINEL_OVERRIDE=<reason>`, mirroring prod-guard's `PROD_GUARD_OVERRIDE`
+   — honoured as an inline prefix on the command as well as in the session
+   environment, since a hook's own environment is not something a session can
+   write to from inside a Bash call, and an escape hatch the blocked party
+   can't reach is just a retry loop.
    The watcher-launch auto-allow (`PR_SENTINEL_AUTOALLOW`, default on) is *not*
    such a knob: it grants no new authority and widens nothing the plugin reads —
    it only suppresses a base permission prompt for the plugin's own read-only

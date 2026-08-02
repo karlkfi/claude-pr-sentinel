@@ -96,6 +96,41 @@ class ClassifyPollUnit(unittest.TestCase):
         self.assertIsNone(guard.classify_poll(""))
 
 
+class InlineOverrideUnit(unittest.TestCase):
+    """The inline `PR_SENTINEL_OVERRIDE=<reason>` prefix — the only form of the
+    escape hatch a session can reach from inside a Bash call."""
+
+    def test_prefix_on_the_poll_itself(self):
+        self.assertEqual(
+            guard.inline_override('PR_SENTINEL_OVERRIDE=one-off gh run watch 5'),
+            "one-off")
+        # quoted multi-word reason
+        self.assertEqual(
+            guard.inline_override(
+                'PR_SENTINEL_OVERRIDE="format probe on a finished run" '
+                'gh run watch 5'),
+            "format probe on a finished run")
+
+    def test_prefix_survives_chains_redirects_and_keywords(self):
+        for cmd in (
+            'mkdir -p out && PR_SENTINEL_OVERRIDE=why gh run watch 5 > out/x',
+            'PR_SENTINEL_OVERRIDE=why gh run watch 5 2>&1 | head -5',
+            'GH_TOKEN=x PR_SENTINEL_OVERRIDE=why gh pr checks --watch',
+            'until gh pr checks; do PR_SENTINEL_OVERRIDE=why sleep 20; done',
+        ):
+            self.assertEqual(guard.inline_override(cmd), "why", cmd)
+
+    def test_non_prefix_occurrences_do_not_count(self):
+        for cmd in (
+            'echo PR_SENTINEL_OVERRIDE=x && gh run watch 5',
+            'gh run watch 5 --repo o/PR_SENTINEL_OVERRIDE=x',
+            'PR_SENTINEL_OVERRIDE= gh run watch 5',      # empty value
+            'PR_SENTINEL_OVERRIDE="  " gh run watch 5',  # whitespace-only
+            'gh run watch 5',
+        ):
+            self.assertEqual(guard.inline_override(cmd), "", cmd)
+
+
 class WatcherLaunchUnit(unittest.TestCase):
     """The airtight, fail-safe watcher-launch matcher behind the auto-allow."""
 
@@ -176,6 +211,22 @@ class GuardEndToEnd(unittest.TestCase):
                                env={"PR_SENTINEL_OVERRIDE": "flaky infra once"})
         self.assertEqual(out.strip(), "")
         self.assertEqual(rc, 0)
+
+    def test_inline_override_downgrades_to_allow(self):
+        # The form the deny message names, with nothing in the environment.
+        for cmd in (
+            'PR_SENTINEL_OVERRIDE="one-off format probe" gh run watch 5',
+            'mkdir -p out && PR_SENTINEL_OVERRIDE=why gh run watch 5 > out/x',
+        ):
+            out, _, rc = run_guard(bash_payload(cmd))
+            self.assertEqual(out.strip(), "", cmd)
+            self.assertEqual(rc, 0)
+
+    def test_deny_names_the_inline_prefix_form(self):
+        out, _, _ = run_guard(bash_payload("gh run watch 5"))
+        reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("inline", reason)
+        self.assertIn("PR_SENTINEL_OVERRIDE=<reason>", reason)
 
     def test_override_empty_still_denies(self):
         out, _, _ = run_guard(bash_payload("gh run watch"),
