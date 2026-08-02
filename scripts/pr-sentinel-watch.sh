@@ -45,11 +45,12 @@ BACKOFF_NUM="${PR_SENTINEL_BACKOFF_NUM:-3}"      # backoff multiplier numerator
 BACKOFF_DEN="${PR_SENTINEL_BACKOFF_DEN:-2}"      # backoff multiplier denominator
 TIMEOUT="${PR_SENTINEL_TIMEOUT:-3600}"           # overall watch budget, seconds
 LOG_MAX_BYTES="${PR_SENTINEL_LOG_MAX_BYTES:-8192}"  # CI log excerpt cap, bytes
-# Transient-failure retry horizon: a `gh` query that keeps failing (but with
-# auth healthy and the PR still resolvable) is retried with backoff for up to
-# this many seconds before giving up with an `error` event. A poll loop can
-# afford to miss cycles, so this is generous — a brief GitHub API hiccup must
-# not kill the watch and wake the session for nothing.
+# Transient-failure retry horizon: a `gh` query that keeps failing without
+# proving a permanent cause (the PR still resolvable, credentials not provably
+# absent) is retried with backoff for up to this many seconds before giving up
+# with an `error` event. A poll loop can afford to miss cycles, so this is
+# generous — a brief GitHub API hiccup must not kill the watch and wake the
+# session for nothing.
 GH_RETRY_HORIZON="${PR_SENTINEL_GH_RETRY_HORIZON:-900}"  # transient-retry horizon, seconds
 
 # Conflict/behind heal strategy the report recommends: rebase (default) or
@@ -68,6 +69,11 @@ WATCH_UNTIL=$(printf '%s' "${PR_SENTINEL_WATCH_UNTIL:-ready}" | tr '[:upper:]' '
 # Set to 1 once a `ready_watching` notice has been emitted, so it is reported
 # exactly once per run (WATCH_UNTIL=closed only).
 READY_REPORTED=0
+
+# Set by auth_definitely_broken to whether the last `gh auth status` probe
+# failed at all — including ambiguously. One failure proves nothing, but a probe
+# still failing at the retry horizon is worth naming in the give-up report.
+AUTH_PROBE_FAILED=0
 
 # --------------------------------------------------------------------------
 # Helpers
@@ -109,13 +115,40 @@ gh_pr_state() {
 		-q '[.state, .mergeStateStatus, .baseRefName, .headRefOid] | @tsv'
 }
 
+# Decide whether `gh auth status` proves there are no credentials. Returns 0
+# only on that positive proof; 1 when auth is healthy OR the probe failed
+# ambiguously.
+#
+# Exit code alone is not evidence. The probe runs in the moment right after a
+# query failure, so whatever killed the query — a network blip, a GitHub 5xx,
+# keyring contention — is the likeliest thing to kill the probe too, and gh
+# does not distinguish: with the network unreachable, `gh auth status` prints
+# "The token in keyring is invalid." (verified against gh 2.96) for a token
+# that is perfectly valid. Trusting that reports a permanent auth failure on
+# healthy auth and wakes the session for nothing.
+#
+# The one conclusive case is having no credentials configured at all, which gh
+# answers from local config without a network round-trip. Match that text and
+# nothing else; everything ambiguous falls through to the retry loop.
+auth_definitely_broken() {
+	local out
+	AUTH_PROBE_FAILED=0
+	# `&&` list so `set -e` doesn't abort on the expected non-zero exit.
+	out=$(gh auth status 2>&1) && return 1
+	AUTH_PROBE_FAILED=1
+	case "$out" in
+		*"not logged into any GitHub host"*) return 0 ;;
+	esac
+	return 1
+}
+
 # Fetch the PR scalars, classifying any failure as permanent or transient.
-# Sets `gh_state` and returns 0 on success. On a PERMANENT failure — a failing
-# `gh auth status`, or a definitive "PR/repo not resolvable" — it calls
-# emit_error (which exits). On a TRANSIENT failure (auth healthy, PR still
-# resolvable in principle: a network blip, a 5xx, rate limiting) it returns 1
-# so the caller can back off and retry. One `gh pr view` call on the hot path;
-# the extra `gh auth status` runs only when a query has already failed.
+# Sets `gh_state` and returns 0 on success. On a PERMANENT failure — proof of
+# missing credentials, or a definitive "PR/repo not resolvable" — it calls
+# emit_error (which exits). On a TRANSIENT failure (a network blip, a 5xx, rate
+# limiting, or an auth probe too ambiguous to act on) it returns 1 so the
+# caller can back off and retry. One `gh pr view` call on the hot path; the
+# extra `gh auth status` runs only when a query has already failed.
 gh_state_fetch() {
 	local out
 	# Merge stderr into the capture so a failure's diagnostics are classifiable.
@@ -125,10 +158,10 @@ gh_state_fetch() {
 		gh_state="$out"
 		return 0
 	fi
-	# Auth is the clearest permanent signal: if the token is gone/expired, no
-	# amount of retrying helps — hand back so the human can re-auth.
-	if ! gh auth status >/dev/null 2>&1; then
-		emit_error "gh auth status is failing — re-authenticate with 'gh auth login'"
+	# No credentials at all is permanent: no amount of retrying helps — hand
+	# back so the human can log in.
+	if auth_definitely_broken; then
+		emit_error "gh has no GitHub credentials — log in with 'gh auth login'"
 	fi
 	# A definitive not-found (bad PR number, wrong repo) is also permanent.
 	case "$out" in
@@ -376,8 +409,13 @@ main() {
 				warn "gh query failed transiently; retrying in ${retry_sleep}s"
 				sleep "$retry_sleep"
 				if gh_state_fetch; then break; fi
-				(( $(now) >= retry_deadline )) \
-					&& emit_error "gh pr view kept failing for ${GH_RETRY_HORIZON}s (transient)"
+				if (( $(now) >= retry_deadline )); then
+					# A probe still failing after the whole horizon IS evidence,
+					# unlike the single instantaneous failure that opened it.
+					(( AUTH_PROBE_FAILED == 1 )) && emit_error \
+						"gh pr view and 'gh auth status' both kept failing for ${GH_RETRY_HORIZON}s — check the network, then whether the token is expired"
+					emit_error "gh pr view kept failing for ${GH_RETRY_HORIZON}s (transient)"
+				fi
 				retry_sleep=$(( retry_sleep * BACKOFF_NUM / BACKOFF_DEN ))
 			done
 		fi

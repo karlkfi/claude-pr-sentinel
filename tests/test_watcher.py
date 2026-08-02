@@ -320,16 +320,81 @@ class WatcherCase(unittest.TestCase):
         )
         return proc.returncode, proc.stdout, proc.stderr
 
-    def test_error_event_on_auth_failure(self):
-        """A gh that always fails, including `gh auth status`, is a PERMANENT
-        auth failure — hand back immediately with an `error` event."""
-        rc, out, err = self._run_with_gh(
-            "#!/usr/bin/env bash\nexit 1\n",
-            env={"PR_SENTINEL_GH_RETRY_HORIZON": "60"},
+    def test_error_event_on_missing_credentials(self):
+        """`gh auth status` saying there are no credentials at all is decided
+        from local config with no network round-trip, so it is a PERMANENT
+        failure — hand back immediately with an `error` event."""
+        gh = textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -u
+            case "${1:-}:${2:-}" in
+              auth:status)
+                echo "You are not logged into any GitHub hosts. To log in, run: gh auth login" >&2
+                exit 1 ;;
+              *) exit 1 ;;
+            esac
+            """
         )
+        rc, out, err = self._run_with_gh(gh, env={"PR_SENTINEL_GH_RETRY_HORIZON": "60"})
         self.assertEqual(rc, 0)
         self.assertIn("PR-SENTINEL EVENT: error", out)
-        self.assertIn("auth", out.lower())
+        self.assertIn("no GitHub credentials", out)
+
+    def test_correlated_auth_probe_failure_is_not_permanent(self):
+        """Regression for #26. The blip that kills `gh pr view` also kills the
+        `gh auth status` probe fired right after it, and gh reports a plain
+        network outage as an invalid token. That correlated failure must NOT be
+        diagnosed as permanent auth loss: it falls through to the retry loop and
+        recovers silently once gh does."""
+        gh = textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -u
+            c="$GH_STUB_DIR/.c"; n=0; [[ -f "$c" ]] && n=$(cat "$c")
+            case "${1:-}:${2:-}" in
+              auth:status)
+                # gh's own wording for an unreachable network -- a lie we must
+                # not act on. Recovers in step with the query below.
+                if (( n <= 2 )); then
+                  echo "  X Failed to log in to github.com account octocat (keyring)" >&2
+                  echo "  - The token in keyring is invalid." >&2
+                  exit 1
+                fi
+                exit 0 ;;
+              pr:view)
+                n=$((n + 1)); echo "$n" > "$c"
+                if (( n <= 2 )); then echo "dial tcp: lookup api.github.com: no such host" >&2; exit 1; fi
+                printf 'MERGED\\tUNKNOWN\\tmain\\t\\n'; exit 0 ;;
+              *) exit 0 ;;
+            esac
+            """
+        )
+        rc, out, err = self._run_with_gh(gh, env={"PR_SENTINEL_GH_RETRY_HORIZON": "30"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: closed", out)
+        self.assertNotIn("EVENT: error", out)
+
+    def test_persistently_failing_auth_probe_named_at_horizon(self):
+        """A probe that is still failing at the retry horizon IS evidence,
+        unlike the single failure that opened it — so the give-up report points
+        at auth even though the text never proved credentials were missing."""
+        gh = textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -u
+            case "${1:-}:${2:-}" in
+              auth:status) echo "  - The token in keyring is invalid." >&2; exit 1 ;;
+              pr:view) echo "HTTP 401: Bad credentials" >&2; exit 1 ;;
+              *) exit 0 ;;
+            esac
+            """
+        )
+        rc, out, err = self._run_with_gh(gh, env={"PR_SENTINEL_GH_RETRY_HORIZON": "2"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: error", out)
+        self.assertIn("gh auth status", out)
+        self.assertIn("token is expired", out)
 
     def test_error_event_on_unresolvable_pr(self):
         """`gh pr view` failing with 'Could not resolve to a PullRequest' while
