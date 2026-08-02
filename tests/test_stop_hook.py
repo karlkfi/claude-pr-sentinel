@@ -353,6 +353,35 @@ class NeedsWatcherLogic(unittest.TestCase):
         self.assertEqual(block, set())
         self.assertEqual(dampened, {"42"})
 
+    # -- issue #29: `blocked` is terminal, `blocked_watching` is not ----------
+
+    def test_blocked_concludes(self):
+        # Both causes of a `blocked` report — an outstanding approval, or a
+        # required check that never registered — need a human, and neither is
+        # waited out. Re-blocking would just have the session relaunch a watcher
+        # that reports the same thing.
+        report = ("PR-SENTINEL EVENT: blocked\nPR: 42\nState: OPEN\n"
+                  "mergeStateStatus: BLOCKED (merge requirement unsatisfied)\n")
+        with real_outfile(report) as fp:
+            self.assertEqual(needs([
+                *created_pr(42),
+                launch_watcher(42, "toolu_w"),
+                task_notification("toolu_w", outfile=fp),
+            ]), set())
+
+    def test_blocked_watching_notice_does_not_conclude(self):
+        # Same rule as ready_watching: the notice means the watch continues, so
+        # a watcher that then exits without a terminal event leaves the PR open
+        # and unwatched.
+        report = ("PR-SENTINEL EVENT: blocked_watching\nPR: 42\nState: OPEN\n"
+                  "mergeStateStatus: BLOCKED (merge requirement unsatisfied)\n")
+        with real_outfile(report) as fp:
+            self.assertEqual(needs([
+                *created_pr(42),
+                launch_watcher(42, "toolu_w"),
+                task_notification("toolu_w", outfile=fp),
+            ]), {"42"})
+
     def test_concluded_via_gh_pr_merge_allows(self):
         self.assertEqual(needs([
             *created_pr(42),

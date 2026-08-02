@@ -96,8 +96,8 @@ session to launch the watcher before stopping:
 | opened a PR this session (or watched one), **no** live watcher, PR not handed off | **block once** — launch the watcher for `#N` |
 | the watcher has reported the **same** `check_failure` twice (same failed checks, same head commit) | **allow + warn** — the failure isn't changing, so stop nagging; a non-blocking notice keeps the red PR visible |
 | a launched watcher hasn't reported completion yet (still running) | silent (already covered) |
-| PR handed off (watcher **terminal** `ready`/`closed`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
-| the watcher's output ends on a `ready_watching` **notice** (a `PR_SENTINEL_WATCH_UNTIL=closed` watch that exited without a terminal event) | **block once** — green isn't a handoff in that mode; the PR is still open and unwatched |
+| PR handed off (watcher **terminal** `ready`/`closed`/`blocked`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
+| the watcher's output ends on a `ready_watching` or `blocked_watching` **notice** (a `PR_SENTINEL_WATCH_UNTIL=closed` watch that exited without a terminal event) | **block once** — a notice isn't a handoff in that mode; the PR is still open and unwatched |
 | no PR opened or watched this session | silent (a PR merely viewed or commented on is not yours) |
 | `stop_hook_active` already set (a prior block) | silent — **never loops** |
 | unreadable transcript / any uncertainty | silent (fail-open) |
@@ -134,8 +134,10 @@ needed:
 | a required check concluded fail/cancel | **check_failure** | fix the failure (log excerpt attached), push, relaunch |
 | `mergeStateStatus == DIRTY` | **conflict** | rebase onto `<base>` (default), resolve, `git push --force-with-lease`, relaunch — or merge (`PR_SENTINEL_HEAL=merge`) |
 | `mergeStateStatus == BEHIND` | **behind** | rebase onto `<base>` (default) and force-push with lease, relaunch — or merge to fast-forward (`PR_SENTINEL_HEAL=merge`) |
-| all checks green, no conflict | **ready** | hand back to a human for merge review — **never auto-merge** |
+| all checks green, no conflict, `mergeStateStatus != BLOCKED` | **ready** | hand back to a human for merge review — **never auto-merge** |
 | all checks green, no conflict, **and** `PR_SENTINEL_WATCH_UNTIL=closed` | *(notice: **ready_watching**, keep polling)* | nothing — the watch continues past green (see [Configuration](#configuration)) |
+| all checks green but `mergeStateStatus == BLOCKED` for `PR_SENTINEL_BLOCKED_POLLS` polls running | **blocked** | don't treat it as green: a required check may never have registered, or an approval is outstanding (see [Green is not the same as ready](#green-is-not-the-same-as-ready)) |
+| the same, **and** `PR_SENTINEL_WATCH_UNTIL=closed` | *(notice: **blocked_watching**, keep polling)* | nothing — the watch continues |
 | PR merged or closed | **closed** | done; stop watching |
 | watch budget elapsed | **timeout** | re-check and relaunch if still open |
 | `gh` auth broken, PR unresolvable, or transient failures past the retry horizon | **error** | check `gh auth status`, relaunch |
@@ -343,6 +345,7 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_GH_RETRY_HORIZON` | `900` | how long (seconds) to retry *transient* `gh` failures with backoff before an `error` event; permanent failures (bad auth, unresolvable PR) exit at once |
 | `PR_SENTINEL_HEAL` | `rebase` | conflict/behind heal the report recommends: `rebase` or `merge` (see below); unrecognised values fall back to `rebase` |
 | `PR_SENTINEL_WATCH_UNTIL` | `ready` | stopping condition: `ready` ends the watch when the PR goes green; `closed` keeps watching past green so a *later* conflict still wakes you (see below); unrecognised values fall back to `ready` |
+| `PR_SENTINEL_BLOCKED_POLLS` | `3` | consecutive polls an all-green-but-`BLOCKED` PR must hold before the `blocked` event fires (see [Green is not the same as ready](#green-is-not-the-same-as-ready)) |
 | `PR_SENTINEL_BACKOFF_NUM` / `_DEN` | `3` / `2` | backoff multiplier (interval × num ÷ den each idle poll) |
 | `PR_SENTINEL_AUTOALLOW` | (on) | auto-approve the plugin's own watcher launch so it isn't prompted by the base Bash permission; `0`/`false`/empty keeps the prompt (see below) |
 | `PR_SENTINEL_DISABLE` | (unset) | `1` disables the PostToolUse nudge, the Stop backstop, and the watcher-launch auto-allow |
@@ -418,6 +421,30 @@ notice lands in the watcher's task output instead. And a watch that now spans
 human review time usually wants a larger `PR_SENTINEL_TIMEOUT` than the 1-hour
 default, or it will wake with a `timeout` event and need a relaunch.
 
+### Green is not the same as ready
+
+`gh pr checks` returns one row per check that **exists**. A required check whose
+workflow never registered — the classic case being a path-filtered heavy gate on
+a pull request that started out docs-only — has no row at all, so it cannot show
+up as pending, and the checks that *did* run all read green. Counting buckets
+can't see the hole.
+
+`mergeStateStatus` can. `BLOCKED` with nothing failing and nothing pending means
+GitHub still has an unsatisfied merge requirement, so the watcher will not call
+that PR ready. What it can't tell you is *which* requirement: an outstanding
+approval looks identical from here, and reading the branch's required-check list
+would need a second API call and a token that can read branch protection.
+
+So the watcher separates the two by persistence instead. A check that is merely
+slow to register turns up as `pending` within a poll or two; a requirement that
+is genuinely stuck doesn't move. After `PR_SENTINEL_BLOCKED_POLLS` consecutive
+green-but-`BLOCKED` polls (default 3 — roughly two and a half minutes at the
+default interval, with backoff), the watcher reports **`blocked`** and hands the
+ambiguity to you. Any poll that isn't green-and-blocked resets the streak.
+
+`blocked` is terminal and counts as a handoff to the Stop hook, because both
+causes need a human and neither can be waited out.
+
 ## Agent guidance
 
 Paste this into your project's `CLAUDE.md` (or `AGENTS.md`) so the agent uses
@@ -434,7 +461,7 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
 - **Launch the watcher as a background task** (run_in_background):
   `bash "${CLAUDE_PLUGIN_ROOT}/scripts/pr-sentinel-watch.sh" <PR>`. It sleeps
   and wakes you only when a check fails, a conflict appears, the PR goes green,
-  or the PR closes.
+  the merge stays blocked, or the PR closes.
 - **When it wakes you**, act on the single reported event, push, and relaunch
   the watcher. Heal conflicts the way the report says: by default, **rebase onto
   the base** (`git rebase origin/<base>`, then `git push --force-with-lease`);
@@ -469,6 +496,11 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
   remain.
 - **Required-vs-optional checks** aren't distinguished — any failing/cancelled
   check triggers `check_failure`. This errs toward waking you.
+- **A `blocked` report can't name the requirement.** The watcher doesn't read
+  branch protection, so an unregistered required check and an outstanding
+  approval produce the same event (see [Green is not the same as
+  ready](#green-is-not-the-same-as-ready)). It errs toward telling you the PR
+  isn't ready rather than guessing why.
 
 ## Roadmap
 
