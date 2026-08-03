@@ -8,7 +8,8 @@
 # printed on stdout is the wake payload.
 #
 # Exit-worthy events (one per run):
-#   check_failure  a required check concluded failure/error/cancelled
+#   check_failure  a check concluded failure/error/cancelled and the workflow
+#                  run it belongs to did not absorb it (see failures_absorbed)
 #   conflict       the PR is CONFLICTING (mergeStateStatus == DIRTY)
 #   behind         the PR branch is BEHIND its base (needs a base merge)
 #   ready          all checks are green and the PR is mergeable (no conflict)
@@ -201,6 +202,42 @@ gh_pr_checks() {
 # https://github.com/o/r/actions/runs/123456/job/789. Empty if none.
 run_id_from_link() {
 	printf '%s\n' "$1" | sed -n 's#.*/actions/runs/\([0-9][0-9]*\).*#\1#p' | head -n1
+}
+
+# Turn the same link into the run's REST path, `repos/<owner>/<repo>/actions/
+# runs/<id>`. Taking owner/repo from the link keeps the lookup correct for a PR
+# in another repo (the watcher accepts a full PR URL). Empty when the link is
+# not an Actions run — an external status check has no run behind it.
+run_api_path_from_link() {
+	printf '%s\n' "$1" \
+		| sed -n 's#^https://[^/]*/\([^/]*\)/\([^/]*\)/actions/runs/\([0-9][0-9]*\).*#repos/\1/\2/actions/runs/\3#p' \
+		| head -n1
+}
+
+# Whether every failing check was absorbed by `continue-on-error`. Such a job
+# fails its own check row — `gh pr checks` reports bucket=fail, indistinguishable
+# from a real failure — but it does not fail the workflow run, so the run's
+# conclusion is the only place the distinction survives. A run GitHub concluded
+# `success` is GitHub's own verdict that nothing failing inside it blocks the
+# merge, which beats any inference the watcher could make locally.
+#
+# Fail safe to "not absorbed": a check with no Actions run behind it, a run still
+# in progress, and an unreadable conclusion all return 1, so an unknown stays a
+# wake. One `gh api` call per distinct run, only on a poll that already found a
+# failure.
+failures_absorbed() {
+	local links="$1" link path conclusion seen="" resolved=0
+	while IFS= read -r link; do
+		[[ -z "$link" ]] && continue
+		path=$(run_api_path_from_link "$link")
+		[[ -z "$path" ]] && return 1
+		case " $seen " in *" $path "*) continue ;; esac
+		seen="$seen $path"
+		conclusion=$(gh api "$path" -q '.conclusion' 2>/dev/null || true)
+		[[ "$conclusion" == "success" ]] || return 1
+		resolved=$(( resolved + 1 ))
+	done <<<"$links"
+	(( resolved > 0 ))
 }
 
 # Print the sanitized, size-capped CI log excerpt for a failed run id.
@@ -510,7 +547,21 @@ main() {
 			done <<<"$checks"
 		fi
 
-		# (a) required check failed
+		# A failing check whose run still concluded `success` was made
+		# advisory with `continue-on-error: true`. That is a permanent state
+		# by design — a new platform, a lint being rolled out — so reporting
+		# it wakes the session on every PR for a job whose whole point is not
+		# to gate. Count those as passing instead. The suppression goes to
+		# stderr so the task log records it without waking anyone.
+		if (( fail_count > 0 )) && failures_absorbed "$failed_links"; then
+			warn "failing checks absorbed by continue-on-error (workflow run concluded success): ${failed_names}"
+			pass_count=$(( pass_count + fail_count ))
+			fail_count=0
+			failed_names=""
+			failed_links=""
+		fi
+
+		# (a) a check failed and its run did not absorb it
 		if (( fail_count > 0 )); then
 			emit_check_failure "$failed_names" "$failed_links"
 		fi

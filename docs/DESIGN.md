@@ -126,6 +126,21 @@ action. `Head SHA:` sits in the header, above the CI-log excerpt, so the Stop
 hook can trust it (see the dampening note below) — a copy planted inside the
 excerpt cannot be mistaken for it.
 
+Before a check failure is reported at all, the watcher asks GitHub whether the
+failure actually blocks anything. A job marked `continue-on-error: true` fails
+its own check row — `gh pr checks` reports `bucket=fail`, indistinguishable from
+a real failure — while the workflow run it belongs to still concludes `success`.
+The run conclusion is the only place that distinction survives, so the watcher
+resolves each failing check's run — `gh api` on the run path, taken from the
+link the check already carries — and treats the failures as passing when
+**every** one of them sits in a run GitHub concluded `success`.
+That is GitHub's own verdict that nothing failing inside the run blocks the
+merge — a stronger signal than any local inference, and it needs no
+branch-protection read. Absorption is all-or-nothing and fails safe: a check
+with no Actions run behind it, a run still in progress, or an unreadable
+conclusion all stay a wake. The suppression is logged to stderr, which the
+background task keeps and which never wakes the session.
+
 For a **check failure**, the report appends a CI log excerpt. That excerpt is
 the single most dangerous input this tool handles, so it is treated as
 **semi-untrusted data**:
@@ -150,9 +165,9 @@ These are the point of the plugin, not a footnote.
 
 1. **Never ingest the human/attacker-writable channels.** The watcher queries
    **only** GitHub-controlled check metadata and mergeable state
-   (`gh pr view --json state,mergeStateStatus,baseRefName`,
-   `gh pr checks`). It never requests, and never parses, the PR **body**, PR
-   **review comments**, or **issue comments** — the exact channel the built-in
+   (`gh pr view --json state,mergeStateStatus,baseRefName`, `gh pr checks`, and
+   a workflow run's `conclusion`). It never requests, and never parses, the PR
+   **body**, PR **review comments**, or **issue comments** — the exact channel the built-in
    autofix trigger uses (#66097). The only free-form text it surfaces is the
    session's **own** CI log excerpts, handled as semi-untrusted data as above.
 
