@@ -320,8 +320,10 @@ the session relaunch a watcher that reports the same thing — the livelock clas
 The watcher's whole function is to observe remote GitHub state, so it must talk
 to GitHub (via the already-authenticated `gh` CLI). The **hook**, by contrast,
 stays purely local: it inspects the just-run command and its output text and
-emits a nudge. Keeping the hook network-free keeps it fast (it runs on the
-`Bash` critical path) and keeps its privacy story simple (see
+emits a nudge. Its one lookup outside that text is also local — on a push
+naming a bare ref, `git rev-parse` says whether the ref is a tag, so a release
+cut doesn't read as PR work. Keeping the hook network-free keeps it fast (it
+runs on the `Bash` critical path) and keeps its privacy story simple (see
 [`PRIVACY.md`](../PRIVACY.md)).
 
 ### Why the nudge is advisory
