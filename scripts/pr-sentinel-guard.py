@@ -15,11 +15,19 @@ Fires on a `Bash` command the session is *about to run*. Two branches:
   `PR_SENTINEL_DISABLE=1`.
 
 * **Deny** — if the command is a blocking foreground poll (`gh pr checks
-  --watch`, `gh run watch`, or a `while/until … sleep …` poll loop), it returns
-  a PreToolUse `deny` whose reason points at the watcher. The deny is UNIFORM
-  across permission modes: a hard `deny` (never `ask`), so a
+  --watch`, `gh run watch`, or a `while/until … sleep …` loop that polls `gh`),
+  it returns a PreToolUse `deny` whose reason points at the watcher. The deny is
+  UNIFORM across permission modes: a hard `deny` (never `ask`), so a
   `bypassPermissions`/headless run self-corrects instead of stalling on an
   unanswerable prompt.
+
+  The deny is scoped to the harm it names. A call submitted with
+  `run_in_background` cannot block the session or burn idle tokens, so it is
+  never denied — backgrounding IS the fix, and it's the only one available for a
+  run with no PR to watch (a tag-triggered release build). A poll loop is denied
+  only when it polls GitHub via `gh`; a loop around `curl` against an unrelated
+  host isn't CI polling under any reading, and this hook has no business
+  refusing it.
 
 Escape hatch: `PR_SENTINEL_OVERRIDE=<reason>` (any non-empty value) downgrades
 the deny — the hook defers, letting the command proceed under the normal
@@ -209,6 +217,28 @@ def _is_gh_run_watch(group):
     return non_flags[:2] == ['run', 'watch']
 
 
+# `gh` in command position: at the start, after whitespace or a shell operator,
+# or opening a substitution (`$(gh …)`, `` `gh …` ``) — which the tokenizer
+# hands back as one opaque token, so this is matched on the raw string. An
+# optional path prefix covers `/usr/local/bin/gh`.
+_GH_COMMAND_RE = re.compile(r'(?:\A|[\s;|&(`!])(?:[^\s;|&(`]*/)?gh\s')
+
+
+def polls_gh(command):
+    """Whether `command` invokes `gh` anywhere — the only CI a poll loop can be
+    watching, since this plugin reads GitHub through `gh` and nothing else. A
+    loop around some other subject is not this hook's business."""
+    return bool(_GH_COMMAND_RE.search(command))
+
+
+def is_backgrounded(tool_input):
+    """Whether the Bash call was submitted with `run_in_background` — the
+    harness's own signal that it will not block the session. Any truthy value
+    counts; an unrecognised shape reads as backgrounded, which errs toward not
+    denying."""
+    return bool(tool_input.get('run_in_background'))
+
+
 def classify_poll(command):
     """Return a short poll-shape label for a foreground-poll command, or None.
 
@@ -229,7 +259,7 @@ def classify_poll(command):
             has_loop_kw = True
         elif lead == 'sleep':
             has_sleep = True
-    if has_loop_kw and has_sleep:
+    if has_loop_kw and has_sleep and polls_gh(command):
         return 'sleep_loop'
     return None
 
@@ -257,6 +287,9 @@ def build_reason(shape):
         f'fails, a conflict appears, the PR goes green, or the PR closes. '
         f'When it wakes you, act on the reported event, push, and relaunch it. '
         f'Never auto-merge.\n'
+        f'If there is no PR to watch — a tag-triggered release build, say — '
+        f're-run this same command as a background task '
+        f'(run_in_background: true); only the foreground form is denied.\n'
         f'If you genuinely need this one command, re-run it with an inline '
         f'PR_SENTINEL_OVERRIDE=<reason> prefix on the command itself '
         f'(PR_SENTINEL_OVERRIDE="why this once" <command>).'
@@ -280,7 +313,8 @@ def main():
         return  # unparseable input: defer
     if data.get('tool_name') != 'Bash':
         return
-    command = (data.get('tool_input') or {}).get('command') or ''
+    tool_input = data.get('tool_input') or {}
+    command = tool_input.get('command') or ''
     if not command.strip():
         return
 
@@ -293,6 +327,12 @@ def main():
             'hookEventName': 'PreToolUse',
             'permissionDecision': 'allow',
             'permissionDecisionReason': build_allow_reason()}}))
+        return
+
+    # A backgrounded call can't block the session or burn idle tokens, so the
+    # harm the deny names doesn't apply. Checked after the auto-allow, which the
+    # watcher's own (backgrounded) launch still needs.
+    if is_backgrounded(tool_input):
         return
 
     if (os.environ.get('PR_SENTINEL_OVERRIDE', '').strip()

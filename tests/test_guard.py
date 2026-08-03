@@ -40,8 +40,11 @@ def run_guard(payload, env=None):
     return proc.stdout, proc.stderr, proc.returncode
 
 
-def bash_payload(command):
-    return {"tool_name": "Bash", "tool_input": {"command": command}}
+def bash_payload(command, background=False):
+    tool_input = {"command": command}
+    if background:
+        tool_input["run_in_background"] = True
+    return {"tool_name": "Bash", "tool_input": tool_input}
 
 
 class ClassifyPollUnit(unittest.TestCase):
@@ -75,6 +78,30 @@ class ClassifyPollUnit(unittest.TestCase):
                 "until ! gh run view -q .status | grep -q completed; "
                 "do sleep 15; done"),
             "sleep_loop")
+        # `gh` inside a command substitution — the tokenizer hands that back as
+        # one opaque token, so the subject check reads the raw string (#36)
+        self.assertEqual(
+            guard.classify_poll(
+                'until [ "$(gh run view 7 --json status --jq .status)" '
+                '= "completed" ]; do sleep 30; done'),
+            "sleep_loop")
+        self.assertEqual(
+            guard.classify_poll(
+                "until /usr/local/bin/gh pr checks; do sleep 10; done"),
+            "sleep_loop")
+
+    def test_sleep_loops_on_non_gh_subjects_pass(self):
+        """A poll loop this plugin has no claim on — nothing about it is CI
+        (#36)."""
+        for cmd in (
+            "until curl -sS https://example.test/versions.json "
+            "| grep -q '1.3.0'; do sleep 20; done",
+            "until [ -f build/done ]; do sleep 5; done",
+            "while ! nc -z localhost 8080; do sleep 1; done",
+            # 'gh' as a filename fragment is not a `gh` invocation
+            "until [ -f out.gh ]; do sleep 5; done",
+        ):
+            self.assertIsNone(guard.classify_poll(cmd), cmd)
 
     def test_non_poll_commands_pass(self):
         # gh status reads that DON'T block
@@ -222,6 +249,13 @@ class GuardEndToEnd(unittest.TestCase):
             self.assertEqual(out.strip(), "", cmd)
             self.assertEqual(rc, 0)
 
+    def test_deny_names_the_backgrounded_fallback(self):
+        # The remedy for a run with no PR to watch (#36).
+        out, _, _ = run_guard(bash_payload("gh run watch 5"))
+        reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("no PR to watch", reason)
+        self.assertIn("run_in_background", reason)
+
     def test_deny_names_the_inline_prefix_form(self):
         out, _, _ = run_guard(bash_payload("gh run watch 5"))
         reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
@@ -275,6 +309,35 @@ class GuardEndToEnd(unittest.TestCase):
         self.assertIn("Traceback", proc.stderr)
 
 
+class BackgroundedCallsEndToEnd(unittest.TestCase):
+    """`run_in_background` is the harness's own signal that the call can't
+    block the session — the harm the deny names. So it defers (#36)."""
+
+    def test_backgrounded_polls_are_not_denied(self):
+        for cmd in (
+            "gh run watch 5 --exit-status",
+            "gh pr checks --watch",
+            'until [ "$(gh run view 7 --json status --jq .status)" '
+            '= "completed" ]; do sleep 30; done',
+        ):
+            out, _, rc = run_guard(bash_payload(cmd, background=True))
+            self.assertEqual(out.strip(), "", cmd)
+            self.assertEqual(rc, 0)
+
+    def test_same_command_in_the_foreground_still_denies(self):
+        out, _, _ = run_guard(bash_payload("gh run watch 5 --exit-status"))
+        self.assertEqual(json.loads(out)["hookSpecificOutput"]
+                         ["permissionDecision"], "deny")
+
+    def test_falsey_background_flag_still_denies(self):
+        payload = {"tool_name": "Bash",
+                   "tool_input": {"command": "gh run watch 5",
+                                  "run_in_background": False}}
+        out, _, _ = run_guard(payload)
+        self.assertEqual(json.loads(out)["hookSpecificOutput"]
+                         ["permissionDecision"], "deny")
+
+
 class AutoAllowEndToEnd(unittest.TestCase):
     """The PreToolUse auto-allow for the plugin's own watcher launch."""
 
@@ -301,6 +364,13 @@ class AutoAllowEndToEnd(unittest.TestCase):
         out, _, rc = self._run(f'bash "{WATCHER}" 42')
         self._assert_allow(out)
         self.assertEqual(rc, 0)
+
+    def test_backgrounded_launch_is_still_allowed(self):
+        # The launch the nudge names IS backgrounded — the auto-allow runs
+        # before the backgrounded-call defer, so the prompt is still skipped.
+        out, _, _ = run_guard(bash_payload(f'bash "{WATCHER}" 42', background=True),
+                              env={"CLAUDE_PLUGIN_ROOT": str(REPO)})
+        self._assert_allow(out)
 
     def test_autoallow_off_defers(self):
         for val in ("0", "false", "FALSE", ""):

@@ -93,8 +93,17 @@ Two fast-follow hooks have since shipped on top of that MVP. The **PreToolUse
 foreground-poll deny** ([`scripts/pr-sentinel-guard.py`](../scripts/pr-sentinel-guard.py))
 enforces the other side of the nudge: it *denies* a Bash command that would
 foreground-poll CI (`gh pr checks --watch`, `gh run watch`, a `while/until …
-sleep` loop) and points the fix-it at the watcher, with
-`PR_SENTINEL_OVERRIDE=<reason>` as the escape hatch. The **same** PreToolUse
+sleep` loop that runs `gh`) and points the fix-it at the watcher, with
+`PR_SENTINEL_OVERRIDE=<reason>` as the escape hatch. The deny reaches exactly as
+far as the harm it names — blocking the session and burning idle tokens. A call
+submitted with `run_in_background` does neither, so it is never denied; that is
+also the only answer available for a workflow run with **no PR** to watch (a
+tag-triggered release build), and the deny message says so. A poll loop is
+denied only when it polls GitHub through `gh`, the plugin's sole view of CI; a
+loop around `curl` against an unrelated host is not CI polling under any
+reading, and refusing it would be this hook overreaching into
+[foreground-guard](https://github.com/karlkfi/claude-foreground-guard)'s general
+blocking-command territory. The **same** PreToolUse
 hook also *allows* the plugin's own watcher launch (`bash <own-watch.sh> <PR>`),
 so the read-only command the nudge asks for isn't met by a base Bash permission
 prompt on every (re)launch — removing pure friction on a first-party command the

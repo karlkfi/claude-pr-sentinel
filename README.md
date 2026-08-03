@@ -67,16 +67,26 @@ fix-it at the background watcher. Unlike the advisory nudge, a deny is
 | --- | --- |
 | `gh pr checks --watch` (or `-w`) | **deny** — launch the background watcher instead |
 | `gh run watch` | **deny** — launch the background watcher instead |
-| `while …; do … sleep …; done` / `until …; do … sleep …; done` | **deny** — hand-rolled poll loop |
+| `while …; do … sleep …; done` / `until …; do … sleep …; done` **that runs `gh`** | **deny** — hand-rolled poll loop |
+| any of the above submitted with `run_in_background` | allow (deferred — a backgrounded call can't block the session) |
 | any of the above with an inline `PR_SENTINEL_OVERRIDE=<reason>` prefix (or the variable set in the session env) | **allow** (deferred to normal permissions) |
 | `bash …/pr-sentinel-watch.sh N` (the plugin's own watcher) | **allow** — auto-approved (no base Bash prompt), gated by `PR_SENTINEL_AUTOALLOW` |
 | `gh pr checks` · `gh run view` | allow (not a blocking poll — deferred to normal permissions) |
+| a poll loop around a non-`gh` subject (`until curl …; do sleep …; done`) | allow (not CI polling — not this plugin's business) |
 | a bare `sleep N` (no loop) · unrecognised shape | allow (fail-open — never deny when unsure) |
 
 The deny is a hard **deny**, not an `ask` — even in `bypassPermissions` mode —
 so a headless run self-corrects instead of stalling on an unanswerable prompt.
 Prefix the command with `PR_SENTINEL_OVERRIDE=<reason>` to allow one legitimate
 poll (see [Configuration](#configuration)).
+
+It reaches only as far as the harm it names — blocking the session and burning
+idle tokens. A call submitted with `run_in_background` does neither, so it is
+never denied; **for a workflow run with no PR to watch** — a tag-triggered
+release build, say — backgrounding the command is the answer, and the deny
+message points there. A poll loop is denied only when it polls GitHub through
+`gh`, the plugin's only view of CI; a loop around `curl` against an unrelated
+host is somebody else's problem.
 
 The watcher-launch **allow** is an explicit decision, not a mere defer: it
 short-circuits the base Bash permission prompt for the first-party, read-only
@@ -375,6 +385,10 @@ session can reach from inside a Bash call: a hook reads the environment
 Claude Code launched it with, which an `export` in some earlier Bash call never
 touched.
 
+Reach for it rarely. The deny already passes anything submitted with
+`run_in_background`, so "I need to wait on a run the watcher can't reach" is
+answered by backgrounding the command — no override, no session-wide env entry.
+
 `PR_SENTINEL_AUTOALLOW` is **on by default** and removes the base Bash approval
 prompt for the one first-party, read-only command the plugin asks you to run —
 `bash …/pr-sentinel-watch.sh <PR>` — on every (re)launch. Only that exact shape
@@ -457,12 +471,15 @@ the watcher instead of foreground-polling:
 This project uses pr-sentinel. After opening a PR or pushing a PR branch:
 
 - **Do NOT foreground-watch CI.** Never run `gh pr checks --watch`,
-  `gh run watch`, or a `until …; do sleep …; done` polling loop — they block
-  the session and burn tokens.
+  `gh run watch`, or a `until …; do sleep …; done` polling loop in the
+  foreground — they block the session and burn tokens.
 - **Launch the watcher as a background task** (run_in_background):
   `bash "${CLAUDE_PLUGIN_ROOT}/scripts/pr-sentinel-watch.sh" <PR>`. It sleeps
   and wakes you only when a check fails, a conflict appears, the PR goes green,
   the merge stays blocked, or the PR closes.
+- **For a workflow run with no PR** — a release tag build — there's nothing for
+  the watcher to attach to. Run `gh run watch <run-id> --exit-status` as a
+  background task instead; backgrounded calls aren't refused.
 - **When it wakes you**, act on the single reported event, push, and relaunch
   the watcher. Heal conflicts the way the report says: by default, **rebase onto
   the base** (`git rebase origin/<base>`, then `git push --force-with-lease`);
@@ -525,9 +542,10 @@ Scaffolded, not yet built — see [`docs/ROADMAP.md`](docs/ROADMAP.md):
 
 Shipped since the MVP:
 
-- **PreToolUse foreground-poll deny** — denies `gh pr checks --watch`,
-  `gh run watch`, and `while/until … sleep` poll loops with a fix-it pointing at
-  the watcher; `PR_SENTINEL_OVERRIDE=<reason>` allows a one-off (see the
+- **PreToolUse foreground-poll deny** — denies foreground `gh pr checks
+  --watch`, `gh run watch`, and `while/until … sleep` loops around `gh`, with a
+  fix-it pointing at the watcher; backgrounded calls pass, and
+  `PR_SENTINEL_OVERRIDE=<reason>` allows a one-off (see the
   [PreToolUse table](#what-it-does)).
 - **PreToolUse watcher-launch auto-allow** — auto-approves the plugin's own
   `bash …/pr-sentinel-watch.sh <PR>` (airtight, realpath-matched) so it isn't
