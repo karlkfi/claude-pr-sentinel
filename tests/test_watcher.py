@@ -284,6 +284,66 @@ class WatcherCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("PR-SENTINEL EVENT: ready", out)
 
+    # -- green confirmed across polls (issue #37) -----------------------------
+
+    def test_ready_waits_for_a_second_green_poll(self):
+        """The post-push window: the new run has not registered, so the head has
+        no check rows at all, and a repo with no branch protection reports CLEAN
+        regardless. That poll looks green on evidence from the previous run; the
+        next one sees the run and reports it pending."""
+        files = {
+            "pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
+            "pr_checks.1": "",  # run not registered yet
+            "pr_checks": "pending\tbuild\tlink\n",
+        }
+        rc, out, _ = self.run_watcher(files, env={"PR_SENTINEL_TIMEOUT": "3"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+        self.assertNotIn("EVENT: ready", out)
+
+    def test_green_streak_resets_on_a_pending_poll(self):
+        """Consecutive, like the BLOCKED streak: green, pending, green is two
+        streaks of one, and must not reach a threshold of two."""
+        files = {
+            "pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
+            "pr_checks.1": "pass\tlint\tlink\n",
+            "pr_checks.2": "pending\tbuild\tlink\n",
+            "pr_checks.3": "pass\tlint\tlink\n",
+            "pr_checks": "pending\tbuild\tlink\n",
+        }
+        rc, out, _ = self.run_watcher(files, env={"PR_SENTINEL_TIMEOUT": "4"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+        self.assertNotIn("EVENT: ready", out)
+
+    def test_green_polls_is_configurable(self):
+        """PR_SENTINEL_GREEN_POLLS=1 opts back into deciding on a single poll."""
+        files = {
+            "pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
+            "pr_checks.1": "",
+            "pr_checks": "pending\tbuild\tlink\n",
+        }
+        rc, out, _ = self.run_watcher(
+            files, env={"PR_SENTINEL_GREEN_POLLS": "1", "PR_SENTINEL_TIMEOUT": "3"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: ready", out)
+
+    def test_ready_watching_notice_also_waits_for_confirmation(self):
+        """The notice claims the same green, so it holds to the same evidence
+        bar — a single green poll must not produce it either."""
+        files = {
+            "pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
+            "pr_checks.1": "",
+            "pr_checks": "pending\tbuild\tlink\n",
+        }
+        rc, out, _ = self.run_watcher(
+            files,
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed", "PR_SENTINEL_TIMEOUT": "3"},
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+        self.assertNotIn("EVENT: ready_watching", out)
+
     # -- BLOCKED merge state (issue #29) -------------------------------------
 
     def _green_blocked(self):
@@ -430,7 +490,8 @@ class WatcherCase(unittest.TestCase):
         """`closed` is the terminal event in this mode."""
         files = {
             "pr_view.1": "OPEN\tCLEAN\tmain\tabc123\n",
-            "pr_view.2": "MERGED\tUNKNOWN\tmain\tabc123\n",
+            "pr_view.2": "OPEN\tCLEAN\tmain\tabc123\n",
+            "pr_view.3": "MERGED\tUNKNOWN\tmain\tabc123\n",
             "pr_checks": "pass\tbuild\thttps://github.com/o/r/actions/runs/11/job/1\n",
         }
         rc, out, _ = self.run_watcher(

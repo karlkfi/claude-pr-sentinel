@@ -72,7 +72,8 @@ task's stdout to the session as the wake payload.
    shellcheck-clean. Launched per-PR as a background task. Polls `gh` for check
    conclusions and `mergeStateStatus` on a configurable interval with backoff,
    and **exits** when: (a) a required check fails, (b) the PR becomes
-   `CONFLICTING`/`BEHIND`, (c) all checks are green and the PR is mergeable,
+   `CONFLICTING`/`BEHIND`, (c) all checks are green and the PR is mergeable on
+   two consecutive polls,
    (c′) all checks are green but the merge stays `BLOCKED` — see [Green is not
    ready](#green-is-not-ready-and-blocked-is-the-only-field-that-knows) — or
    (d) the PR is closed/merged. On exit it prints a structured, single-event
@@ -314,6 +315,23 @@ consecutive green-but-`BLOCKED` polls (default 3), the watcher emits a distinct
 terminal **`blocked`** event that names both candidate causes and explicitly
 refuses to call the PR green. Any poll that isn't green-and-blocked resets the
 streak, so the signal means "still blocked", not "was blocked once".
+
+The other branch of that `||` fails the same way with no branch protection
+involved (#37). In the window right after a push the new head has no check rows
+at all, so the pending count is zero for the absent-not-reported reason again;
+and `mergeStateStatus` is `CLEAN` for any PR with no unsatisfied requirement,
+which a repo without branch protection never has. `BLOCKED` cannot engage, and
+the evidence test degrades to "nothing failing, nothing pending" — the state it
+was written to reject. Repos on the free plan can't opt out of this by
+configuring protection; the API refuses to set any.
+
+Persistence is the instrument there too, one branch over. `ready` and its
+`ready_watching` notice need `PR_SENTINEL_GREEN_POLLS` consecutive green polls
+(default 2): an unregistered run turns up as pending on the second, while a
+genuinely green PR stays green. The confirming poll is scheduled at the base
+interval rather than the current backoff — it asks about the last few seconds,
+so inheriting a 300s idle interval would be perverse — which bounds the cost of
+the guard to one `PR_SENTINEL_INTERVAL` per genuine handoff.
 
 `blocked` joins `ready`/`closed` in the Stop hook's concluded set. Both causes
 need a human — a review gate is the human's turn by definition, and a gate that

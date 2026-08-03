@@ -145,8 +145,8 @@ needed:
 | every failing check belongs to a run that concluded `success` (`continue-on-error: true`) | *(treated as passing, keep polling)* | nothing — GitHub already ruled the failure non-blocking; the suppression is noted on the task's stderr |
 | `mergeStateStatus == DIRTY` | **conflict** | rebase onto `<base>` (default), resolve, `git push --force-with-lease`, relaunch — or merge (`PR_SENTINEL_HEAL=merge`) |
 | `mergeStateStatus == BEHIND` | **behind** | rebase onto `<base>` (default) and force-push with lease, relaunch — or merge to fast-forward (`PR_SENTINEL_HEAL=merge`) |
-| all checks green, no conflict, `mergeStateStatus != BLOCKED` | **ready** | hand back to a human for merge review — **never auto-merge** |
-| all checks green, no conflict, **and** `PR_SENTINEL_WATCH_UNTIL=closed` | *(notice: **ready_watching**, keep polling)* | nothing — the watch continues past green (see [Configuration](#configuration)) |
+| all checks green, no conflict, `mergeStateStatus != BLOCKED`, for `PR_SENTINEL_GREEN_POLLS` polls running | **ready** | hand back to a human for merge review — **never auto-merge** |
+| the same, **and** `PR_SENTINEL_WATCH_UNTIL=closed` | *(notice: **ready_watching**, keep polling)* | nothing — the watch continues past green (see [Configuration](#configuration)) |
 | all checks green but `mergeStateStatus == BLOCKED` for `PR_SENTINEL_BLOCKED_POLLS` polls running | **blocked** | don't treat it as green: a required check may never have registered, or an approval is outstanding (see [Green is not the same as ready](#green-is-not-the-same-as-ready)) |
 | the same, **and** `PR_SENTINEL_WATCH_UNTIL=closed` | *(notice: **blocked_watching**, keep polling)* | nothing — the watch continues |
 | PR merged or closed | **closed** | done; stop watching |
@@ -357,6 +357,7 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_HEAL` | `rebase` | conflict/behind heal the report recommends: `rebase` or `merge` (see below); unrecognised values fall back to `rebase` |
 | `PR_SENTINEL_WATCH_UNTIL` | `ready` | stopping condition: `ready` ends the watch when the PR goes green; `closed` keeps watching past green so a *later* conflict still wakes you (see below); unrecognised values fall back to `ready` |
 | `PR_SENTINEL_BLOCKED_POLLS` | `3` | consecutive polls an all-green-but-`BLOCKED` PR must hold before the `blocked` event fires (see [Green is not the same as ready](#green-is-not-the-same-as-ready)) |
+| `PR_SENTINEL_GREEN_POLLS` | `2` | consecutive green polls before `ready` fires, so a push whose run hasn't registered yet can't read as green (see [Green is not the same as ready](#green-is-not-the-same-as-ready)); `1` decides on a single poll |
 | `PR_SENTINEL_BACKOFF_NUM` / `_DEN` | `3` / `2` | backoff multiplier (interval × num ÷ den each idle poll) |
 | `PR_SENTINEL_AUTOALLOW` | (on) | auto-approve the plugin's own watcher launch so it isn't prompted by the base Bash permission; `0`/`false`/empty keeps the prompt (see below) |
 | `PR_SENTINEL_DISABLE` | (unset) | `1` disables the PostToolUse nudge, the Stop backstop, and the watcher-launch auto-allow |
@@ -459,6 +460,20 @@ ambiguity to you. Any poll that isn't green-and-blocked resets the streak.
 
 `blocked` is terminal and counts as a handoff to the Stop hook, because both
 causes need a human and neither can be waited out.
+
+The seconds right after a push are the same problem without the branch
+protection. The new head has no check rows until the run registers, so nothing
+is pending because nothing exists yet — and on a repo with no required checks,
+`mergeStateStatus` is `CLEAN` throughout, so `BLOCKED` never engages. That poll
+reads green on evidence from the *previous* run.
+
+Persistence answers this one too: the run registers within seconds and the next
+poll reports it pending. `ready` (and its `ready_watching` notice) therefore
+needs `PR_SENTINEL_GREEN_POLLS` consecutive green polls, default 2. It costs one
+poll interval on a genuine ready — the confirming poll is scheduled at
+`PR_SENTINEL_INTERVAL` rather than the backed-off interval, so a long CI run
+doesn't turn that into a five-minute wait. Set it to `1` to decide on a single
+poll.
 
 ## Agent guidance
 
