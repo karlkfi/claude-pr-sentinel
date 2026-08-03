@@ -62,6 +62,11 @@ GH_RETRY_HORIZON="${PR_SENTINEL_GH_RETRY_HORIZON:-900}"  # transient-retry horiz
 # resolves on its own within a poll or two once the workflow appears; the streak
 # is what tells that apart from a requirement that is genuinely stuck.
 BLOCKED_POLLS="${PR_SENTINEL_BLOCKED_POLLS:-3}"  # green+BLOCKED polls before `blocked`
+# Consecutive polls a PR must look green before `ready`. A push opens a window
+# in which the new run has not registered and the poll reads green on evidence
+# from the run before it; the next poll lands after it registers and reports
+# pending. See docs/plan/confirm-green.md.
+GREEN_POLLS="${PR_SENTINEL_GREEN_POLLS:-2}"  # green polls before `ready`
 
 # Conflict/behind heal strategy the report recommends: rebase (default) or
 # merge. Normalise to lowercase (bash 3.2: use tr, not ${var,,}) and fail safe
@@ -84,6 +89,9 @@ BLOCKED_REPORTED=0
 # Consecutive polls the PR has been green-but-BLOCKED. Reset by any poll that is
 # not, so the streak means "still blocked", not "was blocked once".
 BLOCKED_SEEN=0
+
+# Consecutive polls the PR has looked green. Same reset rule.
+GREEN_SEEN=0
 
 # Set by auth_definitely_broken to whether the last `gh auth status` probe
 # failed at all — including ambiguously. One failure proves nothing, but a probe
@@ -566,16 +574,30 @@ main() {
 			emit_check_failure "$failed_names" "$failed_links"
 		fi
 
-		# (c) every check that reported is green. Require evidence that checks
-		# actually ran (a passing check, or a CLEAN merge state) so we don't
-		# call the race window right after `gh pr create` green, before CI
-		# registers.
+		# (c) every check that reported is green, on a PR that has at least one
+		# check row or a CLEAN merge state — a PR with neither has told us
+		# nothing at all, which is the shape right after `gh pr create`.
 		local green=0
 		if (( pending_count == 0 && fail_count == 0 )); then
 			if (( pass_count > 0 )) || [[ "$MERGE" == "CLEAN" ]]; then
 				green=1
 			fi
 		fi
+
+		# One green poll is not evidence that the current head's checks ran.
+		# Until a push's run registers, the new head has no check rows at all:
+		# pending_count is 0 because the run is absent, not because it
+		# reported, and a repo with no branch protection reports CLEAN
+		# throughout — so both operands above are satisfied by exactly the
+		# state they exist to reject. The next poll sees the run and reports it
+		# pending. Reset on any non-green poll, like BLOCKED_SEEN.
+		if (( green == 1 )); then
+			GREEN_SEEN=$(( GREEN_SEEN + 1 ))
+		else
+			GREEN_SEEN=0
+		fi
+		local confirmed_green=0
+		(( green == 1 && GREEN_SEEN >= GREEN_POLLS )) && confirmed_green=1
 
 		# Green is not the same as ready. A required check whose workflow has
 		# not registered emits no `gh pr checks` row, so it lands in no bucket
@@ -604,7 +626,7 @@ main() {
 			BLOCKED_SEEN=0
 		fi
 
-		if (( green == 1 )) && [[ "$MERGE" != "BLOCKED" ]]; then
+		if (( confirmed_green == 1 )) && [[ "$MERGE" != "BLOCKED" ]]; then
 			if [[ "$WATCH_UNTIL" == "closed" ]]; then
 				# Report green once, then fall through and keep polling: the
 				# DIRTY/BEHIND checks at the top of the loop are what a
@@ -621,6 +643,14 @@ main() {
 
 		# --- nothing terminal: back off and poll again, respecting the budget ---
 		if (( $(now) >= deadline )); then emit_timeout; fi
+		# A green poll awaiting confirmation is not an idle poll: it asks
+		# whether a run registered in the last few seconds, so it must not
+		# inherit a backoff that has reached MAX_INTERVAL over a long CI run.
+		# Confirming at the base interval bounds what the extra poll costs a
+		# genuine `ready` at one INTERVAL.
+		if (( GREEN_SEEN > 0 && GREEN_SEEN < GREEN_POLLS )); then
+			sleep_for="$INTERVAL"
+		fi
 		local remaining=$(( deadline - $(now) ))
 		(( sleep_for > remaining )) && sleep_for="$remaining"
 		(( sleep_for < 1 )) && sleep_for=1
