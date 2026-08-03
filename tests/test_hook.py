@@ -12,6 +12,7 @@ Two layers:
 import json
 import os
 import subprocess
+import tempfile
 import unittest
 from importlib import util
 from pathlib import Path
@@ -38,12 +39,24 @@ def run_hook(payload, env=None):
     return proc.stdout, proc.stderr
 
 
-def bash_payload(command, response=""):
-    return {
+def bash_payload(command, response="", cwd=None):
+    payload = {
         "tool_name": "Bash",
         "tool_input": {"command": command},
         "tool_response": response,
     }
+    if cwd:
+        payload["cwd"] = cwd
+    return payload
+
+
+def make_repo(path):
+    """A repo holding one commit and the tag `v9.9.9`, for the bare-ref probe."""
+    git = ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t"]
+    subprocess.run(["git", "init", "-q", path], check=True)
+    subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "init"],
+                   cwd=path, check=True)
+    subprocess.run(git + ["tag", "v9.9.9"], cwd=path, check=True)
 
 
 class ClassificationUnit(unittest.TestCase):
@@ -67,6 +80,35 @@ class ClassificationUnit(unittest.TestCase):
     def test_ignore_git_push_delete(self):
         self.assertIsNone(hook.detect_action("git push origin --delete claude/foo"))
         self.assertIsNone(hook.detect_action("git push --tags"))
+
+    def test_ignore_tag_refspec_push(self):
+        # A release cut is not PR work — issue #34.
+        self.assertIsNone(
+            hook.detect_action("git push origin refs/tags/v1.3.0-rc.5"))
+        self.assertIsNone(hook.detect_action("git push origin +refs/tags/v1.0"))
+        self.assertIsNone(hook.detect_action("git push origin :refs/tags/v1.0"))
+
+    def test_push_with_a_branch_among_the_refspecs_still_nudges(self):
+        self.assertEqual(
+            hook.detect_action("git push origin main refs/tags/v1.0"),
+            "git_push")
+        self.assertEqual(hook.detect_action("git push origin refs/heads/claude/foo"),
+                         "git_push")
+
+    def test_bare_tag_name_resolved_against_the_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            make_repo(tmp)
+            self.assertIsNone(hook.detect_action("git push origin v9.9.9", tmp))
+            self.assertEqual(hook.detect_action("git push origin claude/foo", tmp),
+                             "git_push")
+            self.assertEqual(hook.detect_action("git push origin HEAD", tmp),
+                             "git_push")
+
+    def test_bare_ref_without_a_repo_still_nudges(self):
+        # The probe can't answer outside a repo; fail toward the old behaviour.
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(hook.detect_action("git push origin v9.9.9", tmp),
+                             "git_push")
 
     def test_ignore_unrelated(self):
         self.assertIsNone(hook.detect_action("gh pr view 12"))
@@ -107,8 +149,25 @@ class HookEndToEnd(unittest.TestCase):
         obj = json.loads(out)
         ctx = obj["hookSpecificOutput"]["additionalContext"]
         self.assertIn("pr-sentinel-watch.sh", ctx)
-        # No PR number known -> a placeholder pointing the session to resolve it.
+        # No PR number known -> a placeholder pointing the session to resolve it,
+        # and leave to drop the nudge if the branch has no PR at all (#34).
         self.assertIn("PR number", ctx)
+        self.assertIn("no open PR, ignore this", ctx)
+
+    def test_silent_on_tag_push(self):
+        out, _ = run_hook(bash_payload(
+            "git push origin refs/tags/v1.3.0-rc.5",
+            "To github.com:o/r.git\n * [new tag]  v1.3.0-rc.5 -> v1.3.0-rc.5\n"))
+        self.assertEqual(out.strip(), "")
+
+    def test_silent_on_bare_tag_push_with_cwd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            make_repo(tmp)
+            out, _ = run_hook(bash_payload(
+                "git push origin v9.9.9",
+                "To github.com:o/r.git\n * [new tag]  v9.9.9 -> v9.9.9\n",
+                cwd=tmp))
+        self.assertEqual(out.strip(), "")
 
     def test_silent_on_failed_push(self):
         out, _ = run_hook(bash_payload(

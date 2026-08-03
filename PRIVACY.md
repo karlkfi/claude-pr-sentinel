@@ -19,8 +19,10 @@ hooks and the migration helper).
   `PR_SENTINEL_*` configuration values (via environment).
 - Processes these **in memory** to decide whether to emit an advisory nudge,
   then writes that nudge (or nothing) to standard output.
-- Reads no files and writes nothing to disk. The only PR data it handles is a
-  PR URL that the command itself already printed, which it echoes back in the
+- Writes nothing to disk. On a `git push` naming a bare ref it runs
+  `git rev-parse` in your working directory to tell a tag from a branch — a
+  read of your local repo's refs, nothing else. The only PR data it handles is
+  a PR URL that the command itself already printed, which it echoes back in the
   nudge.
 
 ## The watcher (`scripts/pr-sentinel-watch.sh`)

@@ -9,8 +9,9 @@ to call a tool, so this asks; it does not compel. The (roadmapped) Stop-hook
 backstop is what makes the launch reliable (see docs/ROADMAP.md).
 
 The hook is PURELY LOCAL: it inspects the just-run command string and its
-output text and never makes a network call. It never reads the PR body or any
-comment stream — the only PR text it ever touches is a URL it echoes back.
+output text, and at most asks the local repo whether a pushed ref is a tag. It
+never makes a network call. It never reads the PR body or any comment stream —
+the only PR text it ever touches is a URL it echoes back.
 
 Fail modes: defers silently (emits nothing) on any uncertainty — non-Bash
 tool, unparseable command, unrecognised command, disabled flag. It can never
@@ -22,6 +23,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 
 # A github.com PR URL, e.g. https://github.com/owner/repo/pull/123
@@ -73,7 +75,25 @@ def _strip_env_prefix(argv):
     return argv[i:]
 
 
-def classify_command(argv):
+def _is_tag_ref(ref, cwd):
+    """True if a push refspec names a tag. `refs/tags/…` settles it outright; a
+    bare name is resolved against the local repo."""
+    src, _, dst = ref.lstrip('+').partition(':')
+    probe = src or dst   # `:refs/tags/v1` deletes a tag; the name is on the right
+    if not probe:
+        return False
+    if probe.startswith('refs/'):
+        return probe.startswith('refs/tags/')
+    try:
+        return subprocess.run(
+            ['git', 'rev-parse', '--verify', '--quiet', 'refs/tags/' + probe],
+            cwd=cwd or None, capture_output=True, timeout=5, check=False,
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False   # can't tell: treat it as a branch and nudge, as before
+
+
+def classify_command(argv, cwd=None):
     """Return 'pr_create', 'git_push', or None for one simple command's argv."""
     argv = _strip_env_prefix(argv)
     if not argv:
@@ -92,15 +112,20 @@ def classify_command(argv):
             # Skip tag/branch deletions — not PR-babysitting shapes.
             if '--delete' in rest or '-d' in rest or '--tags' in rest:
                 return None
+            # A push whose every refspec is a tag is a release cut, not PR work.
+            # non_flags[1] is the remote, so refspecs start at [2].
+            refspecs = non_flags[2:]
+            if refspecs and all(_is_tag_ref(r, cwd) for r in refspecs):
+                return None
             return 'git_push'
     return None
 
 
-def detect_action(command):
+def detect_action(command, cwd=None):
     """The most relevant action across all simple commands in the string."""
     action = None
     for argv in simple_commands(command):
-        kind = classify_command(argv)
+        kind = classify_command(argv, cwd)
         if kind == 'pr_create':
             return 'pr_create'   # strongest signal, short-circuit
         if kind == 'git_push':
@@ -142,6 +167,11 @@ def build_context(action, pr_num):
         lead = f'You just opened pull request {pr_ref or "(number in the output above)"}.'
     else:
         lead = 'You just pushed to a pull-request branch.'
+    if not pr_num:
+        # We could not resolve a number, so the session may be on a branch with
+        # no PR at all. Let it drop the nudge instead of hunting for one (#34).
+        lead += (' If this branch has no open PR, ignore this — `gh pr create` '
+                 'nudges again with the number.')
     return (
         f'pr-sentinel: {lead} Launch the PR Sentinel watcher as a BACKGROUND '
         f'task (run_in_background) so CI failures and merge conflicts wake this '
@@ -167,7 +197,7 @@ def main():
     if not command.strip():
         return
 
-    action = detect_action(command)
+    action = detect_action(command, data.get('cwd'))
     if action is None:
         return  # not a PR-opening / branch-push command: defer
 

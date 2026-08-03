@@ -51,7 +51,7 @@ nudge to (re)launch the watcher after a PR-opening or branch-push command:
 | `git push origin HEAD && gh pr create` | **nudge** — PR create wins |
 | `git push … ` that printed `! [rejected]` / `error:` | silent (push failed) |
 | `git push origin --delete claude/foo` | silent (branch deletion) |
-| `git push --tags` | silent (not a PR shape) |
+| `git push --tags` · `git push origin refs/tags/v1.2.3` · `git push origin v1.2.3` (a local tag) | silent (release cut, not a PR shape) |
 | `gh pr view 12` · `gh pr list` · `git status` | silent (not a push/create) |
 | any command with `PR_SENTINEL_DISABLE=1` set | silent |
 
@@ -484,8 +484,9 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
   unusual success string could be misread as failure (nudge skipped) — never
   the reverse in a way that grants authority.
 - **`git push` without a PR URL** can't resolve the PR number locally (the hook
-  makes no network call), so the nudge asks the session to resolve it. A PR
-  created earlier and pushed to later still gets a (branch-scoped) nudge.
+  makes no network call), so the nudge asks the session to resolve it — and to
+  ignore the nudge if the branch has no open PR at all. A PR created earlier
+  and pushed to later still gets a (branch-scoped) nudge.
 - **The watcher needs an authenticated `gh`.** It separates *permanent*
   failures (no credentials at all, an unresolvable PR) — which exit with an
   `error` event at once — from *transient* ones (a network blip, a 5xx, rate
