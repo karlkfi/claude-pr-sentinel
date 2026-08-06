@@ -9,11 +9,16 @@ returns canned, already-jq-projected output (the watcher calls `gh ... -q`, so
 the stub simply prints the post-projection lines the real gh would). Each
 scenario is a directory of small fixture files:
 
-  pr_view      -> tab-separated "state\\tmerge\\tbase\\thead-sha" for `gh pr view`
+  pr_view      -> tab-separated "state\\tmerge\\tbase\\thead-sha\\turl" for
+                  `gh pr view` (trailing fields may be omitted; an absent url
+                  disables merge-queue tracking, the pre-queue behaviour)
   pr_checks    -> lines "bucket\\tname\\tlink" for `gh pr checks`
   run_log      -> raw --log-failed output for `gh run view`
   run_conclusion.<id> -> conclusion of run <id> for `gh api repos/.../runs/<id>`
                  (absent = the API call fails, as an unreadable run would)
+  queue_entry  -> "true"/"false" for the `gh api graphql` merge-queue query
+                 (absent = the query fails, e.g. a token that cannot run
+                 GraphQL — the watcher must treat membership as unknown)
 
 Per-call variation (to test transitions like pending -> fail) is supported by
 suffixed files pr_checks.1, pr_checks.2, ... which the stub selects by a
@@ -41,7 +46,8 @@ GH_STUB = textwrap.dedent(
     dir="$GH_STUB_DIR"
     # `gh api repos/<o>/<r>/actions/runs/<id> -q .conclusion`: answer from
     # run_conclusion.<id>, or fail like an unreadable run when there is none.
-    if [[ "${1:-}" == "api" ]]; then
+    # (`gh api graphql` is the merge-queue query and dispatches below instead.)
+    if [[ "${1:-}" == "api" && "${2:-}" != "graphql" ]]; then
       f="$dir/run_conclusion.${2##*/}"
       [[ -f "$f" ]] || exit 1
       cat "$f"
@@ -49,9 +55,10 @@ GH_STUB = textwrap.dedent(
     fi
     key=""
     case "${1:-}:${2:-}" in
-      pr:view)   key="pr_view" ;;
-      pr:checks) key="pr_checks" ;;
-      run:view)  key="run_log" ;;
+      pr:view)     key="pr_view" ;;
+      pr:checks)   key="pr_checks" ;;
+      run:view)    key="run_log" ;;
+      api:graphql) key="queue_entry" ;;
       *) exit 0 ;;
     esac
     cfile="$dir/.count.$key"
@@ -62,6 +69,8 @@ GH_STUB = textwrap.dedent(
       cat "$dir/$key.$n"
     elif [[ -f "$dir/$key" ]]; then
       cat "$dir/$key"
+    elif [[ "$key" == "queue_entry" ]]; then
+      exit 1
     fi
     exit 0
     """
@@ -577,6 +586,132 @@ class WatcherCase(unittest.TestCase):
         self.assertIn("PR-SENTINEL EVENT: ready", out)
         self.assertNotIn("ready_watching", out)
 
+    # -- merge queue (issue #41) ----------------------------------------------
+
+    def _evicted(self, merge="DIRTY"):
+        """Seen holding a merge-queue entry on the first poll; the entry is
+        gone (PR still open) from the second poll on."""
+        return {
+            "pr_view": f"OPEN\t{merge}\tmain\tabc1234def\thttps://github.com/o/r/pull/123\n",
+            "pr_checks": "pass\tlint\thttps://github.com/o/r/actions/runs/11/job/1\n",
+            "queue_entry.1": "true\n",
+            "queue_entry": "false\n",
+        }
+
+    def test_dequeued_event_after_eviction(self):
+        """The motivating case: a sibling merge dirties a queued PR and the
+        queue evicts it. The wake must carry BOTH facts — the heal and the
+        re-enqueue debt — so `dequeued` fires with heal guidance folded in,
+        not a bare `conflict` the session would heal and then stop."""
+        rc, out, _ = self.run_watcher(self._evicted())
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: dequeued", out)
+        self.assertIn("mergeStateStatus: DIRTY", out)
+        self.assertIn("left it without merging", out)
+        self.assertIn("git rebase origin/main", out)
+        self.assertIn("--force-with-lease", out)
+        self.assertIn("re-enqueue", out)
+        self.assertIn("Do NOT re-enqueue or merge it yourself", out)
+        self.assertNotIn("EVENT: conflict", out)
+
+    def test_dequeued_event_respects_heal_merge(self):
+        rc, out, _ = self.run_watcher(
+            self._evicted(), env={"PR_SENTINEL_HEAL": "merge"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: dequeued", out)
+        self.assertIn("git merge origin/main", out)
+        self.assertIn("NOT rebase", out)
+        self.assertNotIn("git rebase", out)
+
+    def test_dequeued_clean_eviction(self):
+        """A queue reset can evict a PR and leave it CLEAN and green (the
+        structural case from #41): nothing to heal, but the re-enqueue debt
+        still needs reporting — and `ready` must not swallow it."""
+        rc, out, _ = self.run_watcher(self._evicted(merge="CLEAN"))
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: dequeued", out)
+        self.assertIn("no branch damage", out)
+        self.assertIn("re-enqueue", out)
+        self.assertNotIn("git rebase", out)
+        self.assertNotIn("EVENT: ready", out)
+
+    def test_merge_race_reports_closed_not_dequeued(self):
+        """GitHub removes the queue entry a moment BEFORE the queue merge
+        lands, so a poll can catch (open, unqueued) on a PR that is merging.
+        The confirmation poll sees it MERGED and reports `closed`."""
+        files = {
+            "pr_view.1": "OPEN\tCLEAN\tmain\tabc123\thttps://github.com/o/r/pull/123\n",
+            "pr_view.2": "OPEN\tUNKNOWN\tmain\tabc123\thttps://github.com/o/r/pull/123\n",
+            "pr_view": "MERGED\tUNKNOWN\tmain\tabc123\thttps://github.com/o/r/pull/123\n",
+            "pr_checks": "pass\tlint\thttps://github.com/o/r/actions/runs/11/job/1\n",
+            "queue_entry.1": "true\n",
+            "queue_entry": "false\n",
+        }
+        rc, out, _ = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: closed", out)
+        self.assertNotIn("EVENT: dequeued", out)
+
+    def test_queued_pr_suspends_branch_state_events(self):
+        """A queued PR whose base has advanced reads BEHIND, but the `behind`
+        remedy is a push, and any push to a queued PR evicts it — the watcher
+        must keep its hands off while the queue owns the PR."""
+        files = {
+            "pr_view": "OPEN\tBEHIND\tmain\tabc1234def\thttps://github.com/o/r/pull/123\n",
+            "pr_checks": "pass\tlint\thttps://github.com/o/r/actions/runs/11/job/1\n",
+            "queue_entry": "true\n",
+        }
+        rc, out, _ = self.run_watcher(files, env={"PR_SENTINEL_TIMEOUT": "3"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+        self.assertNotIn("EVENT: behind", out)
+        # The timeout report names the queue so the relaunch isn't blind.
+        self.assertIn("merge-queue entry", out)
+
+    def test_requeue_resets_the_dequeue_streak(self):
+        """Consecutive, like every other streak: queued, absent, queued is a
+        re-enqueue (or a flapping read), not an eviction."""
+        files = {
+            "pr_view": "OPEN\tCLEAN\tmain\tabc1234def\thttps://github.com/o/r/pull/123\n",
+            "pr_checks": "pass\tlint\thttps://github.com/o/r/actions/runs/11/job/1\n",
+            "queue_entry.1": "true\n",
+            "queue_entry.2": "false\n",
+            "queue_entry": "true\n",
+        }
+        rc, out, _ = self.run_watcher(files, env={"PR_SENTINEL_TIMEOUT": "4"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+        self.assertNotIn("EVENT: dequeued", out)
+
+    def test_dequeued_polls_configurable(self):
+        """PR_SENTINEL_DEQUEUED_POLLS=1 opts back into deciding on one poll."""
+        rc, out, _ = self.run_watcher(
+            self._evicted(), env={"PR_SENTINEL_DEQUEUED_POLLS": "1"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: dequeued", out)
+
+    def test_dequeued_is_terminal_in_watch_until_closed(self):
+        """An eviction needs the session, so it ends the watch even in the
+        keep-watching mode."""
+        rc, out, _ = self.run_watcher(
+            self._evicted(), env={"PR_SENTINEL_WATCH_UNTIL": "closed"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: dequeued", out)
+        self.assertNotIn("EVENT: timeout", out)
+
+    def test_queue_query_failure_keeps_prior_behaviour(self):
+        """A token that cannot run the GraphQL query (no queue_entry fixture:
+        the stub fails the call) must leave the watcher exactly as it was
+        before queue tracking existed — here, a DIRTY PR still wakes as
+        `conflict`."""
+        files = {
+            "pr_view": "OPEN\tDIRTY\tmain\tabc1234def\thttps://github.com/o/r/pull/123\n",
+        }
+        rc, out, _ = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: conflict", out)
+        self.assertNotIn("EVENT: dequeued", out)
+
     def test_no_premature_ready_before_ci_registers(self):
         """Right after `gh pr create`: OPEN, non-CLEAN, no checks yet. Must NOT
         fire ready; it should time out instead of concluding prematurely."""
@@ -836,7 +971,7 @@ class WatcherCase(unittest.TestCase):
                         term, low,
                         msg=f"forbidden field '{term}' in gh call: {stripped!r}")
         # The one metadata query lists only the allowed, GitHub-controlled fields.
-        self.assertIn("state,mergeStateStatus,baseRefName,headRefOid",
+        self.assertIn("state,mergeStateStatus,baseRefName,headRefOid,url",
                       WATCHER.read_text(encoding="utf-8"))
 
 

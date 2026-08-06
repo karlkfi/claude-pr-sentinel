@@ -145,6 +145,8 @@ needed:
 | every failing check belongs to a run that concluded `success` (`continue-on-error: true`) | *(treated as passing, keep polling)* | nothing — GitHub already ruled the failure non-blocking; the suppression is noted on the task's stderr |
 | `mergeStateStatus == DIRTY` | **conflict** | rebase onto `<base>` (default), resolve, `git push --force-with-lease`, relaunch — or merge (`PR_SENTINEL_HEAL=merge`) |
 | `mergeStateStatus == BEHIND` | **behind** | rebase onto `<base>` (default) and force-push with lease, relaunch — or merge to fast-forward (`PR_SENTINEL_HEAL=merge`) |
+| the PR holds a **merge-queue entry** | *(keep polling, hands off)* | nothing — the queue is merging it, and any push to a queued PR evicts it (see [Merge queues](#merge-queues)) |
+| the queue entry is **gone** but the PR is still open, for `PR_SENTINEL_DEQUEUED_POLLS` polls | **dequeued** | the queue evicted it: heal whatever the report names, then hand back to a human to **re-enqueue** — never enqueue or merge yourself |
 | all checks green, no conflict, a computed `mergeStateStatus` (not `BLOCKED`, not `UNKNOWN`), for `PR_SENTINEL_GREEN_POLLS` polls running | **ready** | hand back to a human for merge review — **never auto-merge** |
 | the same, **and** `PR_SENTINEL_WATCH_UNTIL=closed` | *(notice: **ready_watching**, keep polling)* | nothing — the watch continues past green (see [Configuration](#configuration)) |
 | all checks green but `mergeStateStatus == BLOCKED` for `PR_SENTINEL_BLOCKED_POLLS` polls running | **blocked** | don't treat it as green: a required check may never have registered, or an approval is outstanding (see [Green is not the same as ready](#green-is-not-the-same-as-ready)) |
@@ -279,8 +281,8 @@ comment-channel exposure.
 2. **Background watch.** The session runs
    [`scripts/pr-sentinel-watch.sh <PR>`](scripts/pr-sentinel-watch.sh) as a
    background task (`run_in_background`). The watcher polls `gh` for check
-   buckets and `mergeStateStatus` on a configurable interval with backoff,
-   sleeping between polls (no token cost while idle).
+   buckets, `mergeStateStatus`, and merge-queue membership on a configurable
+   interval with backoff, sleeping between polls (no token cost while idle).
 3. **Wake on exit.** When an attention-worthy condition is met, the watcher
    prints its one-event report and exits. The harness delivers that report to
    the session as the wake payload.
@@ -296,7 +298,8 @@ comment-channel exposure.
 These are the point of the plugin.
 
 - **Never ingest human/attacker-writable channels.** The watcher queries only
-  GitHub-controlled check metadata and mergeable state. It never requests or
+  GitHub-controlled check metadata, mergeable state, and merge-queue
+  membership. It never requests or
   parses the PR **body**, PR **review comments**, or **issue comments** — the
   exact channel the built-in "Autofix" trigger uses
   ([#66097](https://github.com/anthropics/claude-code/issues/66097)). The only
@@ -358,6 +361,7 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_WATCH_UNTIL` | `ready` | stopping condition: `ready` ends the watch when the PR goes green; `closed` keeps watching past green so a *later* conflict still wakes you (see below); unrecognised values fall back to `ready` |
 | `PR_SENTINEL_BLOCKED_POLLS` | `3` | consecutive polls an all-green-but-`BLOCKED` PR must hold before the `blocked` event fires (see [Green is not the same as ready](#green-is-not-the-same-as-ready)) |
 | `PR_SENTINEL_GREEN_POLLS` | `2` | consecutive green polls before `ready` fires, so a push whose run hasn't registered yet can't read as green (see [Green is not the same as ready](#green-is-not-the-same-as-ready)); `1` decides on a single poll |
+| `PR_SENTINEL_DEQUEUED_POLLS` | `2` | consecutive polls a once-queued, still-open PR must be missing from the merge queue before `dequeued` fires; the confirming poll turns a queue merge in flight into `closed` instead of a phantom eviction (see [Merge queues](#merge-queues)) |
 | `PR_SENTINEL_BACKOFF_NUM` / `_DEN` | `3` / `2` | backoff multiplier (interval × num ÷ den each idle poll) |
 | `PR_SENTINEL_AUTOALLOW` | (on) | auto-approve the plugin's own watcher launch so it isn't prompted by the base Bash permission; `0`/`false`/empty keeps the prompt (see below) |
 | `PR_SENTINEL_DISABLE` | (unset) | `1` disables the PostToolUse nudge, the Stop backstop, and the watcher-launch auto-allow |
@@ -483,6 +487,41 @@ interval while it waits (the query itself triggers the recomputation, so it
 resolves within a poll or two). If it somehow never resolves, the watch ends in
 a `timeout` whose report names the withheld ready.
 
+### Merge queues
+
+Every other event describes PR *health*; queue *membership* is a different fact
+with a different remedy. A merge queue can evict a still-open PR — typically a
+sibling merge ahead of it made it conflicting, sometimes the queue reset its
+group — and after that no merge is in progress any more, however green the PR
+looks. A session that only ever hears `conflict` heals the branch and stops,
+never learning that re-enqueueing is owed. **`dequeued`** is that missing fact:
+the PR held a merge-queue entry on an earlier poll of this watch and the entry
+is gone while the PR is still open.
+
+`gh pr view` exposes no queue field, so membership is one extra GraphQL read
+(`mergeQueueEntry`) per poll — the watcher's only query beyond `gh pr view` /
+`gh pr checks`, still GitHub-controlled metadata. Three behaviors follow from
+tracking it:
+
+- **While the PR is queued, the watcher keeps its hands off.** The queue owns
+  the PR: every branch-state remedy (`conflict`, `behind`) prescribes a push,
+  and any push to a queued PR evicts it. A queued PR whose base has advanced
+  reads `BEHIND`, so without this suspension the watcher would wake the session
+  to rebase — causing the very eviction this event exists to report. Only
+  `closed`, `dequeued`, and `timeout` can end the watch while queued.
+- **An eviction is confirmed across `PR_SENTINEL_DEQUEUED_POLLS` polls**
+  (default 2, at the base interval). GitHub removes the queue entry a moment
+  *before* a successful queue merge lands, so a single open-and-unqueued poll
+  can be a merge in flight; the confirming poll sees the PR `MERGED` and
+  reports `closed`.
+- **The `dequeued` report folds the heal in.** It names the merge state, gives
+  the `PR_SENTINEL_HEAL`-appropriate heal commands when the branch is `DIRTY`
+  or `BEHIND`, and ends with the handback: re-enqueueing starts a merge, so it
+  stays a **human** action — the session must never re-enqueue or merge.
+
+`dequeued` is a wake, not a handoff: the Stop hook keeps holding the session
+responsible for the PR until it is healed, re-watched, and handed back.
+
 ## Agent guidance
 
 Paste this into your project's `CLAUDE.md` (or `AGENTS.md`) so the agent uses
@@ -551,6 +590,14 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
   marked advisory inside a workflow that otherwise passes is absorbed. Put that
   job in a workflow file of its own and the run really does conclude `failure`
   — GitHub offers nothing to distinguish it, and it wakes you.
+- **Dequeue detection needs the same watcher run to have seen the PR queued.**
+  Queue membership has no before/after outside the run's own memory, so a
+  watcher launched after an eviction reports nothing about it (the
+  `PR_SENTINEL_WATCH_UNTIL=closed` conflict path still catches the common,
+  branch-dirtying eviction). And if the membership query fails — say a token
+  that cannot run GraphQL — queue tracking disables itself and the watcher
+  behaves exactly as it did before the feature (see
+  [Merge queues](#merge-queues)).
 - **A `blocked` report can't name the requirement.** The watcher doesn't read
   branch protection, so an unregistered required check and an outstanding
   approval produce the same event (see [Green is not the same as

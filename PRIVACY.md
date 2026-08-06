@@ -29,8 +29,10 @@ hooks and the migration helper).
 
 - **Talks to GitHub** through your already-authenticated `gh` CLI — this is its
   purpose. It issues read-only queries for:
-  - the PR's `state`, `mergeStateStatus`, and base branch name
-    (`gh pr view --json state,mergeStateStatus,baseRefName`);
+  - the PR's `state`, `mergeStateStatus`, base branch name, head commit, and
+    canonical URL (`gh pr view --json`);
+  - whether the PR currently holds a merge-queue entry (a GraphQL
+    `mergeQueueEntry` read);
   - the PR's check results (`gh pr checks`);
   - a failing run's step log (`gh run view --log-failed`), only on a failure.
 - It **never** requests or parses the PR body, PR review comments, or issue
