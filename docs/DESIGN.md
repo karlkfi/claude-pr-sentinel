@@ -333,6 +333,21 @@ interval rather than the current backoff — it asks about the last few seconds,
 so inheriting a 300s idle interval would be perverse — which bounds the cost of
 the guard to one `PR_SENTINEL_INTERVAL` per genuine handoff.
 
+The third failure in the family is `UNKNOWN` (#40). The guard #29 left behind
+excluded exactly one value — `MERGE != BLOCKED` — and `UNKNOWN` satisfies it,
+but `UNKNOWN` is not a merge state: it is GitHub saying it has not computed one
+yet, and it can resolve to `DIRTY`. That window opens whenever a sibling PR
+merges — for a poll or two the API reports `UNKNOWN`, not `DIRTY`, so the
+conflict check cannot see it and a conflicting PR reads as green-and-mergeable.
+`ready` therefore also requires the state to be *computed*: `UNKNOWN` holds the
+handoff, at the base interval (the view query itself triggers the
+recomputation, so the hold releases within a poll or two into whatever the
+state really is — `ready` on `CLEAN`, `conflict` on `DIRTY`). A state that
+never computes ends the watch in `timeout`, whose report names the withheld
+ready. An allowlist (`ready` only on `CLEAN`) was rejected: `UNSTABLE` (a
+non-required check failing) and `HAS_HOOKS` are legitimately mergeable, and a
+repo can sit in them indefinitely.
+
 `blocked` joins `ready`/`closed` in the Stop hook's concluded set. Both causes
 need a human — a review gate is the human's turn by definition, and a gate that
 never registered can't be waited out, since the branch protection or the trigger

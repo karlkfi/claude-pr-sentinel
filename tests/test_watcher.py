@@ -344,6 +344,67 @@ class WatcherCase(unittest.TestCase):
         self.assertIn("PR-SENTINEL EVENT: timeout", out)
         self.assertNotIn("EVENT: ready_watching", out)
 
+    # -- UNKNOWN merge state (issue #40) -------------------------------------
+
+    def test_ready_withheld_on_unknown_merge_state(self):
+        """UNKNOWN means GitHub has not computed a merge state yet — it is not
+        evidence of not-BLOCKED, and it can resolve to DIRTY. A green PR whose
+        state never resolves must time out, not fire ready."""
+        files = {
+            "pr_view": "OPEN\tUNKNOWN\tmain\tabc1234def\n",
+            "pr_checks": "pass\tbuild\thttps://github.com/o/r/actions/runs/11/job/1\n",
+        }
+        rc, out, _ = self.run_watcher(files, env={"PR_SENTINEL_TIMEOUT": "4"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+        self.assertNotIn("EVENT: ready", out)
+        # The timeout report names the withheld ready so the relaunch isn't blind.
+        self.assertIn("'ready' was withheld", out)
+
+    def test_unknown_resolving_clean_fires_ready(self):
+        """The ordinary resolution: the view query triggers the computation and
+        the state decides within a poll or two, releasing the hold."""
+        files = {
+            "pr_view.1": "OPEN\tUNKNOWN\tmain\tabc1234def\n",
+            "pr_view.2": "OPEN\tUNKNOWN\tmain\tabc1234def\n",
+            "pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
+            "pr_checks": "pass\tbuild\thttps://github.com/o/r/actions/runs/11/job/1\n",
+        }
+        rc, out, _ = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: ready", out)
+
+    def test_unknown_resolving_dirty_fires_conflict(self):
+        """The observed bug: a sibling PR merges while the checks are green, so
+        the base moved and the state reads UNKNOWN for a poll or two before
+        resolving to DIRTY. The second poll confirms green, which used to fire
+        ready; the hold has to survive to the third and report the conflict."""
+        files = {
+            "pr_view.1": "OPEN\tUNKNOWN\tmain\tabc1234def\n",
+            "pr_view.2": "OPEN\tUNKNOWN\tmain\tabc1234def\n",
+            "pr_view": "OPEN\tDIRTY\tmain\tabc1234def\n",
+            "pr_checks": "pass\tbuild\thttps://github.com/o/r/actions/runs/11/job/1\n",
+        }
+        rc, out, _ = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: conflict", out)
+        self.assertNotIn("EVENT: ready", out)
+
+    def test_ready_watching_notice_withheld_on_unknown(self):
+        """The notice claims the same green-and-mergeable, so it holds to the
+        same bar as ready."""
+        files = {
+            "pr_view": "OPEN\tUNKNOWN\tmain\tabc1234def\n",
+            "pr_checks": "pass\tbuild\thttps://github.com/o/r/actions/runs/11/job/1\n",
+        }
+        rc, out, _ = self.run_watcher(
+            files,
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed", "PR_SENTINEL_TIMEOUT": "3"},
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+        self.assertNotIn("EVENT: ready_watching", out)
+
     # -- BLOCKED merge state (issue #29) -------------------------------------
 
     def _green_blocked(self):
