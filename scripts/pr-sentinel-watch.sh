@@ -12,6 +12,9 @@
 #                  run it belongs to did not absorb it (see failures_absorbed)
 #   conflict       the PR is CONFLICTING (mergeStateStatus == DIRTY)
 #   behind         the PR branch is BEHIND its base (needs a base merge)
+#   dequeued       the PR left the merge queue while still open — it was seen
+#                  queued on an earlier poll and its entry is gone without a
+#                  merge, so re-enqueueing is owed once the branch is healthy
 #   ready          all checks are green and the PR is mergeable (no conflict)
 #   blocked        every check that reported is green, but GitHub still reports
 #                  mergeStateStatus == BLOCKED — a merge requirement the checks
@@ -29,9 +32,9 @@
 #                   immediately on every relaunch — a spin loop, not a watch.
 #   blocked_watching  the same relationship to `blocked`, for the same reason.
 #
-# SECURITY: this script queries ONLY GitHub-controlled check metadata and
-# mergeable state. It never requests or parses the PR body, PR review
-# comments, or issue comments — those are human/attacker-writable and are the
+# SECURITY: this script queries ONLY GitHub-controlled check metadata,
+# mergeable state, and merge-queue membership. It never requests or parses the
+# PR body, PR review comments, or issue comments — those are human/attacker-writable and are the
 # indirect-prompt-injection channel this plugin deliberately excludes. The
 # only free-form text it surfaces is the session's own CI log excerpt, which
 # is size-capped, ANSI-stripped, and wrapped in an explicit
@@ -67,6 +70,11 @@ BLOCKED_POLLS="${PR_SENTINEL_BLOCKED_POLLS:-3}"  # green+BLOCKED polls before `b
 # from the run before it; the next poll lands after it registers and reports
 # pending. See docs/plan/confirm-green.md.
 GREEN_POLLS="${PR_SENTINEL_GREEN_POLLS:-2}"  # green polls before `ready`
+# Consecutive polls the merge-queue entry must stay gone (on a still-open PR
+# that was seen queued) before `dequeued`. GitHub removes the entry a moment
+# BEFORE a successful queue merge lands, so a single absent poll can be a merge
+# in flight; the confirming poll sees that PR MERGED and reports `closed`.
+DEQUEUED_POLLS="${PR_SENTINEL_DEQUEUED_POLLS:-2}"  # unqueued polls before `dequeued`
 
 # Conflict/behind heal strategy the report recommends: rebase (default) or
 # merge. Normalise to lowercase (bash 3.2: use tr, not ${var,,}) and fail safe
@@ -92,6 +100,22 @@ BLOCKED_SEEN=0
 
 # Consecutive polls the PR has looked green. Same reset rule.
 GREEN_SEEN=0
+
+# Set to 1 once a poll has seen the PR hold a merge-queue entry. From then on
+# the queue owns the PR: branch-state events are suspended (their remedies all
+# push, and any push to a queued PR evicts it), and the entry disappearing
+# while the PR is still open is what `dequeued` reports.
+QUEUED_SEEN=0
+
+# Consecutive polls the queue entry has been absent since QUEUED_SEEN.
+DEQUEUE_SEEN=0
+
+# owner / repo / number for the GraphQL queue query, parsed once from the PR
+# URL that `gh pr view` returns (the watcher's own PR argument may be a bare
+# number, which GraphQL cannot address).
+QUEUE_OWNER=""
+QUEUE_REPO=""
+QUEUE_NUM=""
 
 # Set by auth_definitely_broken to whether the last `gh auth status` probe
 # failed at all — including ambiguously. One failure proves nothing, but a probe
@@ -128,14 +152,32 @@ strip_ansi() {
 
 # Read the PR scalars we care about as one tab-separated line, using gh's
 # built-in jq (`-q`) so no external jq is required. Prints
-# "state\tmerge\tbase\thead-sha" on success; returns non-zero on gh failure.
-# NOTE: the --json field list is intentionally limited to GitHub-controlled
-# metadata — never body/comments. headRefOid is the head commit SHA; the stop
-# hook uses it to tell a re-reported failure apart from a genuinely new one.
+# "state\tmerge\tbase\thead-sha\turl" on success; returns non-zero on gh
+# failure. NOTE: the --json field list is intentionally limited to
+# GitHub-controlled metadata — never body/comments. headRefOid is the head
+# commit SHA; the stop hook uses it to tell a re-reported failure apart from a
+# genuinely new one. url is the PR's canonical address, which the merge-queue
+# query needs (GraphQL addresses a PR by owner/repo/number, and the watcher's
+# own argument may be a bare number).
 gh_pr_state() {
 	gh pr view "$PR" \
-		--json state,mergeStateStatus,baseRefName,headRefOid \
-		-q '[.state, .mergeStateStatus, .baseRefName, .headRefOid] | @tsv'
+		--json state,mergeStateStatus,baseRefName,headRefOid,url \
+		-q '[.state, .mergeStateStatus, .baseRefName, .headRefOid, .url] | @tsv'
+}
+
+# Whether the PR currently holds a merge-queue entry. `gh pr view` exposes no
+# queue field (mergeQueueEntry is GraphQL-only), so this is the watcher's one
+# query outside `gh pr view`/`gh pr checks` — a second API call per poll, still
+# GitHub-controlled metadata only. Prints "true"/"false"; a non-zero exit means
+# UNKNOWN, and the caller must not act on it.
+gh_queue_entry() {
+	# shellcheck disable=SC2016  # $owner/$name/$number are GraphQL variables, not shell
+	gh api graphql \
+		-F owner="$QUEUE_OWNER" -F name="$QUEUE_REPO" -F number="$QUEUE_NUM" \
+		-f query='query($owner: String!, $name: String!, $number: Int!) {
+			repository(owner: $owner, name: $name) {
+				pullRequest(number: $number) { mergeQueueEntry { id } } } }' \
+		-q '.data.repository.pullRequest.mergeQueueEntry != null'
 }
 
 # Decide whether `gh auth status` proves there are no credentials. Returns 0
@@ -366,6 +408,39 @@ emit_behind() {
 	exit 0
 }
 
+emit_dequeued() {
+	report_header dequeued
+	echo "State: OPEN"
+	echo "mergeStateStatus: ${MERGE}"
+	echo "Base branch: ${BASE}"
+	echo
+	echo "The PR was in the merge queue and has left it without merging — the"
+	echo "queue evicted it (typically a sibling merge made it conflicting, or the"
+	echo "queue reset its group). No merge is in progress any more: once the"
+	echo "branch is healthy again, the PR needs a HUMAN to re-enqueue it."
+	echo
+	if [[ "$MERGE" == "DIRTY" || "$MERGE" == "BEHIND" ]]; then
+		if [[ "$HEAL" == "merge" ]]; then
+			echo "Next action: heal the branch (${MERGE}) by merging the base IN —"
+			echo "  git fetch origin ${BASE} && git merge origin/${BASE}"
+			echo "Use merge, NOT rebase, so the push stays a fast-forward (no --force)."
+		else
+			echo "Next action: heal the branch (${MERGE}) by rebasing onto the base —"
+			echo "  git fetch origin ${BASE} && git rebase origin/${BASE}"
+			echo "  git push --force-with-lease"
+		fi
+		echo "Run the local gate, push, relaunch this watcher — then hand back to a"
+		echo "human for re-enqueue."
+	else
+		echo "Next action: no branch damage is visible from here (state above)."
+		echo "Verify the checks are still green, then hand back to a human for"
+		echo "re-enqueue."
+	fi
+	echo "Do NOT re-enqueue or merge it yourself: enqueueing starts a merge, and"
+	echo "merge authority stays with a human."
+	exit 0
+}
+
 emit_ready() {
 	report_header ready
 	echo "State: OPEN"
@@ -466,6 +541,10 @@ emit_timeout() {
 		echo "(mergeStateStatus stayed UNKNOWN), so 'ready' was withheld — an"
 		echo "uncomputed state can still resolve to a conflict."
 	fi
+	if (( QUEUED_SEEN == 1 )); then
+		echo "The PR held a merge-queue entry when last confirmed; if it is still"
+		echo "queued, the queue is merging it on its own."
+	fi
 	echo "Next action: check the PR status and relaunch the watcher if still open."
 	exit 0
 }
@@ -529,129 +608,173 @@ main() {
 			done
 		fi
 
-		IFS=$'\t' read -r STATE MERGE BASE HEAD_SHA <<<"$gh_state"
+		IFS=$'\t' read -r STATE MERGE BASE HEAD_SHA PR_URL <<<"$gh_state"
 
 		# (d) closed / merged
 		if [[ "$STATE" != "OPEN" ]]; then emit_closed; fi
-		# (b) conflicting
-		if [[ "$MERGE" == "DIRTY" ]]; then emit_conflict; fi
-		# branch behind base — same merge-from-base fix as a conflict
-		if [[ "$MERGE" == "BEHIND" ]]; then emit_behind; fi
 
-		# --- fetch check buckets (gh exits non-zero when failing/pending) ---
-		local checks fail_count=0 pending_count=0 pass_count=0
-		local failed_names="" failed_links=""
-		checks=$(gh_pr_checks 2>/dev/null || true)
-		if [[ -n "$checks" ]]; then
-			local bucket name link
-			while IFS=$'\t' read -r bucket name link; do
-				[[ -z "$bucket" ]] && continue
-				case "$bucket" in
-					fail|cancel)
-						fail_count=$((fail_count + 1))
-						failed_names="${failed_names:+$failed_names, }${name} (${bucket})"
-						failed_links="${failed_links}${link}"$'\n'
-						;;
-					pending)
-						pending_count=$((pending_count + 1)) ;;
-					pass|skipping)
-						pass_count=$((pass_count + 1)) ;;
-				esac
-			done <<<"$checks"
+		# --- merge-queue membership (see gh_queue_entry) ---
+		# Resolves to queued/absent only when the query answers; any failure
+		# leaves it unknown for this poll, and unknown drives nothing — with no
+		# queue ever observed the watcher behaves as before this feature, and
+		# with one observed it keeps the hands-off stance below.
+		local queue_state="unknown" queue_out
+		if [[ -z "$QUEUE_OWNER" ]] \
+			&& [[ "$PR_URL" =~ ^https://[^/]+/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
+			QUEUE_OWNER="${BASH_REMATCH[1]}"
+			QUEUE_REPO="${BASH_REMATCH[2]}"
+			QUEUE_NUM="${BASH_REMATCH[3]}"
+		fi
+		if [[ -n "$QUEUE_OWNER" ]] && queue_out=$(gh_queue_entry 2>/dev/null); then
+			case "$queue_out" in
+				true)  queue_state="queued" ;;
+				false) queue_state="absent" ;;
+			esac
+		fi
+		if [[ "$queue_state" == "queued" ]]; then
+			(( QUEUED_SEEN == 0 )) \
+				&& warn "PR entered the merge queue; branch-state events suspended while it is queued"
+			QUEUED_SEEN=1
+			DEQUEUE_SEEN=0
+		elif [[ "$queue_state" == "absent" ]] && (( QUEUED_SEEN == 1 )); then
+			# (b′) evicted from the queue while still open — confirmed across
+			# DEQUEUED_POLLS polls so the remove-entry-then-merge race reads
+			# as `closed`, not a phantom eviction.
+			DEQUEUE_SEEN=$(( DEQUEUE_SEEN + 1 ))
+			(( DEQUEUE_SEEN >= DEQUEUED_POLLS )) && emit_dequeued
 		fi
 
-		# A failing check whose run still concluded `success` was made
-		# advisory with `continue-on-error: true`. That is a permanent state
-		# by design — a new platform, a lint being rolled out — so reporting
-		# it wakes the session on every PR for a job whose whole point is not
-		# to gate. Count those as passing instead. The suppression goes to
-		# stderr so the task log records it without waking anyone.
-		if (( fail_count > 0 )) && failures_absorbed "$failed_links"; then
-			warn "failing checks absorbed by continue-on-error (workflow run concluded success): ${failed_names}"
-			pass_count=$(( pass_count + fail_count ))
-			fail_count=0
-			failed_names=""
-			failed_links=""
-		fi
-
-		# (a) a check failed and its run did not absorb it
-		if (( fail_count > 0 )); then
-			emit_check_failure "$failed_names" "$failed_links"
-		fi
-
-		# (c) every check that reported is green, on a PR that has at least one
-		# check row or a CLEAN merge state — a PR with neither has told us
-		# nothing at all, which is the shape right after `gh pr create`.
-		local green=0
-		if (( pending_count == 0 && fail_count == 0 )); then
-			if (( pass_count > 0 )) || [[ "$MERGE" == "CLEAN" ]]; then
-				green=1
-			fi
-		fi
-
-		# One green poll is not evidence that the current head's checks ran.
-		# Until a push's run registers, the new head has no check rows at all:
-		# pending_count is 0 because the run is absent, not because it
-		# reported, and a repo with no branch protection reports CLEAN
-		# throughout — so both operands above are satisfied by exactly the
-		# state they exist to reject. The next poll sees the run and reports it
-		# pending. Reset on any non-green poll, like BLOCKED_SEEN.
-		if (( green == 1 )); then
-			GREEN_SEEN=$(( GREEN_SEEN + 1 ))
-		else
+		if (( QUEUED_SEEN == 1 )); then
+			# The queue owns the PR — it is queued now, or its entry just
+			# vanished and the dequeue awaits confirmation. Branch-state
+			# events are suspended either way: every remedy they prescribe
+			# pushes the branch, and any push to a queued PR evicts it. Only
+			# closed and dequeued (above) or timeout (below) can end the
+			# watch from here.
 			GREEN_SEEN=0
-		fi
-		local confirmed_green=0
-		(( green == 1 && GREEN_SEEN >= GREEN_POLLS )) && confirmed_green=1
+			BLOCKED_SEEN=0
+			local confirmed_green=0
+		else
+			# (b) conflicting
+			if [[ "$MERGE" == "DIRTY" ]]; then emit_conflict; fi
+			# branch behind base — same merge-from-base fix as a conflict
+			if [[ "$MERGE" == "BEHIND" ]]; then emit_behind; fi
 
-		# Green is not the same as ready. A required check whose workflow has
-		# not registered emits no `gh pr checks` row, so it lands in no bucket
-		# and pending_count is blind to it — the counts above cannot tell an
-		# absent gate from a passed one. mergeStateStatus is the only field
-		# fetched that sees it. BLOCKED with nothing failing and nothing pending
-		# means a merge requirement is unsatisfied, so it must not fire `ready`;
-		# but it does NOT identify which requirement, since an outstanding
-		# approval reads identically. Hold it for a few consecutive polls — a
-		# check that is merely slow to register turns up as `pending` well
-		# inside that window — then report `blocked` and let a human resolve the
-		# ambiguity. See docs/plan/blocked-merge-state.md.
-		if (( green == 1 )) && [[ "$MERGE" == "BLOCKED" ]]; then
-			BLOCKED_SEEN=$(( BLOCKED_SEEN + 1 ))
-			if (( BLOCKED_SEEN >= BLOCKED_POLLS )); then
-				if [[ "$WATCH_UNTIL" == "closed" ]]; then
-					if (( BLOCKED_REPORTED == 0 )); then
-						notice_blocked_watching
-						BLOCKED_REPORTED=1
-					fi
-				else
-					emit_blocked
+			# --- fetch check buckets (gh exits non-zero when failing/pending) ---
+			local checks fail_count=0 pending_count=0 pass_count=0
+			local failed_names="" failed_links=""
+			checks=$(gh_pr_checks 2>/dev/null || true)
+			if [[ -n "$checks" ]]; then
+				local bucket name link
+				while IFS=$'\t' read -r bucket name link; do
+					[[ -z "$bucket" ]] && continue
+					case "$bucket" in
+						fail|cancel)
+							fail_count=$((fail_count + 1))
+							failed_names="${failed_names:+$failed_names, }${name} (${bucket})"
+							failed_links="${failed_links}${link}"$'\n'
+							;;
+						pending)
+							pending_count=$((pending_count + 1)) ;;
+						pass|skipping)
+							pass_count=$((pass_count + 1)) ;;
+					esac
+				done <<<"$checks"
+			fi
+
+			# A failing check whose run still concluded `success` was made
+			# advisory with `continue-on-error: true`. That is a permanent state
+			# by design — a new platform, a lint being rolled out — so reporting
+			# it wakes the session on every PR for a job whose whole point is not
+			# to gate. Count those as passing instead. The suppression goes to
+			# stderr so the task log records it without waking anyone.
+			if (( fail_count > 0 )) && failures_absorbed "$failed_links"; then
+				warn "failing checks absorbed by continue-on-error (workflow run concluded success): ${failed_names}"
+				pass_count=$(( pass_count + fail_count ))
+				fail_count=0
+				failed_names=""
+				failed_links=""
+			fi
+
+			# (a) a check failed and its run did not absorb it
+			if (( fail_count > 0 )); then
+				emit_check_failure "$failed_names" "$failed_links"
+			fi
+
+			# (c) every check that reported is green, on a PR that has at least one
+			# check row or a CLEAN merge state — a PR with neither has told us
+			# nothing at all, which is the shape right after `gh pr create`.
+			local green=0
+			if (( pending_count == 0 && fail_count == 0 )); then
+				if (( pass_count > 0 )) || [[ "$MERGE" == "CLEAN" ]]; then
+					green=1
 				fi
 			fi
-		else
-			BLOCKED_SEEN=0
-		fi
 
-		# UNKNOWN is not a merge state — it is GitHub saying it has not
-		# computed one yet, and it can resolve to DIRTY. That window opens
-		# whenever a sibling PR merges: for a poll or two the API reports
-		# UNKNOWN, not DIRTY, so the conflict check above cannot see it and
-		# only this hold keeps a conflicting PR from firing `ready`. The view
-		# query itself triggers the recomputation, so UNKNOWN clears within a
-		# poll or two; if it never does, the terminal event is `timeout`,
-		# which names the withheld ready.
-		if (( confirmed_green == 1 )) \
-			&& [[ "$MERGE" != "BLOCKED" && "$MERGE" != "UNKNOWN" ]]; then
-			if [[ "$WATCH_UNTIL" == "closed" ]]; then
-				# Report green once, then fall through and keep polling: the
-				# DIRTY/BEHIND checks at the top of the loop are what a
-				# sibling merge trips. Exiting here instead would re-exit
-				# immediately on every relaunch (a spin loop, not a watch).
-				if (( READY_REPORTED == 0 )); then
-					notice_ready_watching
-					READY_REPORTED=1
+			# One green poll is not evidence that the current head's checks ran.
+			# Until a push's run registers, the new head has no check rows at all:
+			# pending_count is 0 because the run is absent, not because it
+			# reported, and a repo with no branch protection reports CLEAN
+			# throughout — so both operands above are satisfied by exactly the
+			# state they exist to reject. The next poll sees the run and reports it
+			# pending. Reset on any non-green poll, like BLOCKED_SEEN.
+			if (( green == 1 )); then
+				GREEN_SEEN=$(( GREEN_SEEN + 1 ))
+			else
+				GREEN_SEEN=0
+			fi
+			local confirmed_green=0
+			(( green == 1 && GREEN_SEEN >= GREEN_POLLS )) && confirmed_green=1
+
+			# Green is not the same as ready. A required check whose workflow has
+			# not registered emits no `gh pr checks` row, so it lands in no bucket
+			# and pending_count is blind to it — the counts above cannot tell an
+			# absent gate from a passed one. mergeStateStatus is the only field
+			# fetched that sees it. BLOCKED with nothing failing and nothing pending
+			# means a merge requirement is unsatisfied, so it must not fire `ready`;
+			# but it does NOT identify which requirement, since an outstanding
+			# approval reads identically. Hold it for a few consecutive polls — a
+			# check that is merely slow to register turns up as `pending` well
+			# inside that window — then report `blocked` and let a human resolve the
+			# ambiguity. See docs/plan/blocked-merge-state.md.
+			if (( green == 1 )) && [[ "$MERGE" == "BLOCKED" ]]; then
+				BLOCKED_SEEN=$(( BLOCKED_SEEN + 1 ))
+				if (( BLOCKED_SEEN >= BLOCKED_POLLS )); then
+					if [[ "$WATCH_UNTIL" == "closed" ]]; then
+						if (( BLOCKED_REPORTED == 0 )); then
+							notice_blocked_watching
+							BLOCKED_REPORTED=1
+						fi
+					else
+						emit_blocked
+					fi
 				fi
 			else
-				emit_ready
+				BLOCKED_SEEN=0
+			fi
+
+			# UNKNOWN is not a merge state — it is GitHub saying it has not
+			# computed one yet, and it can resolve to DIRTY. That window opens
+			# whenever a sibling PR merges: for a poll or two the API reports
+			# UNKNOWN, not DIRTY, so the conflict check above cannot see it and
+			# only this hold keeps a conflicting PR from firing `ready`. The view
+			# query itself triggers the recomputation, so UNKNOWN clears within a
+			# poll or two; if it never does, the terminal event is `timeout`,
+			# which names the withheld ready.
+			if (( confirmed_green == 1 )) \
+				&& [[ "$MERGE" != "BLOCKED" && "$MERGE" != "UNKNOWN" ]]; then
+				if [[ "$WATCH_UNTIL" == "closed" ]]; then
+					# Report green once, then fall through and keep polling: the
+					# DIRTY/BEHIND checks at the top of the loop are what a
+					# sibling merge trips. Exiting here instead would re-exit
+					# immediately on every relaunch (a spin loop, not a watch).
+					if (( READY_REPORTED == 0 )); then
+						notice_ready_watching
+						READY_REPORTED=1
+					fi
+				else
+					emit_ready
+				fi
 			fi
 		fi
 
@@ -669,6 +792,12 @@ main() {
 		# state: it is waiting on GitHub's async mergeability job, not on CI,
 		# so a backed-off interval would just delay the resolution.
 		if (( confirmed_green == 1 )) && [[ "$MERGE" == "UNKNOWN" ]]; then
+			sleep_for="$INTERVAL"
+		fi
+		# A vanished queue entry awaiting confirmation is the same shape: the
+		# question is whether the PR merged or was evicted, and the answer is
+		# one poll away.
+		if (( DEQUEUE_SEEN > 0 && DEQUEUE_SEEN < DEQUEUED_POLLS )); then
 			sleep_for="$INTERVAL"
 		fi
 		local remaining=$(( deadline - $(now) ))

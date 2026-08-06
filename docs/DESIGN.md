@@ -51,7 +51,7 @@ A **hook-nudged background watcher** with zero idle token cost.
    session launches  scripts/pr-sentinel-watch.sh N  as a background task
           │                         (run_in_background)
           ▼
-   watcher polls gh (checks + mergeStateStatus), sleeps, backs off
+   watcher polls gh (checks + mergeStateStatus + queue membership), sleeps, backs off
           │
           ▼   exits when attention is needed
    background task exit  ──► harness wakes the session with the watcher's report
@@ -72,7 +72,9 @@ task's stdout to the session as the wake payload.
    shellcheck-clean. Launched per-PR as a background task. Polls `gh` for check
    conclusions and `mergeStateStatus` on a configurable interval with backoff,
    and **exits** when: (a) a required check fails, (b) the PR becomes
-   `CONFLICTING`/`BEHIND`, (c) all checks are green and the PR is mergeable on
+   `CONFLICTING`/`BEHIND`, (b′) the PR leaves the merge queue while still open
+   — see [Queue membership](#queue-membership-is-a-different-fact-from-pr-health)
+   — (c) all checks are green and the PR is mergeable on
    two consecutive polls,
    (c′) all checks are green but the merge stays `BLOCKED` — see [Green is not
    ready](#green-is-not-ready-and-blocked-is-the-only-field-that-knows) — or
@@ -174,9 +176,10 @@ auto-merges, and it grants the session no new authority (see below).
 These are the point of the plugin, not a footnote.
 
 1. **Never ingest the human/attacker-writable channels.** The watcher queries
-   **only** GitHub-controlled check metadata and mergeable state
-   (`gh pr view --json state,mergeStateStatus,baseRefName`, `gh pr checks`, and
-   a workflow run's `conclusion`). It never requests, and never parses, the PR
+   **only** GitHub-controlled check metadata, mergeable state, and merge-queue
+   membership (`gh pr view --json state,mergeStateStatus,baseRefName,headRefOid,url`,
+   `gh pr checks`, a workflow run's `conclusion`, and a GraphQL
+   `mergeQueueEntry` read). It never requests, and never parses, the PR
    **body**, PR **review comments**, or **issue comments** — the exact channel the built-in
    autofix trigger uses (#66097). The only free-form text it surfaces is the
    session's **own** CI log excerpts, handled as semi-untrusted data as above.
@@ -356,6 +359,62 @@ the session relaunch a watcher that reports the same thing — the livelock clas
 #9 fixed for `check_failure`. The `closed`-mode notice is `blocked_watching`, and the
 `(?![\w-])` guard keeps it out of the concluded set for the same reason it keeps
 `ready_watching` out.
+
+### Queue membership is a different fact from PR health
+
+Every event above describes the PR's *health* — checks red, `DIRTY`, `BEHIND`,
+`BLOCKED`, green. None describes whether the PR is *in the merge queue*, so a
+session could heal everything the watcher ever told it about and still sit
+outside the queue with nothing left to say so (#41). The concrete shape: a
+sibling PR merges ahead of a queued PR and dirties it, the queue evicts it, the
+session heals the conflict, goes green, relaunches the watcher, gets `ready` —
+correct on every count, and the PR is still not merging, because nothing models
+the re-enqueue debt.
+
+**`dequeued`** is that fact as its own terminal event: the PR held a
+merge-queue entry on an earlier poll of this watch, and the entry is gone while
+the PR is still open. It is not folded into `conflict` — an eviction and a
+conflict are different facts with different remedies, a session that only hears
+`conflict` heals and stops, and an eviction can also leave the PR `CLEAN`
+(a queue-group reset), where there is no `conflict` to piggyback on. Instead
+the `dequeued` report carries the merge state and folds the heal guidance in,
+ending with the handback: re-enqueueing starts a merge, so it stays a **human**
+action, same trust boundary as ever.
+
+Mechanism notes, in the order they were forced:
+
+- **Membership is GraphQL-only.** `gh pr view` has no queue field
+  (`mergeQueueEntry` is not in its `--json` list), so this is the watcher's one
+  query outside `gh pr view`/`gh pr checks` — a second API call per poll, still
+  GitHub-controlled metadata. The REST issue-timeline events were rejected:
+  they need pagination, and `removed_from_merge_queue` also fires on every
+  successful queue merge, which overcounts evictions severalfold. The PR's
+  canonical `url` joined the `gh pr view` field list so the GraphQL query can
+  be addressed (owner/repo/number) when the watcher was launched with a bare
+  PR number.
+- **While queued, branch-state events are suspended.** The queue owns the PR:
+  every remedy `conflict`/`behind` prescribes is a push, and any push to a
+  queued PR evicts it. A queued PR whose base has advanced reads `BEHIND` —
+  without the suspension the watcher would wake the session to rebase,
+  *causing* the eviction it exists to report. Green events are suspended too: a
+  queued PR is already past the handoff that `ready` announces. Only `closed`,
+  `dequeued`, and `timeout` end the watch from there.
+- **An eviction is confirmed across `PR_SENTINEL_DEQUEUED_POLLS` polls**
+  (default 2, confirming at the base interval like the green guard). GitHub
+  removes the queue entry a moment *before* the queue merge lands, so one
+  open-and-unqueued poll can be a merge in flight; the confirming poll sees the
+  PR `MERGED` and reports `closed` instead of a phantom eviction.
+- **Unknown drives nothing.** A failed membership query leaves the poll's queue
+  state unknown: with no queue ever observed the watcher behaves exactly as it
+  did before the feature (a token that cannot run GraphQL loses queue tracking,
+  nothing else), and with one observed it keeps the hands-off stance rather
+  than un-suspending on a blip. Detection therefore needs the same run to have
+  seen the PR queued — a watcher launched after an eviction has no before-state
+  and stays silent about it.
+
+`dequeued` is deliberately **not** in the Stop hook's concluded set: an evicted
+PR is the opposite of handed off, and the backstop should keep holding the
+session responsible until the branch is healed, re-watched, and handed back.
 
 ### Why the watcher uses `gh` but the hook does not
 
