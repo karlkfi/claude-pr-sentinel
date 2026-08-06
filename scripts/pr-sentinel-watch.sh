@@ -461,6 +461,11 @@ emit_timeout() {
 		echo "Its checks were green but the merge was BLOCKED (see the"
 		echo "blocked_watching notice above); a merge requirement is unsatisfied."
 	fi
+	if (( GREEN_SEEN >= GREEN_POLLS )) && [[ "${MERGE:-}" == "UNKNOWN" ]]; then
+		echo "Its checks were green, but GitHub never computed a merge state"
+		echo "(mergeStateStatus stayed UNKNOWN), so 'ready' was withheld — an"
+		echo "uncomputed state can still resolve to a conflict."
+	fi
 	echo "Next action: check the PR status and relaunch the watcher if still open."
 	exit 0
 }
@@ -626,7 +631,16 @@ main() {
 			BLOCKED_SEEN=0
 		fi
 
-		if (( confirmed_green == 1 )) && [[ "$MERGE" != "BLOCKED" ]]; then
+		# UNKNOWN is not a merge state — it is GitHub saying it has not
+		# computed one yet, and it can resolve to DIRTY. That window opens
+		# whenever a sibling PR merges: for a poll or two the API reports
+		# UNKNOWN, not DIRTY, so the conflict check above cannot see it and
+		# only this hold keeps a conflicting PR from firing `ready`. The view
+		# query itself triggers the recomputation, so UNKNOWN clears within a
+		# poll or two; if it never does, the terminal event is `timeout`,
+		# which names the withheld ready.
+		if (( confirmed_green == 1 )) \
+			&& [[ "$MERGE" != "BLOCKED" && "$MERGE" != "UNKNOWN" ]]; then
 			if [[ "$WATCH_UNTIL" == "closed" ]]; then
 				# Report green once, then fall through and keep polling: the
 				# DIRTY/BEHIND checks at the top of the loop are what a
@@ -649,6 +663,12 @@ main() {
 		# Confirming at the base interval bounds what the extra poll costs a
 		# genuine `ready` at one INTERVAL.
 		if (( GREEN_SEEN > 0 && GREEN_SEEN < GREEN_POLLS )); then
+			sleep_for="$INTERVAL"
+		fi
+		# Likewise a confirmed-green poll held only by an uncomputed merge
+		# state: it is waiting on GitHub's async mergeability job, not on CI,
+		# so a backed-off interval would just delay the resolution.
+		if (( confirmed_green == 1 )) && [[ "$MERGE" == "UNKNOWN" ]]; then
 			sleep_for="$INTERVAL"
 		fi
 		local remaining=$(( deadline - $(now) ))

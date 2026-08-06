@@ -145,7 +145,7 @@ needed:
 | every failing check belongs to a run that concluded `success` (`continue-on-error: true`) | *(treated as passing, keep polling)* | nothing — GitHub already ruled the failure non-blocking; the suppression is noted on the task's stderr |
 | `mergeStateStatus == DIRTY` | **conflict** | rebase onto `<base>` (default), resolve, `git push --force-with-lease`, relaunch — or merge (`PR_SENTINEL_HEAL=merge`) |
 | `mergeStateStatus == BEHIND` | **behind** | rebase onto `<base>` (default) and force-push with lease, relaunch — or merge to fast-forward (`PR_SENTINEL_HEAL=merge`) |
-| all checks green, no conflict, `mergeStateStatus != BLOCKED`, for `PR_SENTINEL_GREEN_POLLS` polls running | **ready** | hand back to a human for merge review — **never auto-merge** |
+| all checks green, no conflict, a computed `mergeStateStatus` (not `BLOCKED`, not `UNKNOWN`), for `PR_SENTINEL_GREEN_POLLS` polls running | **ready** | hand back to a human for merge review — **never auto-merge** |
 | the same, **and** `PR_SENTINEL_WATCH_UNTIL=closed` | *(notice: **ready_watching**, keep polling)* | nothing — the watch continues past green (see [Configuration](#configuration)) |
 | all checks green but `mergeStateStatus == BLOCKED` for `PR_SENTINEL_BLOCKED_POLLS` polls running | **blocked** | don't treat it as green: a required check may never have registered, or an approval is outstanding (see [Green is not the same as ready](#green-is-not-the-same-as-ready)) |
 | the same, **and** `PR_SENTINEL_WATCH_UNTIL=closed` | *(notice: **blocked_watching**, keep polling)* | nothing — the watch continues |
@@ -474,6 +474,14 @@ poll interval on a genuine ready — the confirming poll is scheduled at
 `PR_SENTINEL_INTERVAL` rather than the backed-off interval, so a long CI run
 doesn't turn that into a five-minute wait. Set it to `1` to decide on a single
 poll.
+
+`UNKNOWN` gets the same treatment for the same reason. It is not a merge state
+but GitHub saying it hasn't computed one yet — the window a sibling PR's merge
+opens, during which a PR that is about to read `DIRTY` still reads `UNKNOWN`.
+The watcher withholds `ready` until the state is computed, polling at the base
+interval while it waits (the query itself triggers the recomputation, so it
+resolves within a poll or two). If it somehow never resolves, the watch ends in
+a `timeout` whose report names the withheld ready.
 
 ## Agent guidance
 
