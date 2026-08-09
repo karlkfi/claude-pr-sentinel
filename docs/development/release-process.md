@@ -23,7 +23,7 @@ grep -rn '"version"' .claude-plugin/
 
 ## Run the release in an interactive permission mode
 
-Steps 4 and 5 are the only place this repo touches `main` directly, and
+Steps 5 and 6 are the only place this repo touches `main` directly, and
 [branch-guard](https://github.com/karlkfi/claude-branch-guard) classifies both
 the commit and the push as `ask`. In a **non-interactive** permission mode
 (`auto`, `dontAsk`, `bypassPermissions`) branch-guard converts that `ask` into a
@@ -32,7 +32,7 @@ reaches you, and approving in chat cannot unblock it. The release stalls with
 the version bump committed but unpushed.
 
 Switch to an interactive mode — **Accepts edits** (`acceptEdits`) or the default
-— before step 4, and approve the two prompts.
+— before step 5, and approve the two prompts.
 
 Do **not** reach for `BRANCH_GUARD_PUSH_POLICY` to get around this. Its
 protected-target check runs before the policy branch, so `strict` and
@@ -58,22 +58,38 @@ cheaper trade.
    fixes, minor for new behaviour, major for a breaking change to the hook
    contract or watcher report format).
 
-4. **Commit the bump directly to `main`** (the scoped direct-to-main
-   exception), Conventional Commits, no Claude attribution:
+4. **Write the release notes** to `docs/releases/v<X.Y.Z>.md`. Conventions, the
+   pre-publish render check, and why the body is authored in-repo rather than in
+   the web form are in [`docs/releases/README.md`](../releases/README.md). The
+   previous release is your template:
+
+   ```
+   gh release view v<previous> --json body --jq .body
+   ```
+
+5. **Commit the bump and the notes directly to `main`** (the scoped
+   direct-to-main exception), Conventional Commits, no Claude attribution:
 
    ```
    git commit -am "chore(release): v<X.Y.Z>"
    ```
 
-5. **Tag and push:**
+6. **Tag and push:**
 
    ```
    git tag -a v<X.Y.Z> -m "v<X.Y.Z>"
    git push origin main --tags
    ```
 
-6. **Create the GitHub Release** from the tag with `gh release create`, summarising
-   user-visible changes since the last tag.
+7. **Publish the Release from the notes file:**
+
+   ```
+   gh release create v<X.Y.Z> --title "v<X.Y.Z>" --notes-file docs/releases/v<X.Y.Z>.md
+   ```
+
+   Amending a published body later (a wrong count, a dead link) means editing
+   the file and re-running `gh release edit --notes-file` — never editing on the
+   Release page, which puts the change through no diff.
 
 ## Versioning notes
 
