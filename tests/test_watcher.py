@@ -16,6 +16,12 @@ scenario is a directory of small fixture files:
   run_log      -> raw --log-failed output for `gh run view`
   run_conclusion.<id> -> conclusion of run <id> for `gh api repos/.../runs/<id>`
                  (absent = the API call fails, as an unreadable run would)
+  run_workflow.<id> -> workflow id owning run <id>, for the same path's
+                 `-q .workflow_id` projection (absent = unreadable, so the
+                 base-branch comparison falls through to `check_failure`)
+  base_run.<wf> -> "conclusion\\trun-id\\thead-sha\\tworkflow-path" for the base
+                 branch's latest completed run of workflow <wf> (absent = the
+                 base has no run of that workflow at all)
   queue_entry  -> "true"/"false" for the `gh api graphql` merge-queue query
                  (absent = the query fails, e.g. a token that cannot run
                  GraphQL — the watcher must treat membership as unknown)
@@ -44,13 +50,39 @@ GH_STUB = textwrap.dedent(
     # Per-key call counters live in $GH_STUB_DIR/.count.<key>.
     set -u
     dir="$GH_STUB_DIR"
-    # `gh api repos/<o>/<r>/actions/runs/<id> -q .conclusion`: answer from
-    # run_conclusion.<id>, or fail like an unreadable run when there is none.
-    # (`gh api graphql` is the merge-queue query and dispatches below instead.)
+
+    # Print fixture <key>, preferring the per-call file key.N (N = this key's
+    # own call count). Returns 1 when neither key.N nor key exists.
+    emit() {
+      local key="$1" cfile n
+      cfile="$dir/.count.$key"
+      n=0; [[ -f "$cfile" ]] && n=$(cat "$cfile")
+      n=$((n + 1)); echo "$n" > "$cfile"
+      if [[ -f "$dir/$key.$n" ]]; then cat "$dir/$key.$n"
+      elif [[ -f "$dir/$key" ]]; then cat "$dir/$key"
+      else return 1
+      fi
+    }
+
+    # `gh api` REST paths. (`gh api graphql` is the merge-queue query and
+    # dispatches below instead.)
     if [[ "${1:-}" == "api" && "${2:-}" != "graphql" ]]; then
-      f="$dir/run_conclusion.${2##*/}"
-      [[ -f "$f" ]] || exit 1
-      cat "$f"
+      case "$2" in
+        # repos/<o>/<r>/actions/workflows/<wf>/runs?branch=... -> base_run.<wf>.
+        # No fixture means the base has no run of that workflow at all.
+        */actions/workflows/*)
+          wf="${2#*/actions/workflows/}"; wf="${wf%%/*}"
+          emit "base_run.$wf" || true
+          exit 0 ;;
+      esac
+      # repos/<o>/<r>/actions/runs/<id> -> run_workflow.<id> for the
+      # `-q .workflow_id` projection, run_conclusion.<id> otherwise. Absent =
+      # the API call fails, as an unreadable run would.
+      id="${2##*/}"
+      case "${4:-}" in
+        .workflow_id) emit "run_workflow.$id" || exit 1 ;;
+        *)            emit "run_conclusion.$id" || exit 1 ;;
+      esac
       exit 0
     fi
     key=""
@@ -61,16 +93,8 @@ GH_STUB = textwrap.dedent(
       api:graphql) key="queue_entry" ;;
       *) exit 0 ;;
     esac
-    cfile="$dir/.count.$key"
-    n=0; [[ -f "$cfile" ]] && n=$(cat "$cfile")
-    n=$((n + 1)); echo "$n" > "$cfile"
-    # Prefer a per-call file (key.N), fall back to the base file.
-    if [[ -f "$dir/$key.$n" ]]; then
-      cat "$dir/$key.$n"
-    elif [[ -f "$dir/$key" ]]; then
-      cat "$dir/$key"
-    elif [[ "$key" == "queue_entry" ]]; then
-      exit 1
+    if ! emit "$key"; then
+      [[ "$key" == "queue_entry" ]] && exit 1
     fi
     exit 0
     """
@@ -271,6 +295,151 @@ class WatcherCase(unittest.TestCase):
         self.assertIn("PR-SENTINEL EVENT: blocked", out)
         self.assertNotIn("EVENT: check_failure", out)
         self.assertNotIn("EVENT: ready", out)
+
+    # -- failures inherited from the base branch (issue #44) ------------------
+
+    def _inherited(self, base_conclusion="failure"):
+        """One failing check whose workflow (99) is also red on the base."""
+        return {
+            "pr_view": "OPEN\tUNSTABLE\tmain\tabc1234def\n",
+            "pr_checks": "fail\tdoc-links\thttps://github.com/o/r/actions/runs/22/job/2\n",
+            "run_conclusion.22": "failure\n",
+            "run_workflow.22": "99\n",
+            "base_run.99": f"{base_conclusion}\t31274922338\t"
+                           "47815b6adeadbeef\t.github/workflows/doc-links.yml\n",
+            "run_log": "boom\n",
+        }
+
+    def test_base_failure_notice_instead_of_check_failure(self):
+        """The motivating case: the same workflow is already red on the base, so
+        the failure is inherited. It must NOT wake the session to fix it, and
+        the watch must continue — the terminal event is `timeout`."""
+        rc, out, _ = self.run_watcher(
+            self._inherited(), env={"PR_SENTINEL_TIMEOUT": "3"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: base_failure", out)
+        self.assertNotIn("EVENT: check_failure", out)
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+        # The base run is identified by its workflow FILE, never a run name a
+        # `run-name:` expression could interpolate a commit message into.
+        self.assertIn(
+            "Also failing on main: doc-links.yml (run 31274922338, 47815b6, failure)",
+            out)
+        self.assertIn("none of them is this PR's to fix", out)
+        self.assertIn("Do NOT add the fix to this PR", out)
+        self.assertIn("Do NOT auto-merge", out)
+        # Not our failure to diagnose, so no CI log excerpt rides along.
+        self.assertNotIn("BEGIN CI LOG EXCERPT", out)
+        # The timeout report names the withheld failure so the relaunch isn't blind.
+        self.assertIn("also red on the base branch", out)
+
+    def test_base_failure_notice_fires_once(self):
+        """The state cannot move until someone else's fix lands, so re-reporting
+        it every poll would be pure noise."""
+        rc, out, _ = self.run_watcher(
+            self._inherited(), env={"PR_SENTINEL_TIMEOUT": "4"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.count("PR-SENTINEL EVENT: base_failure"), 1)
+
+    def test_green_base_still_wakes_as_check_failure(self):
+        """The ordinary case is untouched: the base is green, so the failure is
+        this PR's own."""
+        rc, out, _ = self.run_watcher(self._inherited(base_conclusion="success"))
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: base_failure", out)
+
+    def test_cancelled_base_run_is_not_evidence(self):
+        """A run someone stopped by hand says nothing about the base's health,
+        so it falls through to the wake rather than suppressing it."""
+        rc, out, _ = self.run_watcher(self._inherited(base_conclusion="cancelled"))
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: base_failure", out)
+
+    def test_no_base_run_falls_through_to_check_failure(self):
+        """A workflow the base has never run — new, or path-gated on files the
+        base never touched — has nothing to compare against, so it stays a
+        wake rather than a guess."""
+        files = self._inherited()
+        del files["base_run.99"]
+        rc, out, _ = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: base_failure", out)
+
+    def test_unreadable_workflow_id_falls_through(self):
+        """Fail safe, like absorption: a run whose workflow id can't be read
+        cannot be proven inherited."""
+        files = self._inherited()
+        del files["run_workflow.22"]
+        rc, out, _ = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: base_failure", out)
+
+    def test_mixed_failures_still_wake(self):
+        """All-or-nothing, like absorption: one failure the base does not share
+        is this PR's own, and both names stay in the report."""
+        files = {
+            "pr_view": "OPEN\tUNSTABLE\tmain\tabc1234def\n",
+            "pr_checks": (
+                "fail\tdoc-links\thttps://github.com/o/r/actions/runs/22/job/2\n"
+                "fail\tunit-test\thttps://github.com/o/r/actions/runs/33/job/3\n"
+            ),
+            "run_conclusion.22": "failure\n",
+            "run_conclusion.33": "failure\n",
+            "run_workflow.22": "99\n",
+            "run_workflow.33": "77\n",
+            "base_run.99": "failure\t31274922338\t47815b6a\t.github/workflows/doc-links.yml\n",
+            "base_run.77": "success\t31274999999\te60000d0\t.github/workflows/tests.yml\n",
+            "run_log": "boom\n",
+        }
+        rc, out, _ = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertIn("doc-links (fail)", out)
+        self.assertIn("unit-test (fail)", out)
+        self.assertNotIn("EVENT: base_failure", out)
+
+    def test_base_going_green_wakes_the_held_session(self):
+        """The unblock signal. Once the base clears while the check is still red
+        here, that failure IS this PR's own — the held watch wakes with
+        `check_failure` rather than waiting for a tracking issue to close."""
+        files = self._inherited()
+        files["base_run.99.1"] = files["base_run.99"]
+        files["base_run.99"] = \
+            "success\t31274999999\te60000d0\t.github/workflows/doc-links.yml\n"
+        rc, out, _ = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: base_failure", out)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        # Notice first, wake second — the notice never displaces the event.
+        self.assertLess(out.index("EVENT: base_failure"),
+                        out.index("EVENT: check_failure"))
+
+    def test_base_check_knob_restores_prior_behaviour(self):
+        """PR_SENTINEL_BASE_CHECK=0 opts out of the comparison entirely."""
+        rc, out, _ = self.run_watcher(
+            self._inherited(), env={"PR_SENTINEL_BASE_CHECK": "0"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: base_failure", out)
+
+    def test_absorbed_failure_is_never_compared_to_the_base(self):
+        """Absorption runs first, so a `continue-on-error` failure is already
+        gone by the time the base comparison would see it — the PR is green."""
+        files = {
+            "pr_view": "OPEN\tUNSTABLE\tmain\tabc1234def\n",
+            "pr_checks": "fail\tunittest-windows\thttps://github.com/o/r/actions/runs/22/job/2\n",
+            "run_conclusion.22": "success\n",
+            "run_workflow.22": "99\n",
+            "base_run.99": "failure\t31274922338\t47815b6a\t.github/workflows/tests.yml\n",
+        }
+        rc, out, _ = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: ready", out)
+        self.assertNotIn("EVENT: base_failure", out)
 
     def test_ready_event(self):
         files = {
