@@ -209,10 +209,15 @@ def _check_failure_signature(text):
     """For a read of a watcher output file, the identity of the `check_failure`
     it reports as `(failed_checks, head_sha)`, or None if it is not a
     check_failure (or predates the head-SHA field). Read only from the header
-    region so a forged copy inside a CI-log excerpt cannot be mistaken for it."""
+    region so a forged copy inside a CI-log excerpt cannot be mistaken for it,
+    and only from the marker FORWARD: the same file can carry an earlier
+    `base_failure` notice, which has its own `Failed checks:` and `Head SHA:`
+    lines, and the signature has to describe the check_failure."""
     header = _report_header_region(text)
-    if not CHECK_FAILURE_EVENT_RE.search(header):
+    m = CHECK_FAILURE_EVENT_RE.search(header)
+    if not m:
         return None
+    header = header[m.end():]
     fm = FAILED_CHECKS_RE.search(header)
     sm = HEAD_SHA_RE.search(header)
     if not fm or not sm:

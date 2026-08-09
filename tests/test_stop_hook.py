@@ -204,6 +204,18 @@ class ClassifierUnit(unittest.TestCase):
             "Failed checks: x (fail)\nHead SHA: cafe\n"
             "----- END CI LOG EXCERPT -----\n"))
 
+    def test_check_failure_signature_skips_a_preceding_base_failure_notice(self):
+        """A watcher that held on `base_failure` and then woke once the base
+        went green writes both reports to one file, and the notice carries its
+        own header fields. The signature must describe the check_failure that
+        follows it, not the stale notice above it."""
+        sig = hook._check_failure_signature(
+            "PR-SENTINEL EVENT: base_failure\nPR: 42\n"
+            "Head SHA: oldsha\nFailed checks: doc-links (fail)\n"
+            "Also failing on main: doc-links.yml (run 31274922338, 47815b6, failure)\n\n"
+            + check_failure_report(failed="unit-test (fail)", sha="newsha"))
+        self.assertEqual(sig, ("unit-test (fail)", "newsha"))
+
     def test_build_warning(self):
         w = hook.build_warning({"42"})
         self.assertIn("#42", w)
