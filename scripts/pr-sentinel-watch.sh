@@ -23,6 +23,12 @@
 #   timeout        the overall watch budget elapsed with no other event
 #   error          gh could not be queried after retries (fail-safe hand-back)
 #
+# Non-exiting notices:
+#   base_failure    every failing check is ALSO failing on the base branch, so
+#                   the PR inherited the failure rather than causing it. Reported
+#                   once per failed set; the watch continues until the base goes
+#                   green (see base_failures_only)
+#
 # Non-exiting notice (PR_SENTINEL_WATCH_UNTIL=closed only):
 #   ready_watching  the PR is green, reported ONCE, and the watch continues so a
 #                   sibling merge that later dirties it still wakes the session.
@@ -76,6 +82,13 @@ GREEN_POLLS="${PR_SENTINEL_GREEN_POLLS:-2}"  # green polls before `ready`
 # in flight; the confirming poll sees that PR MERGED and reports `closed`.
 DEQUEUED_POLLS="${PR_SENTINEL_DEQUEUED_POLLS:-2}"  # unqueued polls before `dequeued`
 
+# Whether to compare a failing check against the same workflow's latest run on
+# the base branch before waking the session (see base_failures_only). `0`,
+# `false`, or an explicitly empty value restores the pre-feature behaviour:
+# every surviving failure wakes as `check_failure`.
+BASE_CHECK=$(printf '%s' "${PR_SENTINEL_BASE_CHECK-1}" | tr '[:upper:]' '[:lower:]')
+case "$BASE_CHECK" in ''|0|false|no|off) BASE_CHECK=0 ;; *) BASE_CHECK=1 ;; esac
+
 # Conflict/behind heal strategy the report recommends: rebase (default) or
 # merge. Normalise to lowercase (bash 3.2: use tr, not ${var,,}) and fail safe
 # to rebase on any unrecognised value.
@@ -109,6 +122,16 @@ QUEUED_SEEN=0
 
 # Consecutive polls the queue entry has been absent since QUEUED_SEEN.
 DEQUEUE_SEEN=0
+
+# The failed-check set last reported as inherited from the base branch, so the
+# `base_failure` notice fires once per distinct failure rather than on every
+# poll of a state that by definition does not move. Non-empty also tells the
+# `timeout` report that a failure was withheld.
+BASE_FAILURE_REPORTED=""
+
+# The "Also failing on <base>:" lines for that notice, rebuilt each time
+# base_failures_only runs.
+BASE_FAIL_DETAIL=""
 
 # owner / repo / number for the GraphQL queue query, parsed once from the PR
 # URL that `gh pr view` returns (the watcher's own PR argument may be a bare
@@ -290,6 +313,65 @@ failures_absorbed() {
 	(( resolved > 0 ))
 }
 
+# The base branch's latest COMPLETED run of one workflow, when it concluded in
+# failure. Prints "<workflow-file> (run <id>, <sha>, <conclusion>)"; returns 1
+# when the base run is green, absent, or unreadable.
+#
+# Scoped to the WORKFLOW, never "the base branch's newest run": a path-gated
+# workflow only runs when its paths change, so the base tip and this workflow's
+# last run can be many commits apart, and reading the tip gives a stale green
+# from before the breakage or a stale red long after the fix landed. A run
+# exists only where the paths matched, so a workflow-scoped query self-corrects.
+#
+# Reads `.path` (the workflow file) and never `.name`/`.display_title`: a
+# `run-name:` expression can interpolate a commit message into those, which is
+# human-writable text this plugin does not surface.
+base_run_failure() {
+	local repo="$1" wf="$2" out conclusion run_id sha file
+	out=$(gh api \
+		"${repo}/actions/workflows/${wf}/runs?branch=${BASE}&status=completed&per_page=1" \
+		-q '.workflow_runs[] | [.conclusion, (.id|tostring), .head_sha, .path] | @tsv' \
+		2>/dev/null || true)
+	[[ -z "$out" ]] && return 1
+	IFS=$'\t' read -r conclusion run_id sha file <<<"$out"
+	# `cancelled` is deliberately not red: a run someone stopped by hand says
+	# nothing about the base's health, and falling through to `check_failure` is
+	# the safe direction.
+	case "$conclusion" in
+		failure|timed_out|startup_failure) ;;
+		*) return 1 ;;
+	esac
+	printf '%s (run %s, %s, %s)' "${file##*/}" "$run_id" "${sha:0:7}" "$conclusion"
+}
+
+# Whether EVERY surviving failing check belongs to a workflow that is ALSO
+# failing on the base branch — an inherited failure, not this PR's to fix.
+# All-or-nothing like failures_absorbed: one failure the base does not share is
+# this PR's own, and that mixed case still has to wake the session.
+#
+# Fail safe to "not inherited": a check with no Actions run behind it, an
+# unreadable workflow id, and a base with no run of that workflow at all (a new
+# workflow, or one whose paths the base has never touched) all return 1, so an
+# unknown stays a wake. Two `gh api` calls per distinct run, only on a poll that
+# already found a failure. Sets BASE_FAIL_DETAIL.
+base_failures_only() {
+	local links="$1" link path wf_id detail seen="" resolved=0
+	BASE_FAIL_DETAIL=""
+	while IFS= read -r link; do
+		[[ -z "$link" ]] && continue
+		path=$(run_api_path_from_link "$link")
+		[[ -z "$path" ]] && return 1
+		case " $seen " in *" $path "*) continue ;; esac
+		seen="$seen $path"
+		wf_id=$(gh api "$path" -q '.workflow_id' 2>/dev/null || true)
+		[[ "$wf_id" =~ ^[0-9]+$ ]] || return 1
+		detail=$(base_run_failure "${path%/actions/runs/*}" "$wf_id") || return 1
+		BASE_FAIL_DETAIL="${BASE_FAIL_DETAIL}Also failing on ${BASE}: ${detail}"$'\n'
+		resolved=$(( resolved + 1 ))
+	done <<<"$links"
+	(( resolved > 0 ))
+}
+
 # Print the sanitized, size-capped CI log excerpt for a failed run id.
 # Keeps the TAIL (failures surface at the end) and notes truncation.
 log_excerpt() {
@@ -363,6 +445,34 @@ emit_check_failure() {
 		echo " inspect the checks directly with: gh pr checks ${PR})"
 	fi
 	exit 0
+}
+
+# The non-terminal counterpart of emit_check_failure, for a failure the PR
+# inherited rather than caused. It does NOT exit, and it carries no CI log
+# excerpt: the diagnosis belongs to whoever fixes the base, and the session
+# reading this has nothing to do with the log. Emitted once per distinct failed
+# set — the state does not move until someone else's fix lands.
+notice_base_failure() {
+	local failed="$1"
+	report_header base_failure
+	echo "State: OPEN"
+	echo "mergeStateStatus: ${MERGE}"
+	echo "Head SHA: ${HEAD_SHA}"
+	echo "Failed checks: ${failed}"
+	printf '%s' "$BASE_FAIL_DETAIL"
+	echo
+	echo "Every failing check here is already red on the base branch (${BASE}), so"
+	echo "none of them is this PR's to fix. Do NOT add the fix to this PR: with"
+	echo "several sessions in flight, each one writes the same fix, and whoever"
+	echo "lands second pays for the conflict on top."
+	echo
+	echo "Next action: look for an open standalone fix for ${BASE} and wait for it;"
+	echo "open one on its own branch if nobody has. Do NOT auto-merge."
+	echo
+	echo "This is a NOTICE, not a wake-up: the watcher keeps polling until the check"
+	echo "clears on ${BASE}. If it clears there while still failing here, that"
+	echo "failure IS this PR's own and the next poll wakes this session with"
+	echo "check_failure."
 }
 
 emit_conflict() {
@@ -545,6 +655,11 @@ emit_timeout() {
 		echo "The PR held a merge-queue entry when last confirmed; if it is still"
 		echo "queued, the queue is merging it on its own."
 	fi
+	if [[ -n "$BASE_FAILURE_REPORTED" ]]; then
+		echo "Its failing check(s) were also red on the base branch (see the"
+		echo "base_failure notice above), so no fix was owed here — relaunching"
+		echo "keeps watching for the base to go green."
+	fi
 	echo "Next action: check the PR status and relaunch the watcher if still open."
 	exit 0
 }
@@ -696,9 +811,22 @@ main() {
 				failed_links=""
 			fi
 
-			# (a) a check failed and its run did not absorb it
+			# (a) a check failed and its run did not absorb it. Before waking
+			# the session to fix it, ask whether the base branch is already red
+			# on the same workflows: an inherited failure is not this PR's to
+			# fix, and N sessions each writing that fix — and one of them then
+			# taking a rebase conflict — is the cost this check exists to avoid.
+			# The notice does not exit; the watch continues until the base goes
+			# green, which is the only signal that unblocks it.
 			if (( fail_count > 0 )); then
-				emit_check_failure "$failed_names" "$failed_links"
+				if (( BASE_CHECK == 1 )) && base_failures_only "$failed_links"; then
+					if [[ "$BASE_FAILURE_REPORTED" != "$failed_names" ]]; then
+						notice_base_failure "$failed_names"
+						BASE_FAILURE_REPORTED="$failed_names"
+					fi
+				else
+					emit_check_failure "$failed_names" "$failed_links"
+				fi
 			fi
 
 			# (c) every check that reported is green, on a PR that has at least one

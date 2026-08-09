@@ -153,6 +153,37 @@ with no Actions run behind it, a run still in progress, or an unreadable
 conclusion all stay a wake. The suppression is logged to stderr, which the
 background task keeps and which never wakes the session.
 
+A failure that survives absorption gets one more question: is the base branch
+already red on the same workflows? A `check_failure` report tells the session to
+fix the failure here, and for an inherited failure that instruction is not just
+wrong but expensive — every session touching a file the gate covers gets the same
+report, each writes the same fix, and one of them then takes a rebase conflict.
+So when **every** surviving failure belongs to a workflow whose latest completed
+run on the base also failed, the watcher reports a non-terminal **`base_failure`**
+notice and keeps polling instead of exiting.
+
+The lookup is scoped to the **workflow** (`repos/<o>/<r>/actions/workflows/<id>/
+runs?branch=<base>&status=completed&per_page=1`, the workflow id read from the
+run the failing check already links to), never to the base branch's newest run.
+A path-gated workflow only runs when its paths change, so the base tip and that
+workflow's last run can be many commits apart, and reading the tip yields a stale
+green from before the breakage or a stale red long after the fix. A run exists
+only where the paths matched, so the workflow-scoped query self-corrects. The
+report identifies the base run by its workflow **`.path`** and never `.name` or
+`.display_title`, which a `run-name:` expression can interpolate a commit message
+or PR title into — human-writable text this plugin does not ingest.
+
+The notice does not exit because the unblock signal is *green on the base again*,
+which holds whether the fix lands as a standalone PR or a revert; when the base
+clears while the check is still red here, that failure is the PR's own and the
+next poll wakes the session with `check_failure`. Like absorption it is
+all-or-nothing and fails safe — an unresolvable run, an unreadable workflow id, a
+`cancelled` base run, or a base with no run of that workflow at all all stay a
+wake. Unlike absorption it carries an off switch (`PR_SENTINEL_BASE_CHECK=0`),
+because absorption reads GitHub's verdict on the exact run in question while this
+infers across two runs; the weaker evidence earns one. See
+[`plan/base-failure.md`](plan/base-failure.md).
+
 For a **check failure**, the report appends a CI log excerpt. That excerpt is
 the single most dangerous input this tool handles, so it is treated as
 **semi-untrusted data**:
@@ -178,7 +209,9 @@ These are the point of the plugin, not a footnote.
 1. **Never ingest the human/attacker-writable channels.** The watcher queries
    **only** GitHub-controlled check metadata, mergeable state, and merge-queue
    membership (`gh pr view --json state,mergeStateStatus,baseRefName,headRefOid,url`,
-   `gh pr checks`, a workflow run's `conclusion`, and a GraphQL
+   `gh pr checks`, a workflow run's `conclusion` / `workflow_id`, the base
+   branch's latest run of that workflow (`conclusion`, `id`, `head_sha`,
+   `path`), and a GraphQL
    `mergeQueueEntry` read). It never requests, and never parses, the PR
    **body**, PR **review comments**, or **issue comments** — the exact channel the built-in
    autofix trigger uses (#66097). The only free-form text it surfaces is the
@@ -481,12 +514,16 @@ external, or a misconfigured required check — would re-block on every relaunch
 fix → push → relaunch silently assumes a fix exists in-session. To bound that,
 the hook **dampens**. It reads each `check_failure` report's signature — the
 failed-check set and the head commit (`Head SHA:`), both from the report's
-header region so a forged copy in a CI-log excerpt can't drive it — and once two
+header region so a forged copy in a CI-log excerpt can't drive it, and from the
+`check_failure` marker *forward* so an earlier `base_failure` notice in the same
+file can't lend it stale fields — and once two
 reports carry the identical signature (a real fix would have moved the SHA), it
 infers no fix is coming and allows the stop, emitting a non-blocking
 `systemMessage` so the red PR stays visible. One block to try; no livelock; never
-a *silent* walk-away. This is the general fix: it covers the out-of-scope,
-external, and misconfigured cases that no base-branch inspection could detect.
+a *silent* walk-away. This stays the general fix: `base_failure` above catches
+the inherited case up front and measured, but dampening still covers the
+out-of-scope, external, and misconfigured cases that no base-branch inspection
+could detect.
 
 ### Why fail-open in the hook, fail-safe in the watcher
 

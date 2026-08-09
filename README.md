@@ -107,7 +107,7 @@ session to launch the watcher before stopping:
 | the watcher has reported the **same** `check_failure` twice (same failed checks, same head commit) | **allow + warn** — the failure isn't changing, so stop nagging; a non-blocking notice keeps the red PR visible |
 | a launched watcher hasn't reported completion yet (still running) | silent (already covered) |
 | PR handed off (watcher **terminal** `ready`/`closed`/`blocked`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
-| the watcher's output ends on a `ready_watching` or `blocked_watching` **notice** (a `PR_SENTINEL_WATCH_UNTIL=closed` watch that exited without a terminal event) | **block once** — a notice isn't a handoff in that mode; the PR is still open and unwatched |
+| the watcher's output ends on a `base_failure`, `ready_watching`, or `blocked_watching` **notice** (a watch that exited without a terminal event) | **block once** — a notice isn't a handoff; the PR is still open and unwatched |
 | no PR opened or watched this session | silent (a PR merely viewed or commented on is not yours) |
 | `stop_hook_active` already set (a prior block) | silent — **never loops** |
 | unreadable transcript / any uncertainty | silent (fail-open) |
@@ -143,6 +143,7 @@ needed:
 | --- | --- | --- |
 | a check concluded fail/cancel and its workflow run didn't conclude `success` | **check_failure** | fix the failure (log excerpt attached), push, relaunch |
 | every failing check belongs to a run that concluded `success` (`continue-on-error: true`) | *(treated as passing, keep polling)* | nothing — GitHub already ruled the failure non-blocking; the suppression is noted on the task's stderr |
+| every failing check's workflow is **already red on the base branch** | *(notice: **base_failure**, keep polling)* | nothing — the PR inherited the failure; don't add the fix here (see [Failures inherited from the base branch](#failures-inherited-from-the-base-branch)) |
 | `mergeStateStatus == DIRTY` | **conflict** | rebase onto `<base>` (default), resolve, `git push --force-with-lease`, relaunch — or merge (`PR_SENTINEL_HEAL=merge`) |
 | `mergeStateStatus == BEHIND` | **behind** | rebase onto `<base>` (default) and force-push with lease, relaunch — or merge to fast-forward (`PR_SENTINEL_HEAL=merge`) |
 | the PR holds a **merge-queue entry** | *(keep polling, hands off)* | nothing — the queue is merging it, and any push to a queued PR evicts it (see [Merge queues](#merge-queues)) |
@@ -362,6 +363,7 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_BLOCKED_POLLS` | `3` | consecutive polls an all-green-but-`BLOCKED` PR must hold before the `blocked` event fires (see [Green is not the same as ready](#green-is-not-the-same-as-ready)) |
 | `PR_SENTINEL_GREEN_POLLS` | `2` | consecutive green polls before `ready` fires, so a push whose run hasn't registered yet can't read as green (see [Green is not the same as ready](#green-is-not-the-same-as-ready)); `1` decides on a single poll |
 | `PR_SENTINEL_DEQUEUED_POLLS` | `2` | consecutive polls a once-queued, still-open PR must be missing from the merge queue before `dequeued` fires; the confirming poll turns a queue merge in flight into `closed` instead of a phantom eviction (see [Merge queues](#merge-queues)) |
+| `PR_SENTINEL_BASE_CHECK` | (on) | compare each failing check against the same workflow's latest run on the base branch, and report `base_failure` instead of `check_failure` when the base is already red; `0`/`false`/empty wakes on every failure as before (see [Failures inherited from the base branch](#failures-inherited-from-the-base-branch)) |
 | `PR_SENTINEL_BACKOFF_NUM` / `_DEN` | `3` / `2` | backoff multiplier (interval × num ÷ den each idle poll) |
 | `PR_SENTINEL_AUTOALLOW` | (on) | auto-approve the plugin's own watcher launch so it isn't prompted by the base Bash permission; `0`/`false`/empty keeps the prompt (see below) |
 | `PR_SENTINEL_DISABLE` | (unset) | `1` disables the PostToolUse nudge, the Stop backstop, and the watcher-launch auto-allow |
@@ -487,6 +489,53 @@ interval while it waits (the query itself triggers the recomputation, so it
 resolves within a poll or two). If it somehow never resolves, the watch ends in
 a `timeout` whose report names the withheld ready.
 
+### Failures inherited from the base branch
+
+A `check_failure` report used to assume the PR caused the failure — "diagnose
+and fix the failing check(s) below in this local session". When the base branch
+is what's broken, that instruction is wrong, and it gets expensive in exact
+proportion to how many sessions you have in flight. Every session touching a
+file the gate covers gets the same report, and each one writes its own fix; the
+second one to land pays for a rebase conflict on top.
+
+So before waking you, the watcher asks whether the base is already red on the
+same workflows. If **every** surviving failure is, it reports **`base_failure`**
+instead — a notice, not a wake-up — and **keeps polling**:
+
+```
+PR-SENTINEL EVENT: base_failure
+Failed checks: doc-links (fail)
+Also failing on main: doc-links.yml (run 31274922338, 47815b6, failure)
+```
+
+The unblock signal is "green on the base again", not "somebody closed the
+tracking issue", so it holds whether the fix arrives as a standalone PR or a
+revert. And if the base clears while the check is still red here, that failure
+*is* the PR's own — the next poll wakes you with a normal `check_failure`.
+
+Three details do the work:
+
+- **The lookup is scoped to the workflow, never to the base branch's newest
+  run.** A path-gated workflow only runs when its paths change, so the tip of
+  `main` and that workflow's last run can be many commits apart — reading the tip
+  gives you a stale green from before the breakage or a stale red long after the
+  fix. `…/actions/workflows/<id>/runs?branch=<base>` self-corrects, because a run
+  exists only where the paths matched.
+- **All-or-nothing, like the `continue-on-error` absorption above.** One failure
+  the base doesn't share is yours, and that mixed case still wakes you with the
+  full failed list.
+- **Every uncertainty falls through to `check_failure`.** A check with no Actions
+  run behind it, an unreadable workflow id, a `cancelled` base run, and a base
+  with *no* run of that workflow at all (a new workflow, or one whose paths the
+  base has never touched) are all treated as "not inherited".
+
+`PR_SENTINEL_BASE_CHECK=0` turns the comparison off. It's on by default but has
+an off switch that the absorption rule doesn't, because the evidence is weaker:
+absorption reads GitHub's own verdict on the exact run in question, while this
+infers across two runs. Its false negative is a PR that independently breaks the
+same workflow, which stays masked until the base goes green — a delay rather
+than a loss, since the still-red check wakes you the moment it clears there.
+
 ### Merge queues
 
 Every other event describes PR *health*; queue *membership* is a different fact
@@ -598,6 +647,12 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
   that cannot run GraphQL — queue tracking disables itself and the watcher
   behaves exactly as it did before the feature (see
   [Merge queues](#merge-queues)).
+- **An inherited failure is matched by workflow, not by check.** The base
+  comparison asks whether the *workflow* is red on the base, so a workflow whose
+  jobs fail for one reason on `main` and a different reason on the PR reads as
+  inherited. It errs toward not sending N sessions after the same fix; the knob
+  turns it off (see [Failures inherited from the base
+  branch](#failures-inherited-from-the-base-branch)).
 - **A `blocked` report can't name the requirement.** The watcher doesn't read
   branch protection, so an unregistered required check and an outstanding
   approval produce the same event (see [Green is not the same as
