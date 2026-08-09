@@ -1,6 +1,6 @@
 # Privacy Policy — pr-sentinel
 
-_Last updated: 2026-07-05_
+_Last updated: 2026-08-08_
 
 pr-sentinel is a Claude Code plugin that runs on your local machine. It has two
 components with different data profiles, described honestly below.
@@ -34,6 +34,9 @@ hooks and the migration helper).
   - whether the PR currently holds a merge-queue entry (a GraphQL
     `mergeQueueEntry` read);
   - the PR's check results (`gh pr checks`);
+  - a failing check's workflow run — its conclusion, and its workflow id and
+    that workflow's latest completed run on the **base branch**, to tell a
+    failure the PR caused from one it inherited — only on a failure;
   - a failing run's step log (`gh run view --log-failed`), only on a failure.
 - It **never** requests or parses the PR body, PR review comments, or issue
   comments. It reads GitHub-controlled check metadata and merge state only.
