@@ -479,6 +479,7 @@ emit_conflict() {
 	report_header conflict
 	echo "State: OPEN"
 	echo "mergeStateStatus: ${MERGE} (CONFLICTING)"
+	echo "Head SHA: ${HEAD_SHA}"
 	echo "Base branch: ${BASE}"
 	echo
 	if [[ "$HEAL" == "merge" ]]; then
@@ -501,6 +502,7 @@ emit_behind() {
 	report_header behind
 	echo "State: OPEN"
 	echo "mergeStateStatus: ${MERGE} (branch is behind base)"
+	echo "Head SHA: ${HEAD_SHA}"
 	echo "Base branch: ${BASE}"
 	echo
 	if [[ "$HEAL" == "merge" ]]; then
@@ -522,6 +524,7 @@ emit_dequeued() {
 	report_header dequeued
 	echo "State: OPEN"
 	echo "mergeStateStatus: ${MERGE}"
+	echo "Head SHA: ${HEAD_SHA}"
 	echo "Base branch: ${BASE}"
 	echo
 	echo "The PR was in the merge queue and has left it without merging — the"

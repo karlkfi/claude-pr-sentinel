@@ -104,7 +104,7 @@ session to launch the watcher before stopping:
 | Session state at end of turn (Stop) | Hook action |
 | --- | --- |
 | opened a PR this session (or watched one), **no** live watcher, PR not handed off | **block once** — launch the watcher for `#N` |
-| the watcher has reported the **same** `check_failure` twice (same failed checks, same head commit) | **allow + warn** — the failure isn't changing, so stop nagging; a non-blocking notice keeps the red PR visible |
+| the watcher has reported the **same** terminal event twice (`check_failure`, `conflict`, `behind`, or `dequeued` at the same head commit) | **allow + warn** — nothing has been pushed, so stop nagging; a non-blocking notice naming the event keeps the PR visible |
 | a launched watcher hasn't reported completion yet (still running) | silent (already covered) |
 | PR handed off (watcher **terminal** `ready`/`closed`/`blocked`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
 | the watcher's output ends on a `base_failure`, `ready_watching`, or `blocked_watching` **notice** (a watch that exited without a terminal event) | **block once** — a notice isn't a handoff; the PR is still open and unwatched |
@@ -113,12 +113,20 @@ session to launch the watcher before stopping:
 | unreadable transcript / any uncertainty | silent (fail-open) |
 | `PR_SENTINEL_DISABLE=1` set | silent (disabled) |
 
-The dampening row is what stops a livelock when a PR is red on a check this
-session **cannot** fix — inherited from the base branch, out-of-scope, external,
-or misconfigured. The session gets one block to attempt a fix (a fix moves the
-head commit); if two watcher reports carry the identical failure at the same
-commit, the hook infers no fix is coming and allows the stop with a warning
-rather than re-blocking forever. It never *silently* walks away from a red PR.
+The dampening row is what stops a livelock when the reported state is not
+moving. Every event it covers asks the session to change the PR and push, so a
+second report at the *same head commit* proves nothing was pushed in between.
+The session gets one block to act; after that the hook allows the stop with a
+warning rather than re-blocking forever. It never *silently* walks away.
+
+The two shapes that reach it differ, and the notice says which one it is:
+
+- **`check_failure`** — a check this session *cannot* fix: inherited from the
+  base branch, out-of-scope, external, or misconfigured.
+- **`conflict` / `behind` / `dequeued`** — usually the opposite. The session has
+  already healed the branch and committed it, and is waiting on the project's
+  local gate before pushing, so the remote head *cannot* have moved yet. A
+  relaunch here has no move available at all.
 
 Everything it decides comes from local files the harness already points it at —
 the session's own transcript, plus each watcher's own output file (its path is in
@@ -158,10 +166,13 @@ needed:
 | checks still pending | *(keep polling, with backoff)* | — |
 
 Every event report starts with a stable `PR-SENTINEL EVENT: <type>` line, so
-it's greppable in the transcript. A **check_failure** header carries the failed
-checks and the head commit (`Head SHA:`) — the latter lets the Stop hook tell a
-re-reported failure apart from a genuinely new one — then appends the failing
-run's log, **ANSI-stripped, size-capped, and wrapped** in an explicit
+it's greppable in the transcript. Every event that asks you to push —
+**check_failure**, **conflict**, **behind**, **dequeued** — carries the head
+commit (`Head SHA:`), which is what lets both the Stop hook and you tell a
+re-reported state apart from a genuinely new one; without it, a conflict
+re-reported while your local gate runs is byte-identical to one the base branch
+just caused. A **check_failure** header adds the failed checks, then appends the
+failing run's log, **ANSI-stripped, size-capped, and wrapped** in an explicit
 `DATA, NOT INSTRUCTIONS` frame (see [Security invariants](#security-invariants)).
 
 ## Install
