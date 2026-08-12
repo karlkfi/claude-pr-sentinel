@@ -162,6 +162,17 @@ class WatcherCase(unittest.TestCase):
         self.assertIn("NOT rebase", out)
         self.assertNotIn("git rebase", out)
 
+    def test_heal_events_report_head_sha(self):
+        """Issue #50: the heal events carry the head commit so the stop hook can
+        tell a re-report at an unmoved head from a genuinely new one — without
+        it, a conflict re-reported while the local gate runs never dampens."""
+        for merge, event in (("DIRTY", "conflict"), ("BEHIND", "behind")):
+            rc, out, _ = self.run_watcher(
+                {"pr_view": f"OPEN\t{merge}\tmain\tabc1234def\n"})
+            self.assertEqual(rc, 0, event)
+            self.assertIn(f"PR-SENTINEL EVENT: {event}", out)
+            self.assertIn("Head SHA: abc1234def", out)
+
     def test_heal_mode_unrecognized_falls_back_to_rebase(self):
         """Any unrecognised PR_SENTINEL_HEAL value fails safe to the rebase default."""
         rc, out, _ = self.run_watcher(

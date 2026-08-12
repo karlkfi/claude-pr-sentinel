@@ -136,7 +136,11 @@ followed by human/agent-readable fields (PR number, state, `mergeStateStatus`,
 the head commit `Head SHA:`, the failing check names) and a recommended next
 action. `Head SHA:` sits in the header, above the CI-log excerpt, so the Stop
 hook can trust it (see the dampening note below) — a copy planted inside the
-excerpt cannot be mistaken for it.
+excerpt cannot be mistaken for it. Every event whose next action is "push"
+carries it, not just `check_failure`: without it two `conflict` reports are
+byte-identical whether the base moved or the session is mid-gate on a heal it
+already committed, which leaves neither the hook nor a human reading the outputs
+afterwards able to tell them apart.
 
 Before a check failure is reported at all, the watcher asks GitHub whether the
 failure actually blocks anything. A job marked `continue-on-error: true` fails
@@ -508,22 +512,36 @@ block is allowed straight through — so a single chain can never loop, and it
 **fails open** on any uncertainty (unparseable input, unreadable transcript, no
 resolvable PR).
 
-But a watcher wake-up starts a *new* stop-chain, so a PR that is red on a check
-this session **cannot** fix — inherited from the base branch, out-of-scope,
-external, or a misconfigured required check — would re-block on every relaunch:
-fix → push → relaunch silently assumes a fix exists in-session. To bound that,
-the hook **dampens**. It reads each `check_failure` report's signature — the
-failed-check set and the head commit (`Head SHA:`), both from the report's
+But a watcher wake-up starts a *new* stop-chain, so a PR whose reported state
+does not move would re-block on every relaunch: act → push → relaunch silently
+assumes the next move exists in-session. To bound that, the hook **dampens**. It
+reads each terminal report's signature — the event name, the head commit
+(`Head SHA:`), and the failed-check set where there is one, all from the report's
 header region so a forged copy in a CI-log excerpt can't drive it, and from the
-`check_failure` marker *forward* so an earlier `base_failure` notice in the same
-file can't lend it stale fields — and once two
-reports carry the identical signature (a real fix would have moved the SHA), it
-infers no fix is coming and allows the stop, emitting a non-blocking
-`systemMessage` so the red PR stays visible. One block to try; no livelock; never
-a *silent* walk-away. This stays the general fix: `base_failure` above catches
-the inherited case up front and measured, but dampening still covers the
-out-of-scope, external, and misconfigured cases that no base-branch inspection
-could detect.
+event marker *forward* so an earlier `base_failure` notice in the same file can't
+lend it stale fields — and once two reports carry the identical signature (any
+real progress would have moved the SHA), it allows the stop, emitting a
+non-blocking `systemMessage` so the PR stays visible. One block to try; no
+livelock; never a *silent* walk-away.
+
+Two shapes reach it, and they mean opposite things:
+
+- **`check_failure`** — the session cannot fix the check: inherited from the
+  base branch, out-of-scope, external, or a misconfigured required check. This
+  stays the general fix for that class: `base_failure` above catches the
+  inherited case up front and measured, but dampening still covers the
+  out-of-scope, external, and misconfigured cases that no base-branch inspection
+  could detect.
+- **`conflict` / `behind` / `dequeued`** — usually the session has *already*
+  done the work. The heal is committed locally and the project's gate is running
+  (minutes, on a repo of any size), so the remote is still `DIRTY` and there is
+  nothing to push yet. This is the case where a repeat is most reliably not
+  actionable, which is why the events that skipped dampening originally were the
+  ones that needed it most.
+
+The non-terminal notices (`base_failure`, `ready_watching`, `blocked_watching`)
+are deliberately outside the set: the watcher keeps polling past them, so they
+are never the report a stop is being blocked over.
 
 ### Why fail-open in the hook, fail-safe in the watcher
 

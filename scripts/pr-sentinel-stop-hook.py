@@ -51,8 +51,12 @@ launch the watcher, which then authoritatively determines check state (and exits
 `ready` at once if the PR is already green). A watcher wake-up starts a NEW
 stop-chain, so a genuinely-stuck PR could re-block on each relaunch; to avoid
 that livelock we DAMPEN — once two separate watcher runs have reported the
-identical `check_failure` (same failed checks, same head SHA), the session has
-pushed no fix and the stop is allowed with a non-blocking warning instead.
+identical terminal event (same event, same head SHA, same failed checks), the
+session has pushed nothing and the stop is allowed with a non-blocking warning
+instead. Every dampenable event asks the session to push, so an unmoved head SHA
+is proof no push happened; for the heal events (`conflict`, `behind`) the usual
+reason is that the heal is already committed locally and waiting on the
+project's gate, which is exactly when a relaunch has no move available (#50).
 
 Fail-open on ANY uncertainty: unparseable stdin, unreadable transcript, no
 opened PR, a concluded PR, or a live watcher -> emit nothing (allow the stop). It
@@ -93,17 +97,27 @@ CONCLUDED_EVENT_RE = re.compile(
 # always writes its own header first, so the real marker always precedes this.
 LOG_EXCERPT_BANNER = '----- BEGIN CI LOG EXCERPT'
 
-# The pieces of a `check_failure` report header that identify WHICH failure it
-# is: the set of failed checks and the head commit SHA. When two reads of a PR's
-# own watcher output carry an identical (failed-set, SHA) pair, the session
-# pushed no fix between them (a fix moves the SHA) and the failure is one it
-# cannot resolve in-session — so we stop re-blocking on it. Both are matched
-# only in the header region (above the excerpt banner), so a forged line in a CI
-# log cannot drive the dampening. Deliberately NOT line-anchored: a Read result
-# reaches the transcript in `cat -n` form (a line-number + tab prefix), and the
-# header region is entirely watcher-authored, so a leading, unanchored search is
-# both safe and prefix-robust.
-CHECK_FAILURE_EVENT_RE = re.compile(r'PR-SENTINEL EVENT:\s*check_failure\b')
+# Terminal events a repeat of which means "nothing moved": every one of them
+# asks the session to change the PR and push, so a second report at the SAME head
+# commit proves no push happened between them. `check_failure` is the original
+# case (#9); the heal events are the ones where a repeat is most reliably NOT
+# actionable — the session has usually already healed the branch on disk and is
+# waiting on its own gate before pushing, so the remote head cannot have moved
+# yet (#50). The non-terminal notices (`base_failure`, `ready_watching`,
+# `blocked_watching`) are excluded: the watcher keeps polling past them, so they
+# are not the report the session is being blocked over. So are the concluded
+# events, which already suppress the block outright.
+DAMPENABLE_EVENT_RE = re.compile(
+    r'PR-SENTINEL EVENT:\s*(check_failure|conflict|behind|dequeued)(?![\w-])')
+
+# The report-header fields that identify WHICH occurrence of an event it is: the
+# head commit SHA (every dampenable event carries one) and, for `check_failure`,
+# the set of failed checks. Both are matched only in the header region (above the
+# excerpt banner), so a forged line in a CI log cannot drive the dampening.
+# Deliberately NOT line-anchored: a Read result reaches the transcript in
+# `cat -n` form (a line-number + tab prefix), and the header region is entirely
+# watcher-authored, so a leading, unanchored search is both safe and
+# prefix-robust.
 FAILED_CHECKS_RE = re.compile(r'Failed checks:[ \t]*([^\n]*)')
 HEAD_SHA_RE = re.compile(r'Head SHA:[ \t]*(\S+)')
 
@@ -205,24 +219,28 @@ def _report_header_region(text):
     return text.split(LOG_EXCERPT_BANNER, 1)[0]
 
 
-def _check_failure_signature(text):
-    """For a read of a watcher output file, the identity of the `check_failure`
-    it reports as `(failed_checks, head_sha)`, or None if it is not a
-    check_failure (or predates the head-SHA field). Read only from the header
-    region so a forged copy inside a CI-log excerpt cannot be mistaken for it,
-    and only from the marker FORWARD: the same file can carry an earlier
-    `base_failure` notice, which has its own `Failed checks:` and `Head SHA:`
-    lines, and the signature has to describe the check_failure."""
+def _report_signature(text):
+    """For a read of a watcher output file, the identity of the dampenable
+    terminal event it reports as `(event, failed_checks, head_sha)`, or None if
+    it reports none (or predates the head-SHA field on that event). Read only
+    from the header region so a forged copy inside a CI-log excerpt cannot be
+    mistaken for it, and only from the marker FORWARD: the same file can carry an
+    earlier `base_failure` notice, which has its own `Failed checks:` and
+    `Head SHA:` lines, and the signature has to describe the terminal event. The
+    LAST marker is the terminal one — every notice that can precede it keeps the
+    watcher polling, and each emitter writes its whole header before any
+    excerpt, so all markers sit in the header region in emission order."""
     header = _report_header_region(text)
-    m = CHECK_FAILURE_EVENT_RE.search(header)
-    if not m:
+    marks = list(DAMPENABLE_EVENT_RE.finditer(header))
+    if not marks:
         return None
-    header = header[m.end():]
-    fm = FAILED_CHECKS_RE.search(header)
+    event = marks[-1].group(1)
+    header = header[marks[-1].end():]
     sm = HEAD_SHA_RE.search(header)
-    if not fm or not sm:
+    if not sm:
         return None
-    return (fm.group(1).strip(), sm.group(1))
+    fm = FAILED_CHECKS_RE.search(header)
+    return (event, fm.group(1).strip() if fm else '', sm.group(1))
 
 
 def _read_file_path(obj):
@@ -257,13 +275,15 @@ def _analyze(path):
                    `gh pr create`, or babysat via a watcher launch) that are
                    unconcluded AND have no live watcher AND are not dampened:
                    the stop is blocked over these.
-      * dampened — PRs that WOULD block, but whose watcher has now reported the
-                   identical `check_failure` (same failed-set + head SHA) on two
-                   separate reads. The session pushed no fix between them, so the
-                   failure is one it cannot resolve in-session; we stop blocking
-                   and let `main` warn instead of nagging forever.
+      * dampened — `{PR: event}` for PRs that WOULD block, but whose watcher has
+                   now reported the identical terminal event (same event +
+                   failed-set + head SHA) on two separate reads. The session
+                   pushed nothing between them, so the report is one it cannot
+                   clear in-session (or has already cleared locally and cannot
+                   push yet); we stop blocking and let `main` warn instead of
+                   nagging forever.
 
-    Fail-open: returns `(set(), set())` on any I/O trouble (allow the stop)."""
+    Fail-open: returns `(set(), {})` on any I/O trouble (allow the stop)."""
     created = set()
     concluded = set()
     launch_pr_by_toolid = {}   # watcher launch tool_use_id -> PR number
@@ -320,7 +340,7 @@ def _analyze(path):
                 if fp:
                     reads.append((fp, _entry_text(obj, content)))
     except OSError:
-        return set(), set()
+        return set(), {}
 
     # Opened PRs: the number gh printed in the create command's own output.
     for tid in create_ids:
@@ -344,14 +364,14 @@ def _analyze(path):
     # DIRECTLY (issue #14 — no longer hostage to the session's read method), and
     # judge only its header region so an embedded CI-log excerpt cannot forge the
     # marker or the signature.
-    sig_outfiles = {}   # PR -> {check_failure signature -> set of output files}
+    sig_outfiles = {}   # PR -> {report signature -> set of output files}
     for outfile, pr in outfile_pr.items():
         text = _outfile_text(outfile, read_text_by_outfile)
         if not text:
             continue
         if CONCLUDED_EVENT_RE.search(_report_header_region(text)):
             concluded.add(pr)
-        sig = _check_failure_signature(text)
+        sig = _report_signature(text)
         if sig is not None:
             sig_outfiles.setdefault(pr, {}).setdefault(sig, set()).add(outfile)
 
@@ -367,13 +387,16 @@ def _analyze(path):
     owned = created | set(launch_pr_by_toolid.values())
 
     block = owned - concluded - live
-    # Dampen: an unresolved-and-unwatched PR whose identical check_failure was
+    # Dampen: an unresolved-and-unwatched PR whose identical terminal event was
     # reported by two separate watcher runs (two distinct output files, same
-    # failed-set + SHA -> no fix pushed between them).
-    dampened = {pr for pr in block
-                if any(len(files) >= 2
-                       for files in sig_outfiles.get(pr, {}).values())}
-    return block - dampened, dampened
+    # event + failed-set + SHA -> nothing pushed between them).
+    dampened = {}
+    for pr in block:
+        for sig, files in sig_outfiles.get(pr, {}).items():
+            if len(files) >= 2:
+                dampened[pr] = sig[0]
+                break
+    return block - set(dampened), dampened
 
 
 def prs_needing_watcher(path):
@@ -409,20 +432,47 @@ def build_reason(prs):
     )
 
 
-def build_warning(prs):
-    """A non-blocking notice for PRs left red on an unfixable-in-session check.
-    The block already fired once with full detail; this keeps the red PR visible
-    without nagging the session into a relaunch loop."""
-    prs = sorted(prs, key=int)
-    label = '#' + prs[0] if len(prs) == 1 \
-        else ', '.join('#' + p for p in prs)
+# What a repeat of each dampenable event most likely means, so the notice tells
+# the session something true about the state it is walking away from rather than
+# describing every case as a stuck check.
+_DAMPEN_DETAIL = {
+    'check_failure':
+        'a failing check that has not changed across repeated watcher reports '
+        '(same failed checks, same commit) — it looks like one this session '
+        'cannot fix (e.g. inherited from the base branch, out-of-scope, or '
+        'external)',
+    'conflict':
+        'a merge conflict still reported at the same commit across repeated '
+        'watcher reports — nothing has been pushed to clear it, so either the '
+        'heal is done locally and still waiting on your gate, or it needs a '
+        'human',
+    'behind':
+        'a branch still behind its base at the same commit across repeated '
+        'watcher reports — nothing has been pushed to bring it up to date, so '
+        'either the update is done locally and still waiting on your gate, or '
+        'it needs a human',
+    'dequeued':
+        'a merge-queue eviction still reported at the same commit across '
+        'repeated watcher reports — re-enqueueing is a human\'s call, so there '
+        'is nothing further to do here',
+}
+_DAMPEN_GENERIC = ('an unchanged watcher report at the same commit across '
+                   'repeated runs — nothing has been pushed to move it')
+
+
+def build_warning(dampened):
+    """A non-blocking notice for PRs whose watcher keeps reporting the same
+    unmoved state. The block already fired once with full detail; this keeps the
+    PR visible without nagging the session into a relaunch loop. `dampened` maps
+    each PR to the event its watcher repeated."""
+    parts = '; '.join(
+        f'pull request #{pr} with '
+        f'{_DAMPEN_DETAIL.get(dampened[pr], _DAMPEN_GENERIC)}'
+        for pr in sorted(dampened, key=int))
     return (
-        f'pr-sentinel: leaving pull request {label} with a failing check that '
-        f'has not changed across repeated watcher reports (same failed checks, '
-        f'same commit) — it looks like one this session cannot fix (e.g. '
-        f'inherited from the base branch, out-of-scope, or external). NOT '
-        f'blocking your stop. If it is in fact fixable here, fix and push; '
-        f'otherwise hand it to a human. Never auto-merge.'
+        f'pr-sentinel: leaving {parts}. NOT blocking your stop. If it is in '
+        f'fact actionable here, act and push; otherwise hand it to a human. '
+        f'Never auto-merge.'
     )
 
 
