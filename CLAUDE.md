@@ -13,12 +13,6 @@ Two load-bearing pieces:
 - `scripts/pr-sentinel-hook.py` — a stdlib-only `PostToolUse` hook that nudges
   the session to launch the watcher after `gh pr create` / `git push`.
 
-## Model selection
-
-Use the `model-advisor` skill to assess the right model and thinking level at
-session start and whenever the task type shifts significantly (e.g. from a
-small report-wording tweak to redesigning the poll loop or the sanitizer).
-
 ## Development philosophy
 
 Build the right thing AND build it well. Before writing code, state the goal in
