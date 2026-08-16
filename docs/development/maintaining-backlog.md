@@ -1,11 +1,11 @@
 # Maintaining the backlog
 
-[`docs/STATUS.md`](../STATUS.md) follows the **`session-backlog` skill's**
-format and process (installed globally at
-`~/.claude/skills/session-backlog`): a priority-ordered Queue with stable
-Q-IDs allocated from the `**Next ID:**` counter, a Deferred table with
-concrete revive triggers, delete-on-done (git history is the archive). See
-that skill for adding, picking, completing, deferring, and grooming.
+[`docs/STATUS.md`](../STATUS.md) follows the
+[**`session-backlog` skill's**](skills.md#session-backlog) format and process:
+a priority-ordered Queue with stable Q-IDs allocated from the `**Next ID:**`
+counter, a Deferred table with concrete revive triggers, delete-on-done (git
+history is the archive). See that skill for adding, picking, completing,
+deferring, and grooming.
 
 The essentials, for sessions without the skill loaded:
 
