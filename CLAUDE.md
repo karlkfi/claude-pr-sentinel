@@ -148,6 +148,9 @@ Human-facing docs (`README.md`, `docs/` outside `docs/development/`) must never
 link to `CLAUDE.md` / `AGENTS.md`. This file is the entrypoint for agents only;
 humans start at `README.md`. The dependency is one-way.
 
+To reference a globally-installed skill, link
+`docs/development/skills.md#<name>`, never the skill's source.
+
 **Editing `CLAUDE.md` — protect the context budget.** This file loads in full
 into every session, so every line costs context. Add only load-bearing,
 must-act-on rules; put explanation and how-to in the relevant `docs/` page with
