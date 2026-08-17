@@ -195,14 +195,29 @@ class HookEndToEnd(unittest.TestCase):
             "request. (https://api.github.com/graphql)\n"))
         self.assertEqual(out.strip(), "")
 
-    def test_pr_create_without_url_does_not_assert_a_pr_exists(self):
-        # Nothing named a PR, so the nudge must not claim one was opened (#54).
+    def test_silent_on_pr_create_without_a_url(self):
+        # A create that opened a PR prints its URL; without one there is no PR
+        # to watch, whatever the reason (#57).
         out, _ = run_hook(bash_payload(
             "gh pr create --fill", "Warning: 1 uncommitted change\n"))
-        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
-        self.assertNotIn("just opened pull request", ctx)
-        self.assertIn("You just ran `gh pr create`", ctx)
-        self.assertIn("no open PR, ignore this", ctx)
+        self.assertEqual(out.strip(), "")
+
+    def test_silent_on_pr_create_that_opened_no_pr(self):
+        # Flags that print instead of creating. `classify_command()` strips
+        # flags, so all four arrive as `pr create` (#57).
+        for command, response in (
+            ("gh pr create --help",
+             "Create a pull request on GitHub.\n\nUSAGE\n  gh pr create [flags]\n"),
+            ("gh pr create -h",
+             "Create a pull request on GitHub.\n\nUSAGE\n  gh pr create [flags]\n"),
+            ("gh pr create --web",
+             "Opening github.com/o/r/compare/main...claude/foo in your browser.\n"),
+            ("gh pr create --fill --dry-run",
+             "Would have created a Pull Request with:\ntitle:\tfix: a thing\n"),
+        ):
+            with self.subTest(command=command):
+                out, _ = run_hook(bash_payload(command, response))
+                self.assertEqual(out.strip(), "")
 
     def test_silent_on_unrelated_command(self):
         out, _ = run_hook(bash_payload("git status", " M file"))

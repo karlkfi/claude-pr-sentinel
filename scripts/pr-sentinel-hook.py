@@ -2,11 +2,12 @@
 """PostToolUse hook: after a session opens or pushes a pull request, nudge it
 to launch the pr-sentinel background watcher instead of foreground-polling CI.
 
-Fires on a `Bash` command that ran `gh pr create` or a branch `git push` and
-did not obviously fail. Emits `additionalContext` describing the exact
-background-task command to run. It is ADVISORY — a hook cannot force the model
-to call a tool, so this asks; it does not compel. The (roadmapped) Stop-hook
-backstop is what makes the launch reliable (see docs/ROADMAP.md).
+Fires on a `Bash` command that ran `gh pr create` and printed a PR URL, or a
+branch `git push` that did not obviously fail. Emits `additionalContext`
+describing the exact background-task command to run. It is ADVISORY — a hook
+cannot force the model to call a tool, so this asks; it does not compel. The
+(roadmapped) Stop-hook backstop is what makes the launch reliable (see
+docs/ROADMAP.md).
 
 The hook is PURELY LOCAL: it inspects the just-run command string and its
 output text, and at most asks the local repo whether a pushed ref is a tag. It
@@ -162,20 +163,16 @@ def looks_failed(text):
 
 def build_context(action, pr_num):
     """The advisory nudge injected as additionalContext. `pr_num` is the bare
-    PR number (no `#`) or None."""
+    PR number (no `#`), or None — only reachable on the push path, since a
+    create without a number never gets this far."""
     plugin_root = os.environ.get('CLAUDE_PLUGIN_ROOT', '')
     watcher = os.path.join(plugin_root, 'scripts', 'pr-sentinel-watch.sh') \
         if plugin_root else 'scripts/pr-sentinel-watch.sh'
     # The watcher accepts a bare number or a github.com PR URL, NOT `#N` — so
     # the Command line interpolates the bare number, never a `#`-prefixed ref.
     target = pr_num if pr_num else '<the PR number for this branch>'
-    if action == 'pr_create' and pr_num:
+    if action == 'pr_create':
         lead = f'You just opened pull request #{pr_num}.'
-    elif action == 'pr_create':
-        # No URL in the output, so we can't tell a create that succeeded from
-        # one that failed in a shape FAILURE_SIGNALS doesn't carry (#54). Say
-        # what ran, not what it achieved.
-        lead = 'You just ran `gh pr create`.'
     else:
         lead = 'You just pushed to a pull-request branch.'
     if not pr_num:
@@ -218,6 +215,11 @@ def main():
 
     m = PR_URL_RE.search(text)
     pr_num = m.group(1) if m else None
+    if action == 'pr_create' and pr_num is None:
+        # A create that opened a PR prints its URL, so require one rather than
+        # nudging unless we can prove failure (#57). Covers `--help`, `--web`,
+        # `--dry-run`, and any failure shape FAILURE_SIGNALS doesn't carry.
+        return
 
     context = build_context(action, pr_num)
     print(json.dumps({'hookSpecificOutput': {

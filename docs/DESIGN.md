@@ -85,10 +85,10 @@ task's stdout to the session as the wake payload.
    default](#why-ready-ends-the-watch-by-default-and-what-closed-mode-changes).
 
 2. **PostToolUse hook on `Bash`** — `scripts/pr-sentinel-hook.py`. After a
-   `gh pr create` or a branch `git push` that looks successful, it injects
-   `additionalContext` telling the session to start (or restart) the watcher
-   for the detected PR. It is **advisory**: a hook cannot force the model to
-   call a tool, so the nudge asks, it doesn't compel.
+   `gh pr create` that printed a PR URL, or a branch `git push` that looks
+   successful, it injects `additionalContext` telling the session to start (or
+   restart) the watcher for the detected PR. It is **advisory**: a hook cannot
+   force the model to call a tool, so the nudge asks, it doesn't compel.
 
 3. **Plugin manifest + tests + docs.**
 
