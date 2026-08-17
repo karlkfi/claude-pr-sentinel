@@ -49,7 +49,7 @@ nudge to (re)launch the watcher after a PR-opening or branch-push command:
 | `gh pr create --fill` (output has a PR URL) | **nudge** — launch watcher for `#N` |
 | `git push -u origin claude/foo` | **nudge** — launch watcher for this branch's PR |
 | `git push origin HEAD && gh pr create` | **nudge** — PR create wins |
-| `gh pr create` whose output has no PR URL | **nudge** — hedged, without claiming a PR was opened |
+| `gh pr create --help` · `--web` · `--dry-run`, or any create whose output has no PR URL | silent (no PR was opened) |
 | `git push … ` that printed `! [rejected]` / `error:` | silent (push failed) |
 | `gh pr create` · `git push` that printed `HTTP 503` (or any 4xx/5xx) | silent (the API call failed) |
 | `git push origin --delete claude/foo` | silent (branch deletion) |
@@ -287,11 +287,11 @@ comment-channel exposure.
 
 1. **Hook nudge.** A `PostToolUse` hook on `Bash`
    ([`scripts/pr-sentinel-hook.py`](scripts/pr-sentinel-hook.py)) parses the
-   just-run command. On a `gh pr create` or branch `git push` that didn't
-   obviously fail, it emits `additionalContext` telling the session to launch
-   the watcher as a background task. The hook is **purely local** — it never
-   makes a network call and never reads PR text (it only echoes back a PR URL
-   the command itself printed).
+   just-run command. On a `gh pr create` that printed a PR URL, or a branch
+   `git push` that didn't obviously fail, it emits `additionalContext` telling
+   the session to launch the watcher as a background task. It is **purely
+   local** — it never makes a network call and never reads PR text (it only
+   echoes back a PR URL the command itself printed).
 2. **Background watch.** The session runs
    [`scripts/pr-sentinel-watch.sh <PR>`](scripts/pr-sentinel-watch.sh) as a
    background task (`run_in_background`). The watcher polls `gh` for check
@@ -620,10 +620,15 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
   closes this gap — it blocks the stop once if the turn ends with an unwatched
   open PR — but it too is best-effort: it fails open on any uncertainty (no PR
   resolvable, unreadable transcript) and never blocks twice.
-- **Success detection is heuristic.** The hook infers a failed push from output
-  text (`fatal:`, `! [rejected]`, `error:`, `Everything up-to-date`). An
-  unusual success string could be misread as failure (nudge skipped) — never
-  the reverse in a way that grants authority.
+- **Success detection is heuristic on the push path.** The hook infers a failed
+  push from output text (`fatal:`, `! [rejected]`, `error:`, `Everything
+  up-to-date`). An unusual success string could be misread as failure (nudge
+  skipped) — never the reverse in a way that grants authority. A `gh pr create`
+  doesn't rest on it: it nudges only when the output names a PR URL, so no
+  unrecognised failure can produce a nudge for a PR that doesn't exist. The
+  cost is that a create printing a URL the hook can't parse — anything but
+  `https://github.com/<owner>/<repo>/pull/<n>` — goes unnudged, and a later
+  push to the branch is what brings the nudge back.
 - **`git push` without a PR URL** can't resolve the PR number locally (the hook
   makes no network call), so the nudge asks the session to resolve it — and to
   ignore the nudge if the branch has no open PR at all. A PR created earlier
