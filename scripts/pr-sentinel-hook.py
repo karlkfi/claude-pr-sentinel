@@ -15,8 +15,8 @@ never makes a network call. It never reads the PR body or any comment stream —
 the only PR text it ever touches is a URL it echoes back.
 
 Fail modes: defers silently (emits nothing) on any uncertainty — non-Bash
-tool, unparseable command, unrecognised command, disabled flag. It can never
-break a session.
+tool, unparseable command, unrecognised command, cancelled command, disabled
+flag. It can never break a session.
 
 Reads the hook JSON on stdin, emits a PostToolUse decision on stdout.
 """
@@ -209,7 +209,11 @@ def main():
     if action is None:
         return  # not a PR-opening / branch-push command: defer
 
-    text = output_text(data.get('tool_response'))
+    response = data.get('tool_response')
+    if isinstance(response, dict) and response.get('interrupted'):
+        return  # the user cancelled the command mid-run: defer
+
+    text = output_text(response)
     if looks_failed(text):
         return  # the command appears to have failed: defer
 
