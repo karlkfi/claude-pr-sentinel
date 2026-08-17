@@ -17,11 +17,19 @@ process table, writes nothing, and never touches the PR body or comment stream
   * Which PR is this session responsible for?  -> a `gh pr create` correlated
     with the PR URL that command printed, plus any PR the session launched a
     watcher for (a session that babysits a PR owns its follow-through, e.g. one
-    resumed onto a branch whose PR an earlier session opened). The harness's
-    `pr-link` records are deliberately NOT used: the harness emits one for ANY
-    PR URL the session surfaces — a `gh pr view`/`gh pr comment` on someone
-    else's PR produces the same record as a create — so it marks "referenced",
-    not "opened", and treating it as ownership caused false-positive blocks.
+    resumed onto a branch whose PR an earlier session opened). When the create
+    printed a URL the transcript never captured — output redirected to a log,
+    or truncated — a second route resolves the number: the harness's own
+    `pr-link` record, but ONLY one that is both emitted inside that create's own
+    tool-call window and names a PR this transcript has not mentioned before.
+    Both narrowings are load-bearing, because a `pr-link` standing alone is not
+    an ownership signal: the harness emits one for ANY PR URL the session
+    surfaces — a `gh pr view`/`gh pr comment` on someone else's PR produces the
+    same record as a create — and it re-emits an already-linked PR after
+    unrelated commands, so a stale one can land in a failed create's window.
+    Reading "referenced" as "opened" caused false-positive blocks (#34); these
+    two conditions keep the fallback clear of that while giving the backstop a
+    resolution path the PostToolUse nudge does not share (#60).
   * Is a watcher still running?  -> a `run_in_background` launch of
     `pr-sentinel-watch.sh <PR>` records a `tool_use` id; when that background
     task exits, the harness records a `<task-notification>` carrying the same
@@ -131,6 +139,13 @@ NOTIF_OUTFILE_RE = re.compile(r'<output-file>\s*([^<\s]+)')
 # excerpt banner, and a truncated read only ever yields watcher-authored header
 # text, which is safe.
 _OUTFILE_READ_CAP = 65536
+
+# A tool call, matched on the raw line. Used ONLY to close a `gh pr create`'s
+# correlation window, and only while one is open, so it costs nothing on the
+# rest of the transcript. It has to work on the raw line because most tool calls
+# carry none of the needles below and are never parsed. Matching the `type`
+# field keeps it off a `tool_use_id` on a result entry.
+TOOL_USE_LINE_RE = re.compile(r'"type":\s*"tool_use"')
 
 # Cheap line pre-filter: only JSON-parse transcript lines that can carry a
 # signal we care about. Everything else (the bulk of a session) is skipped.
@@ -292,16 +307,33 @@ def _analyze(path):
     reads = []                 # (file_path, text) for Read results
     create_ids = []            # tool_use_ids that ran `gh pr create`
     result_text = {}           # tool_use_id -> concatenated result text
+    seen_prs = set()           # PR numbers this transcript has mentioned so far
+    in_create = False          # the most recent tool_use ran `gh pr create`
 
     try:
         with open(path, encoding='utf-8', errors='replace') as fh:
             for raw in fh:
+                if in_create and TOOL_USE_LINE_RE.search(raw):
+                    in_create = False   # a later tool call closes the window
                 if not any(n in raw for n in _NEEDLES):
                     continue
                 try:
                     obj = json.loads(raw)
                 except ValueError:
                     continue
+
+                # A harness `pr-link` record resolves a create whose own output
+                # never reached the transcript — but only inside that create's
+                # window, and only for a PR number not seen before it (a stale
+                # re-emission names one this transcript already mentioned).
+                line_prs = {m.group(1) for m in PR_URL_RE.finditer(raw)}
+                if obj.get('type') == 'pr-link':
+                    num = str(obj.get('prNumber') or '').strip()
+                    if in_create and num.isdigit() and num not in seen_prs:
+                        created.add(num)
+                    seen_prs |= line_prs | {num}
+                    continue
+                seen_prs |= line_prs
 
                 notif = _notification_text(obj)
                 if notif and '<status>' in notif:
@@ -320,7 +352,10 @@ def _analyze(path):
                         if not isinstance(b, dict):
                             continue
                         btype = b.get('type')
-                        if btype == 'tool_use' and b.get('name') == 'Bash':
+                        if btype == 'tool_use':
+                            in_create = False
+                            if b.get('name') != 'Bash':
+                                continue
                             cmd = (b.get('input') or {}).get('command') or ''
                             if (b.get('input') or {}).get('run_in_background'):
                                 for wm in WATCH_ARG_RE.finditer(cmd):
@@ -329,6 +364,7 @@ def _analyze(path):
                                         launch_pr_by_toolid[b.get('id')] = num
                             if _is_pr_create(cmd):
                                 create_ids.append(b.get('id'))
+                                in_create = True
                             concluded |= _pr_close_targets(cmd)
                         elif btype == 'tool_result':
                             tid = b.get('tool_use_id')
@@ -342,7 +378,8 @@ def _analyze(path):
     except OSError:
         return set(), {}
 
-    # Opened PRs: the number gh printed in the create command's own output.
+    # Opened PRs: the number gh printed in the create command's own output
+    # (plus any resolved from a correlated `pr-link` above).
     for tid in create_ids:
         for m in PR_URL_RE.finditer(result_text.get(tid, '')):
             created.add(m.group(1))
