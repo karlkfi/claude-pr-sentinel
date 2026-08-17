@@ -49,7 +49,9 @@ nudge to (re)launch the watcher after a PR-opening or branch-push command:
 | `gh pr create --fill` (output has a PR URL) | **nudge** — launch watcher for `#N` |
 | `git push -u origin claude/foo` | **nudge** — launch watcher for this branch's PR |
 | `git push origin HEAD && gh pr create` | **nudge** — PR create wins |
+| `gh pr create` whose output has no PR URL | **nudge** — hedged, without claiming a PR was opened |
 | `git push … ` that printed `! [rejected]` / `error:` | silent (push failed) |
+| `gh pr create` · `git push` that printed `HTTP 503` (or any 4xx/5xx) | silent (the API call failed) |
 | `git push origin --delete claude/foo` | silent (branch deletion) |
 | `git push --tags` · `git push origin refs/tags/v1.2.3` · `git push origin v1.2.3` (a local tag) | silent (release cut, not a PR shape) |
 | `gh pr view 12` · `gh pr list` · `git status` | silent (not a push/create) |
