@@ -204,6 +204,30 @@ class HookEndToEnd(unittest.TestCase):
         self.assertIn("You just ran `gh pr create`", ctx)
         self.assertIn("no open PR, ignore this", ctx)
 
+    def test_silent_on_interrupted_command(self):
+        # A cancelled command's partial output carries no failure signal (#56).
+        for command, stdout in (
+            ("gh pr create --fill",
+             "Creating pull request for claude/x into main\n"),
+            ("git push -u origin claude/x", ""),
+        ):
+            out, _ = run_hook({
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "tool_response": {"stdout": stdout, "stderr": "",
+                                  "interrupted": True, "isImage": False},
+            })
+            self.assertEqual(out.strip(), "", command)
+
+    def test_nudge_when_interrupted_is_false(self):
+        out, _ = run_hook({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr create --fill"},
+            "tool_response": {"stdout": "https://github.com/o/r/pull/7\n",
+                              "stderr": "", "interrupted": False},
+        })
+        self.assertIn("#7", json.loads(out)["hookSpecificOutput"]["additionalContext"])
+
     def test_silent_on_unrelated_command(self):
         out, _ = run_hook(bash_payload("git status", " M file"))
         self.assertEqual(out.strip(), "")
