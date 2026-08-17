@@ -41,6 +41,12 @@ FAILURE_SIGNALS = (
     'could not',
 )
 
+# `gh` reports an API failure as a status line — `HTTP 503: No server is
+# currently available … (https://api.github.com/graphql)` — carrying none of
+# the signals above. Matched as a pattern because a literal `http` would hit an
+# ordinary URL, and restricted to 4xx/5xx so a logged 200 can't silence us.
+HTTP_ERROR_RE = re.compile(r'\bHTTP [45]\d\d\b')
+
 
 def simple_commands(command):
     """Split a bash command string into simple commands on the shell operators
@@ -150,7 +156,8 @@ def output_text(response):
 
 def looks_failed(text):
     low = text.lower()
-    return any(sig in low for sig in FAILURE_SIGNALS)
+    return (any(sig in low for sig in FAILURE_SIGNALS)
+            or HTTP_ERROR_RE.search(text) is not None)
 
 
 def build_context(action, pr_num):
@@ -162,16 +169,20 @@ def build_context(action, pr_num):
     # The watcher accepts a bare number or a github.com PR URL, NOT `#N` — so
     # the Command line interpolates the bare number, never a `#`-prefixed ref.
     target = pr_num if pr_num else '<the PR number for this branch>'
-    pr_ref = f'#{pr_num}' if pr_num else None
-    if action == 'pr_create':
-        lead = f'You just opened pull request {pr_ref or "(number in the output above)"}.'
+    if action == 'pr_create' and pr_num:
+        lead = f'You just opened pull request #{pr_num}.'
+    elif action == 'pr_create':
+        # No URL in the output, so we can't tell a create that succeeded from
+        # one that failed in a shape FAILURE_SIGNALS doesn't carry (#54). Say
+        # what ran, not what it achieved.
+        lead = 'You just ran `gh pr create`.'
     else:
         lead = 'You just pushed to a pull-request branch.'
     if not pr_num:
         # We could not resolve a number, so the session may be on a branch with
         # no PR at all. Let it drop the nudge instead of hunting for one (#34).
-        lead += (' If this branch has no open PR, ignore this — `gh pr create` '
-                 'nudges again with the number.')
+        lead += (' If this branch has no open PR, ignore this — a successful '
+                 '`gh pr create` nudges again with the number.')
     return (
         f'pr-sentinel: {lead} Launch the PR Sentinel watcher as a BACKGROUND '
         f'task (run_in_background) so CI failures and merge conflicts wake this '

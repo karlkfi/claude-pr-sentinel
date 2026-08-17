@@ -123,6 +123,19 @@ class ClassificationUnit(unittest.TestCase):
         self.assertFalse(hook.looks_failed(
             "https://github.com/o/r/pull/42\nbranch pushed"))
 
+    def test_failure_heuristic_http_status(self):
+        # `gh` API errors carry none of the literal signals (#54).
+        self.assertTrue(hook.looks_failed(
+            "HTTP 503: No server is currently available to service your "
+            "request. (https://api.github.com/graphql)"))
+        self.assertTrue(hook.looks_failed(
+            "failed to get runs: HTTP 404: Not Found "
+            "(https://api.github.com/repos/o/r/actions/runs)"))
+        self.assertTrue(hook.looks_failed("HTTP 422 (https://api.github.com/x)"))
+        # 2xx isn't a failure, and a bare `http` must not match a URL.
+        self.assertFalse(hook.looks_failed("HTTP 200 OK"))
+        self.assertFalse(hook.looks_failed("http://example.invalid/pull/1"))
+
 
 class HookEndToEnd(unittest.TestCase):
     def test_nudge_on_pr_create_with_url(self):
@@ -174,6 +187,22 @@ class HookEndToEnd(unittest.TestCase):
             "git push origin claude/foo",
             "! [rejected] claude/foo -> claude/foo (fetch first)\nerror: failed to push"))
         self.assertEqual(out.strip(), "")
+
+    def test_silent_on_pr_create_that_hit_an_http_error(self):
+        out, _ = run_hook(bash_payload(
+            "gh pr create --fill",
+            "HTTP 503: No server is currently available to service your "
+            "request. (https://api.github.com/graphql)\n"))
+        self.assertEqual(out.strip(), "")
+
+    def test_pr_create_without_url_does_not_assert_a_pr_exists(self):
+        # Nothing named a PR, so the nudge must not claim one was opened (#54).
+        out, _ = run_hook(bash_payload(
+            "gh pr create --fill", "Warning: 1 uncommitted change\n"))
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("just opened pull request", ctx)
+        self.assertIn("You just ran `gh pr create`", ctx)
+        self.assertIn("no open PR, ignore this", ctx)
 
     def test_silent_on_unrelated_command(self):
         out, _ = run_hook(bash_payload("git status", " M file"))
