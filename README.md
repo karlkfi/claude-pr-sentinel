@@ -65,8 +65,9 @@ to call a tool. It names the exact background-task command to run.
 
 **The PreToolUse hook** goes the other way: it **denies** a Bash command that
 would foreground-poll CI (the anti-pattern this plugin replaces) and points the
-fix-it at the background watcher. Unlike the advisory nudge, a deny is
-*enforced* — the command never runs.
+fix-it at the background watcher, and it denies a `gh pr create` that would open
+a second pull request over lines an open one already changes. Unlike the
+advisory nudge, a deny is *enforced* — the command never runs.
 
 | Command (PreToolUse) | Hook action |
 | --- | --- |
@@ -77,6 +78,11 @@ fix-it at the background watcher. Unlike the advisory nudge, a deny is
 | any of the above with an inline `PR_SENTINEL_OVERRIDE=<reason>` prefix (or the variable set in the session env) | **allow** (deferred to normal permissions) |
 | `bash …/pr-sentinel-watch.sh N` (the plugin's own watcher) | **allow** — auto-approved (no base Bash prompt), gated by `PR_SENTINEL_AUTOALLOW` |
 | the same launch for a PR this session is **already watching** | **deny** — one watcher is enough; the reason names the `TaskStop` call that frees the PR for a fresh one |
+| `gh pr create` on a branch editing lines an **open PR already changes** | **deny** — names that PR's number and the shared paths (see [Overlapping pull requests](#overlapping-pull-requests)) |
+| `gh pr create` sharing a *file* with an open PR, but edits 7+ lines apart | allow (a shared file is not a finding — the comparison is line ranges) |
+| the same create submitted with `run_in_background` | **deny** — backgrounding still opens the PR, so it is not the fix here |
+| `gh pr create --help` · `gh pr list` · `gh pr view` · `gh pr edit` | allow (opens no PR) |
+| any create, with `PR_SENTINEL_OVERLAP_ENABLED=false` | allow (check off — and no GitHub query is made) |
 | `gh pr checks` · `gh run view` | allow (not a blocking poll — deferred to normal permissions) |
 | a poll loop around a non-`gh` subject (`until curl …; do sleep …; done`) | allow (not CI polling — not this plugin's business) |
 | a bare `sleep N` (no loop) · unrecognised shape | allow (fail-open — never deny when unsure) |
@@ -111,6 +117,43 @@ nothing a relaunch adds. The deny names the background task id, so restarting
 the watch (to reset its watch budget, say) is one `TaskStop` call and then the
 launch again, rather than a dead end. `PR_SENTINEL_OVERRIDE=<reason>` allows the
 duplicate for the rare case that wants one.
+
+### Overlapping pull requests
+
+The last thing the PreToolUse hook does is check, at `gh pr create`, whether an
+already-open PR changes the same lines this branch does. Two branches rewriting
+one function is duplicated or mutually invalidating work, and review is an
+expensive place to discover it — one of the two is going to be rewritten or
+thrown away, and both have already been written by then.
+
+**It compares line ranges, not filenames.** Two branches touching one file is
+ordinary; sharing a *function* is the finding. Both sides are read from the
+diff's pre-image side, so two diffs taken from a shared ancestor are numbered in
+that ancestor and their ranges are comparable, and each range reaches the three
+lines of context a hunk carries. Edits within six lines meet; edits seven apart
+do not. The false-positive direction is the one that matters — an overlap
+reported where there is none sends you to fold a branch that was fine — so a
+shared path with no shared range is silent.
+
+This is the one part of the hooks that **talks to GitHub**: `gh pr list` for the
+open PRs and their paths, then `gh pr diff` for at most three of them, and only
+ones already sharing a path. It reads code, never prose — no PR body, no
+comments, and not even the PR title, which its author writes and which the
+denial would drop straight into the session's context. A denial names the PR
+number and the shared paths, and points at `gh pr diff <N>` so you read the
+overlap yourself. `PRIVACY.md` has the full account.
+
+Every probe fails silent. No `gh`, no credentials, a base ref that won't
+resolve, a rate-limited token, a slow call: each costs a missed catch, never a
+blocked create. When the three-diff cap is reached the remaining entries rest on
+a shared path alone, and the denial says so rather than passing itself off as a
+range match.
+
+Turn it off with `PR_SENTINEL_OVERLAP_ENABLED=false` — which also stops the two
+queries being made at all. For the file every branch edits by construction (a
+changelog, a backlog table), name it in `PR_SENTINEL_OVERLAP_IGNORE` instead of
+switching the whole check off. `PR_SENTINEL_OVERRIDE=<reason>` allows one
+create whose overlap you already know about.
 
 **The Stop hook** is the backstop that makes the advisory nudge reliable. When
 the session tries to end its turn, it **blocks the stop at most once per
@@ -347,6 +390,10 @@ These are the point of the plugin.
   exact channel the built-in "Autofix" trigger uses
   ([#66097](https://github.com/anthropics/claude-code/issues/66097)). The only
   free-form text it ever surfaces is the session's **own** CI log excerpt.
+  The `gh pr create` [overlap check](#overlapping-pull-requests) is held to the
+  same line: it reads open PRs' **paths and diffs** — code — and never their
+  title, body, or comments, because its denial text lands in the session's
+  context.
 - **CI logs are semi-untrusted data.** A failing-check excerpt is
   **size-capped** (`PR_SENTINEL_LOG_MAX_BYTES`, default 8 KiB, tail kept),
   **ANSI-stripped**, and wrapped in a `DATA, NOT INSTRUCTIONS` frame that tells
@@ -408,6 +455,9 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_BASE_CHECK` | (on) | compare each failing check against the same workflow's latest run on the base branch, and report `base_failure` instead of `check_failure` when the base is already red; `0`/`false`/empty wakes on every failure as before (see [Failures inherited from the base branch](#failures-inherited-from-the-base-branch)) |
 | `PR_SENTINEL_BACKOFF_NUM` / `_DEN` | `3` / `2` | backoff multiplier (interval × num ÷ den each idle poll) |
 | `PR_SENTINEL_AUTOALLOW` | (on) | auto-approve the plugin's own watcher launch so it isn't prompted by the base Bash permission; `0`/`false`/empty keeps the prompt (see below) |
+| `PR_SENTINEL_OVERLAP_ENABLED` | (on) | deny a `gh pr create` whose branch edits lines an open PR already changes; `false`/`0`/empty turns the check off, and with it the only GitHub query any hook makes (see [Overlapping pull requests](#overlapping-pull-requests)) |
+| `PR_SENTINEL_OVERLAP_IGNORE` | (unset) | colon-separated glob patterns the overlap check discounts — for the file every branch edits by construction, e.g. `docs/STATUS.md:CHANGELOG.md` |
+| `PR_SENTINEL_BASE_REF` | (`origin/HEAD`, else `origin/main`) | the ref the overlap check forks this branch from when computing its changed lines |
 | `PR_SENTINEL_DISABLE` | (unset) | `1` disables the PostToolUse nudge, the Stop backstop, and the watcher-launch auto-allow |
 | `PR_SENTINEL_SESSIONS_ROOT` | (platform default) | overrides the session-store path the [migration helper](#migrating-from-desktop-auto-fix) scans (same as its `--root`) |
 | `PR_SENTINEL_ASSUME_APP_QUIT` | (unset) | `1` asserts the desktop app is quit, so the migration helper's `--apply` skips live-app detection (use only after quitting it) |
@@ -769,10 +819,13 @@ what alternatives were rejected — see [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## Privacy
 
-The hook runs entirely on your machine with no network access. The **watcher**
-queries GitHub through your already-authenticated `gh` CLI (check status and
-merge state only — never comments or the PR body) and writes nothing to disk.
-See [`PRIVACY.md`](PRIVACY.md) for the full policy.
+The hooks run entirely on your machine with one exception: the PreToolUse
+[overlap check](#overlapping-pull-requests) asks GitHub which lines the open PRs
+change, and only when you run a `gh pr create`. The **watcher** queries GitHub
+through your already-authenticated `gh` CLI (check status and merge state only —
+never comments or the PR body). Neither reads the PR body, comments, or titles,
+and nothing writes to disk. See [`PRIVACY.md`](PRIVACY.md) for the full
+policy.
 
 ## Contributing
 

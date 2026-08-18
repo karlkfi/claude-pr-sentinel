@@ -2,7 +2,7 @@
 """PreToolUse hook: DENY foreground CI-poll commands and ALLOW the plugin's own
 background watcher launch, pointing the session at the watcher either way.
 
-Fires on a `Bash` command the session is *about to run*. Three branches:
+Fires on a `Bash` command the session is *about to run*. Four branches:
 
 * **Duplicate deny** — if the command is this plugin's own watcher launch for a
   PR this session already has a live watcher on, it returns a `deny` naming the
@@ -38,6 +38,16 @@ Fires on a `Bash` command the session is *about to run*. Three branches:
   host isn't CI polling under any reading, and this hook has no business
   refusing it.
 
+* **Overlap deny** — if the command is a `gh pr create` and this branch edits
+  lines an already-open PR also changes, it returns a `deny` naming that PR and
+  the shared paths. Two branches rewriting the same function is duplicated or
+  mutually invalidating work, and review is an expensive place to discover it.
+  Compared as LINE RANGES, not paths, so sharing a file is not a finding; see
+  `pr_sentinel_overlap`. Gated by `PR_SENTINEL_OVERLAP_ENABLED` (default on;
+  `0`/`false` disables) and off under `PR_SENTINEL_DISABLE=1`. Unlike the poll
+  deny this one applies to a backgrounded call too — backgrounding a create
+  still opens the PR, so it is not the fix here.
+
 Escape hatch: `PR_SENTINEL_OVERRIDE=<reason>` (any non-empty value) downgrades
 the deny — the hook defers, letting the command proceed under the normal
 permission system — for the rare legitimate one-off. It is honoured as an
@@ -46,9 +56,12 @@ as well as in the hook's own environment; the inline form is the only one a
 session can reach from inside a Bash call, and it's the form the deny message
 names. This mirrors prod-guard's `PROD_GUARD_OVERRIDE`.
 
-The hook is PURELY LOCAL: it inspects the proposed command string and reads
-the session transcript for the watchers this session launched. It never makes a
-network call and never reads any PR text.
+Locality: every branch but the overlap deny is purely local — the proposed
+command string plus the session transcript, for the watchers this session
+launched. The overlap deny is the one exception and asks GitHub, through the
+`gh` the session is already authenticated to, for the open PRs and the diffs of
+the few that share a path. It reads code, never prose: no PR body, no comments,
+no review text, not even the PR title. See `PRIVACY.md`.
 
 Fail modes: defers silently (emits nothing) on ANY uncertainty — non-Bash tool,
 unparseable command/input, a shape it doesn't recognise. It NEVER denies a
@@ -69,6 +82,7 @@ import sys
 # whether this file is run as a script or loaded by path (as the tests load it).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pr_sentinel_watchers as watchers   # noqa: E402
+import pr_sentinel_overlap as overlap     # noqa: E402
 
 # Shell keywords that can lead a simple-command group but aren't the command
 # word itself (e.g. `do sleep 5`). Stripped before reading the leading word.
@@ -242,6 +256,29 @@ def _is_gh_run_watch(group):
     return non_flags[:2] == ['run', 'watch']
 
 
+# `gh pr create --help` asks what the command does; it opens nothing, so there
+# is no PR to overlap with.
+_PR_CREATE_PROBE_FLAGS = frozenset({'--help', '-h'})
+
+
+def _is_gh_pr_create(group):
+    argv = _strip_env_prefix(list(group))
+    if not argv or os.path.basename(argv[0]) != 'gh':
+        return False
+    rest = argv[1:]
+    non_flags = [a for a in rest if not a.startswith('-')]
+    if non_flags[:2] != ['pr', 'create']:
+        return False
+    return _PR_CREATE_PROBE_FLAGS.isdisjoint(rest)
+
+
+def is_pr_create(command):
+    """Whether `command` opens a pull request. Matched on a simple command's
+    own leading word, so a `gh pr create` inside a commit message or a heredoc
+    is not one."""
+    return any(_is_gh_pr_create(group) for group in simple_commands(command))
+
+
 # `gh` in command position: at the start, after whitespace or a shell operator,
 # or opening a substitution (`$(gh …)`, `` `gh …` ``) — which the tokenizer
 # hands back as one opaque token, so this is matched on the raw string. An
@@ -357,6 +394,10 @@ def main():
     if not command.strip():
         return
 
+    # Read once: all three denies honour the same escape hatch.
+    overridden = bool(os.environ.get('PR_SENTINEL_OVERRIDE', '').strip()
+                      or inline_override(command))
+
     # A launch for a PR this session is already watching is pure duplication;
     # deny it and name the task that would stop the incumbent. Checked before
     # the auto-allow, which would otherwise wave the duplicate straight through.
@@ -364,8 +405,7 @@ def main():
     # an unreadable transcript yields no live watchers, so either defers.
     launch_pr = watcher_launch_pr(command)
     if (launch_pr and os.environ.get('PR_SENTINEL_DISABLE') != '1'
-            and not os.environ.get('PR_SENTINEL_OVERRIDE', '').strip()
-            and not inline_override(command)):
+            and not overridden):
         live = watchers.live_watchers(data.get('transcript_path'))
         if launch_pr in live:
             print(json.dumps({'hookSpecificOutput': {
@@ -386,14 +426,27 @@ def main():
             'permissionDecisionReason': build_allow_reason()}}))
         return
 
+    # A `gh pr create` over another open PR's lines. Ahead of the backgrounded
+    # early return on purpose: backgrounding a create still opens the PR, so
+    # unlike a foreground poll it is not the fix. The probes fail silent, so a
+    # machine with no `gh`, no credentials, or a base ref that won't resolve
+    # yields no hits and the create proceeds.
+    if overlap.enabled() and not overridden and is_pr_create(command):
+        hits = overlap.overlapping_prs(data.get('cwd'))
+        if hits:
+            print(json.dumps({'hookSpecificOutput': {
+                'hookEventName': 'PreToolUse',
+                'permissionDecision': 'deny',
+                'permissionDecisionReason': overlap.build_reason(hits)}}))
+            return
+
     # A backgrounded call can't block the session or burn idle tokens, so the
     # harm the deny names doesn't apply. Checked after the auto-allow, which the
     # watcher's own (backgrounded) launch still needs.
     if is_backgrounded(tool_input):
         return
 
-    if (os.environ.get('PR_SENTINEL_OVERRIDE', '').strip()
-            or inline_override(command)):
+    if overridden:
         return  # escape hatch: defer to the normal permission system
 
     shape = classify_poll(command)
