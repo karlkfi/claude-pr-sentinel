@@ -4,13 +4,17 @@ to launch the pr-sentinel background watcher instead of foreground-polling CI.
 
 Fires on a `Bash` command that ran `gh pr create` and printed a PR URL, or a
 branch `git push` that did not obviously fail. Emits `additionalContext`
-describing the exact background-task command to run. It is ADVISORY — a hook
+describing the exact background-task command to run — unless this session
+already has a live watcher on that PR, in which case it says so and names the
+`TaskStop` call, because a running watcher re-reads the PR head on every poll
+and a second one only doubles the wake-ups. It is ADVISORY — a hook
 cannot force the model to call a tool, so this asks; it does not compel. The
 (roadmapped) Stop-hook backstop is what makes the launch reliable (see
 docs/ROADMAP.md).
 
 The hook is PURELY LOCAL: it inspects the just-run command string and its
-output text, and at most asks the local repo whether a pushed ref is a tag. It
+output text, reads the session transcript for the watchers this session
+launched, and at most asks the local repo whether a pushed ref is a tag. It
 never makes a network call. It never reads the PR body or any comment stream —
 the only PR text it ever touches is a URL it echoes back.
 
@@ -26,6 +30,13 @@ import re
 import shlex
 import subprocess
 import sys
+
+# A watcher already running on this PR makes a second one pure duplication —
+# both wake the session for the same event. The live-watcher read is the same
+# one the Stop hook uses; the path insert makes the sibling import work whether
+# this file is run as a script or loaded by path (as the tests load it).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pr_sentinel_watchers as watchers   # noqa: E402
 
 # A github.com PR URL, e.g. https://github.com/owner/repo/pull/123
 PR_URL_RE = re.compile(r'https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)')
@@ -161,10 +172,25 @@ def looks_failed(text):
             or HTTP_ERROR_RE.search(text) is not None)
 
 
-def build_context(action, pr_num):
+def build_live_context(pr_num, task_ids):
+    """The nudge for a PR this session is ALREADY watching: don't stack another.
+
+    The running watcher re-reads the PR's head SHA on every poll, so it covers
+    the push that just happened — relaunching only doubles the wake-ups for
+    every later event. Names the task id so stopping it is one tool call."""
+    return (
+        f'pr-sentinel: a watcher for #{pr_num} is ALREADY running in this '
+        f'session, so this PR is covered — it re-reads the PR head on every '
+        f'poll. Do NOT launch a second one: duplicate watchers wake this '
+        f'session once each for the same event. '
+        + watchers.stop_hint(pr_num, task_ids))
+
+
+def build_context(action, pr_num, live=None):
     """The advisory nudge injected as additionalContext. `pr_num` is the bare
     PR number (no `#`), or None — only reachable on the push path, since a
-    create without a number never gets this far."""
+    create without a number never gets this far. `live` maps PR number to the
+    background task ids of watchers still running in this session."""
     plugin_root = os.environ.get('CLAUDE_PLUGIN_ROOT', '')
     watcher = os.path.join(plugin_root, 'scripts', 'pr-sentinel-watch.sh') \
         if plugin_root else 'scripts/pr-sentinel-watch.sh'
@@ -180,14 +206,22 @@ def build_context(action, pr_num):
         # no PR at all. Let it drop the nudge instead of hunting for one (#34).
         lead += (' If this branch has no open PR, ignore this — a successful '
                  '`gh pr create` nudges again with the number.')
+    # With no number resolved we cannot tell whether this push was to a PR the
+    # session is already watching, so name those PRs and let it decide. A
+    # resolved-and-live number never reaches here — it took build_live_context.
+    already = ''
+    if not pr_num and live:
+        named = ', '.join('#' + p for p in sorted(live, key=int))
+        already = (f'This session already has a live watcher on {named} — if '
+                   f'this push was to one of those, it is already covered; do '
+                   f'not launch a second watcher for it. ')
     return (
         f'pr-sentinel: {lead} Launch the PR Sentinel watcher as a BACKGROUND '
         f'task (run_in_background) so CI failures and merge conflicts wake this '
         f'session — do NOT foreground-poll with `gh pr checks --watch`, '
         f'`gh run watch`, or a sleep loop. Command:\n'
         f'    bash "{watcher}" {target}\n'
-        f'If a watcher for this PR is already running, restart it so it tracks '
-        f'the latest push. When it exits and wakes you, fix the reported CI '
+        f'{already}When it exits and wakes you, fix the reported CI '
         f'failure or merge conflict, push, and relaunch it. Never auto-merge.'
     )
 
@@ -225,7 +259,13 @@ def main():
         # `--dry-run`, and any failure shape FAILURE_SIGNALS doesn't carry.
         return
 
-    context = build_context(action, pr_num)
+    # Watchers this session started that have not exited. Fail-open: an
+    # unreadable transcript yields {}, which is the pre-feature nudge.
+    live = watchers.live_watchers(data.get('transcript_path'))
+    if pr_num and pr_num in live:
+        context = build_live_context(pr_num, live[pr_num])
+    else:
+        context = build_context(action, pr_num, live)
     print(json.dumps({'hookSpecificOutput': {
         'hookEventName': 'PostToolUse',
         'additionalContext': context}}))

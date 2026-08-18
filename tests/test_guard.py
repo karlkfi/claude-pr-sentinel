@@ -11,6 +11,7 @@ Two layers:
 import json
 import os
 import subprocess
+import tempfile
 import unittest
 from importlib import util
 from pathlib import Path
@@ -40,11 +41,40 @@ def run_guard(payload, env=None):
     return proc.stdout, proc.stderr, proc.returncode
 
 
-def bash_payload(command, background=False):
+def bash_payload(command, background=False, transcript=None):
     tool_input = {"command": command}
     if background:
         tool_input["run_in_background"] = True
-    return {"tool_name": "Bash", "tool_input": tool_input}
+    payload = {"tool_name": "Bash", "tool_input": tool_input}
+    if transcript:
+        payload["transcript_path"] = transcript
+    return payload
+
+
+def transcript_with_live_watcher(pr, tmpdir, task_id="bk1", completed=False):
+    """A synthetic transcript in which this session launched a watcher on `pr`
+    as a background task — still running unless `completed`."""
+    entries = [
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_w", "name": "Bash",
+             "input": {"command": f'bash "{WATCHER}" {pr}',
+                       "run_in_background": True}}]}},
+        {"type": "user", "toolUseResult": {"backgroundTaskId": task_id},
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "toolu_w",
+              "content": f"Command running in background with ID: {task_id}."}]}},
+    ]
+    if completed:
+        entries.append({"type": "queue-operation", "content": (
+            "<task-notification>\n"
+            f"<tool-use-id>toolu_w</tool-use-id>\n"
+            f"<output-file>/tmp/s/tasks/{task_id}.output</output-file>\n"
+            "<status>completed</status>\n</task-notification>")})
+    path = os.path.join(tmpdir, "transcript.jsonl")
+    with open(path, "w") as fh:
+        for e in entries:
+            fh.write(json.dumps(e) + "\n")
+    return path
 
 
 class ClassifyPollUnit(unittest.TestCase):
@@ -408,3 +438,78 @@ class AutoAllowEndToEnd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DuplicateWatcherDeny(unittest.TestCase):
+    """A launch for a PR this session is already watching is denied, because a
+    second watcher wakes the session twice for every event. The deny names the
+    background task id so stopping the incumbent is one tool call."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _launch(self, pr=7):
+        return f'bash "{WATCHER}" {pr}'
+
+    def _run(self, command, transcript=None, env=None):
+        # CLAUDE_PLUGIN_ROOT must name THIS checkout, or the launch does not
+        # resolve to the plugin's own watcher and nothing recognises it.
+        run_env = {"CLAUDE_PLUGIN_ROOT": str(REPO)}
+        run_env.update(env or {})
+        return run_guard(bash_payload(command, transcript=transcript),
+                         env=run_env)
+
+    def _decision(self, out):
+        self.assertTrue(out.strip(), "expected a decision, got silence")
+        return json.loads(out)["hookSpecificOutput"]
+
+    def test_second_launch_is_denied(self):
+        t = transcript_with_live_watcher("7", self.tmp.name)
+        out, _, rc = self._run(self._launch(), transcript=t)
+        self.assertEqual(rc, 0)
+        d = self._decision(out)
+        self.assertEqual(d["permissionDecision"], "deny")
+        self.assertIn("#7", d["permissionDecisionReason"])
+        self.assertIn('TaskStop(task_id="bk1")', d["permissionDecisionReason"])
+
+    def test_first_launch_is_still_auto_allowed(self):
+        t = transcript_with_live_watcher("7", self.tmp.name, completed=True)
+        out, _, _ = self._run(self._launch(), transcript=t)
+        self.assertEqual(self._decision(out)["permissionDecision"], "allow")
+
+    def test_a_different_pr_is_not_a_duplicate(self):
+        t = transcript_with_live_watcher("7", self.tmp.name)
+        out, _, _ = self._run(self._launch(8), transcript=t)
+        self.assertEqual(self._decision(out)["permissionDecision"], "allow")
+
+    def test_unreadable_transcript_never_denies(self):
+        out, _, _ = self._run(
+            self._launch(), transcript="/nonexistent/transcript.jsonl")
+        self.assertEqual(self._decision(out)["permissionDecision"], "allow")
+
+    def test_missing_transcript_path_never_denies(self):
+        out, _, _ = self._run(self._launch())
+        self.assertEqual(self._decision(out)["permissionDecision"], "allow")
+
+    def test_override_downgrades_the_duplicate_deny(self):
+        t = transcript_with_live_watcher("7", self.tmp.name)
+        out, _, _ = self._run(
+            f'PR_SENTINEL_OVERRIDE=why bash "{WATCHER}" 7', transcript=t)
+        self.assertEqual(out.strip(), "")   # not a recognised launch shape
+        out, _, _ = self._run(self._launch(), transcript=t,
+                              env={"PR_SENTINEL_OVERRIDE": "why"})
+        self.assertEqual(self._decision(out)["permissionDecision"], "allow")
+
+    def test_disabled_plugin_never_denies(self):
+        t = transcript_with_live_watcher("7", self.tmp.name)
+        out, _, _ = self._run(self._launch(), transcript=t,
+                              env={"PR_SENTINEL_DISABLE": "1"})
+        self.assertEqual(out.strip(), "")
+
+    def test_duplicate_denied_even_with_autoallow_off(self):
+        # The deny is about duplication, not about the permission prompt.
+        t = transcript_with_live_watcher("7", self.tmp.name)
+        out, _, _ = self._run(self._launch(), transcript=t,
+                              env={"PR_SENTINEL_AUTOALLOW": "0"})
+        self.assertEqual(self._decision(out)["permissionDecision"], "deny")

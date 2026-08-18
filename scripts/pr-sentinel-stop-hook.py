@@ -88,11 +88,18 @@ import re
 import sys
 import time
 
-# A github.com PR URL, e.g. https://github.com/owner/repo/pull/123
-PR_URL_RE = re.compile(r'https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)')
+# The launch/completion records are read through the shared scan all three
+# hooks use, so "is a watcher live for this PR" has exactly one definition.
+# The path insert makes the sibling import work whether this file is run as a
+# script or loaded by path (as the tests load it).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pr_sentinel_watchers as watchers   # noqa: E402
 
-# A watcher launch inside a Bash command: `... pr-sentinel-watch.sh 42`.
-WATCH_ARG_RE = re.compile(r'pr-sentinel-watch\.sh["\']?\s+(\S+)')
+PR_URL_RE = watchers.PR_URL_RE
+WATCH_ARG_RE = watchers.WATCH_ARG_RE
+NOTIF_TOOL_ID_RE = watchers.NOTIF_TOOL_ID_RE
+NOTIF_OUTFILE_RE = watchers.NOTIF_OUTFILE_RE
+pr_number = watchers.pr_number
 
 # A watcher TERMINAL report that means "nothing left to babysit" for a PR.
 # `blocked` counts: its two causes — an outstanding approval, or a required
@@ -139,10 +146,6 @@ DAMPENABLE_EVENT_RE = re.compile(
 FAILED_CHECKS_RE = re.compile(r'Failed checks:[ \t]*([^\n]*)')
 HEAD_SHA_RE = re.compile(r'Head SHA:[ \t]*(\S+)')
 
-# Fields pulled out of a `<task-notification>` completion record.
-NOTIF_TOOL_ID_RE = re.compile(r'<tool-use-id>\s*(toolu_[A-Za-z0-9]+)')
-NOTIF_OUTFILE_RE = re.compile(r'<output-file>\s*([^<\s]+)')
-
 # The hook reads only the HEADER of a watcher output file (the marker and the
 # check_failure signature both sit above the first CI-log excerpt), so a byte cap
 # bounds the read: it comfortably spans the fixed-template header plus the first
@@ -159,18 +162,10 @@ TOOL_USE_LINE_RE = re.compile(r'"type":\s*"tool_use"')
 
 # Cheap line pre-filter: only JSON-parse transcript lines that can carry a
 # signal we care about. Everything else (the bulk of a session) is skipped.
-_NEEDLES = ('pr-sentinel-watch.sh', 'PR-SENTINEL EVENT',
-            'task-notification', 'pr create', 'pr merge', 'pr close', '/pull/')
-
-
-def pr_number(token):
-    """Normalise a PR token (a bare number or a github.com PR URL) to its
-    number string, or None if it is neither."""
-    token = str(token).strip().strip('"\'')
-    if token.isdigit():
-        return token
-    m = PR_URL_RE.search(token)
-    return m.group(1) if m else None
+# The shared scan's needles are unioned in so a single pass feeds it too.
+_NEEDLES = tuple(set(
+    ('PR-SENTINEL EVENT', 'pr create', 'pr merge', 'pr close', '/pull/')
+) | set(watchers.SCAN_NEEDLES))
 
 
 # The redirect on the same simple command as a `gh pr create`: `> out.log`,
@@ -303,18 +298,7 @@ def _entry_text(obj, content):
     return '\n'.join(parts)
 
 
-def _notification_text(obj):
-    """The `<task-notification>` payload of an entry, from either a
-    `queue-operation` (.content) or an `attachment` (.attachment.prompt)."""
-    if obj.get('type') == 'queue-operation':
-        c = obj.get('content')
-        return c if isinstance(c, str) and '<task-notification>' in c else ''
-    att = obj.get('attachment')
-    if isinstance(att, dict):
-        p = att.get('prompt')
-        if isinstance(p, str) and '<task-notification>' in p:
-            return p
-    return ''
+_notification_text = watchers.notification_text
 
 
 def _report_header_region(text):
@@ -393,9 +377,7 @@ def _analyze(path):
     Fail-open: returns `(set(), {})` on any I/O trouble (allow the stop)."""
     created = set()
     concluded = set()
-    launch_pr_by_toolid = {}   # watcher launch tool_use_id -> PR number
-    completed_toolids = set()  # tool_use_ids with a task-notification (exited)
-    outfile_by_toolid = {}     # watcher launch tool_use_id -> its output file
+    scan = watchers.WatcherScan()   # watcher launches and their completions
     reads = []                 # (file_path, text) for Read results
     create_ids = []            # tool_use_ids that ran `gh pr create`
     result_text = {}           # tool_use_id -> concatenated result text
@@ -429,14 +411,10 @@ def _analyze(path):
                     continue
                 seen_prs |= line_prs
 
-                notif = _notification_text(obj)
-                if notif and '<status>' in notif:
-                    tm = NOTIF_TOOL_ID_RE.search(notif)
-                    if tm:
-                        completed_toolids.add(tm.group(1))
-                        om = NOTIF_OUTFILE_RE.search(notif)
-                        if om:
-                            outfile_by_toolid[tm.group(1)] = om.group(1).strip()
+                # The shared scan takes the watcher launches, their background
+                # task ids, and the completion notifications; True means the
+                # entry was a notification and carries nothing else we read.
+                if scan.feed(obj):
                     continue
 
                 msg = obj.get('message') if isinstance(obj.get('message'), dict) else obj
@@ -451,11 +429,6 @@ def _analyze(path):
                             if b.get('name') != 'Bash':
                                 continue
                             cmd = (b.get('input') or {}).get('command') or ''
-                            if (b.get('input') or {}).get('run_in_background'):
-                                for wm in WATCH_ARG_RE.finditer(cmd):
-                                    num = pr_number(wm.group(1))
-                                    if num:
-                                        launch_pr_by_toolid[b.get('id')] = num
                             if _is_pr_create(cmd):
                                 create_ids.append(b.get('id'))
                                 in_create = True
@@ -495,8 +468,8 @@ def _analyze(path):
 
     # Map each watcher's output file to the PR it watches (path from the
     # completion notification, PR from the launch's `pr-sentinel-watch.sh` arg).
-    outfile_pr = {outfile_by_toolid[t]: launch_pr_by_toolid[t]
-                  for t in outfile_by_toolid if t in launch_pr_by_toolid}
+    outfile_pr = {scan.outfile_by_toolid[t]: scan.pr_by_toolid[t]
+                  for t in scan.outfile_by_toolid if t in scan.pr_by_toolid}
 
     # Fallback text for each watcher output file: any Read-tool read of it. Used
     # only if the file itself is gone; the direct read below is authoritative.
@@ -522,15 +495,14 @@ def _analyze(path):
             sig_outfiles.setdefault(pr, {}).setdefault(sig, set()).add(outfile)
 
     # Live: a watcher launch whose task has not reported completion.
-    live = {pr for tid, pr in launch_pr_by_toolid.items()
-            if tid not in completed_toolids}
+    live = set(scan.live())
 
     # The session's own PRs: ones it created, plus ones it launched a watcher
     # for (babysitting a PR is taking responsibility for it — this covers a
     # session resumed onto a branch whose PR an earlier session opened). A PR
     # merely referenced — `gh pr view`/`gh pr comment` on someone else's PR —
     # is in neither set and never blocks.
-    owned = created | set(launch_pr_by_toolid.values())
+    owned = created | set(scan.pr_by_toolid.values())
 
     block = owned - concluded - live
     # Dampen: an unresolved-and-unwatched PR whose identical terminal event was

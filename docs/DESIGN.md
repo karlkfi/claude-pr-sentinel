@@ -586,6 +586,45 @@ The non-terminal notices (`base_failure`, `ready_watching`, `blocked_watching`)
 are deliberately outside the set: the watcher keeps polling past them, so they
 are never the report a stop is being blocked over.
 
+### One watcher per PR, and the one read that enforces it
+
+Sessions used to stack watchers. Across 622 local sessions that launched one,
+83 launched a watcher on a pull request while an earlier watcher on that same
+PR was still running — 382 such launches, and one session reached 14 concurrent
+watchers on a single PR. Each one wakes the session for the same event and
+polls GitHub on its own schedule, so the cost is multiplied wake-ups and
+multiplied API calls, both growing with the pile.
+
+The plugin was asking for it. The PostToolUse nudge fires on every push, and it
+used to close with "if a watcher for this PR is already running, restart it so
+it tracks the latest push" — which is wrong twice over. The watcher re-reads the
+PR's head commit on every poll, so a running one already tracks the push; and a
+session has no way to *restart* a background task from inside a Bash call, so
+"restart" became "launch another", which the PreToolUse auto-allow then waved
+through. 160 of the duplicate launches followed a nudge.
+
+Two harness records make the fix local and cheap. A backgrounded launch's own
+tool result carries a **background task id**, and when the task exits the
+harness records a **completion notification** naming the launch. So a watcher is
+live exactly when its launch has no notification yet — the same derivation the
+Stop hook already used to decide a PR was covered. It lives in
+`scripts/pr_sentinel_watchers.py` and all three hooks read it, which is the
+point: the Stop hook asks "does this PR still need a watcher" and the other two
+ask "does it already have one", and those must not be able to disagree.
+
+The task id is what makes the answer more than a refusal. The nudge and the
+guard's deny both name the exact `TaskStop` call that stops the incumbent, so a
+session that genuinely wants a fresh watch budget has a two-step path rather
+than a dead end.
+
+This is scoped to one session, deliberately. A lock file in the watcher would
+also catch the case where two sessions watch the same PR (30 of 184 overlapping
+pairs in the same measurement, some of them only apparent — a session ending
+takes its watchers with it). It would cost on-disk state, stale-lock reaping
+after a hard kill, and an immediate-exit path that wakes a session to tell it
+nothing. Neither hook needs any of that: the transcript already holds the
+answer, and a wrong answer only ever fails open.
+
 ### Why fail-open in the hook, fail-safe in the watcher
 
 The hook **defers silently** (emits nothing) on any uncertainty — unparseable

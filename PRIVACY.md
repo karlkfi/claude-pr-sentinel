@@ -3,7 +3,7 @@
 _Last updated: 2026-08-18_
 
 pr-sentinel is a Claude Code plugin that runs on your local machine. Its
-components have different data profiles, described honestly below: two hooks
+components have different data profiles, described honestly below: three hooks
 and a migration helper that never leave your machine, and one watcher that
 talks to GitHub.
 
@@ -11,7 +11,7 @@ talks to GitHub.
 
 None. The plugin has no analytics, no telemetry, and no data collection of any
 kind. It ships as one bash watcher and a few stdlib-only Python scripts (the
-two hooks and the migration helper).
+three hooks and the migration helper).
 
 ## The PostToolUse hook (`scripts/pr-sentinel-hook.py`)
 
@@ -26,6 +26,26 @@ two hooks and the migration helper).
   read of your local repo's refs, nothing else. The only PR data it handles is
   a PR URL that the command itself already printed, which it echoes back in the
   nudge.
+- Reads your Claude Code **session transcript** (the harness supplies the path)
+  for one thing only: the watchers this session launched and which of them have
+  reported completion, so it does not ask for a second watcher on a pull
+  request one is already watching. It extracts the PR number, the background
+  task id, and nothing else.
+
+## The PreToolUse hook (`scripts/pr-sentinel-guard.py`)
+
+- Runs **entirely locally with no network access.** It denies a Bash command
+  that would foreground-poll continuous integration (CI), and auto-approves the
+  plugin's own watcher launch.
+- Receives, via standard input, the Bash command Claude Code is about to run,
+  plus `CLAUDE_PLUGIN_ROOT` and the optional `PR_SENTINEL_*` configuration
+  values (via environment). It inspects the command string only — never the
+  command's output, and never any PR text.
+- Reads your **session transcript** for the same narrow fact the PostToolUse
+  hook reads it for — which watchers are still running — so it can refuse a
+  duplicate watcher on a PR already covered.
+- Writes nothing to disk, and emits only its allow/deny decision to standard
+  output.
 
 ## The watcher (`scripts/pr-sentinel-watch.sh`)
 
