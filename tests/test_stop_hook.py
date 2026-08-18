@@ -104,13 +104,14 @@ def created_pr(number, tool_id="toolu_c"):
 def created_pr_redirected(number, tool_id="toolu_c"):
     """A `gh pr create` that DID open a PR but whose URL never reaches the
     transcript — output redirected to a log, only the exit code echoed. The
-    harness still emits its `pr-link`, and it lands between the tool_use and the
-    tool_result, which is the ordering measured in real transcripts."""
+    harness still emits its `pr-link`, and on this shape it lands AFTER the
+    tool_result and before the next tool call: the ordering measured on four
+    real redirected creates, in three repositories."""
     return [
         assistant_bash("gh pr create --fill > tmp/pr.log 2>&1; echo \"EXIT=$?\"",
                        tool_id),
-        pr_link(number),
         tool_result("EXIT=0\n", tool_id),
+        pr_link(number),
     ]
 
 
@@ -315,6 +316,18 @@ class NeedsWatcherLogic(unittest.TestCase):
         # tool call, is what keeps the backstop from failing for the same
         # reason the nudge did.
         self.assertEqual(needs(created_pr_redirected(42)), {"42"})
+
+    def test_pr_link_before_the_tool_result_also_resolves(self):
+        # The other ordering the harness produces: on a create whose URL IS
+        # visible it emits the record between the tool_use and the tool_result.
+        # Nothing rests on the record there — the URL already resolves it — but
+        # the window spans both sides of the result so neither ordering is a
+        # special case.
+        self.assertEqual(needs([
+            assistant_bash("gh pr create --fill > tmp/pr.log 2>&1", "toolu_c"),
+            pr_link(42),
+            tool_result("EXIT=0\n", "toolu_c"),
+        ]), {"42"})
 
     def test_stale_pr_link_in_create_window_does_not_confer_ownership(self):
         # The failure mode the novelty condition exists for: the session viewed

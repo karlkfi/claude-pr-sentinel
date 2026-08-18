@@ -29,7 +29,9 @@ process table, writes nothing, and never touches the PR body or comment stream
     unrelated commands, so a stale one can land in a failed create's window.
     Reading "referenced" as "opened" caused false-positive blocks (#34); these
     two conditions keep the fallback clear of that while giving the backstop a
-    resolution path the PostToolUse nudge does not share (#60).
+    resolution path the PostToolUse nudge does not share (#60). Best-effort: the
+    harness emits these records for the session's own repo, so a create run
+    against a different one leaves nothing to correlate.
   * Is a watcher still running?  -> a `run_in_background` launch of
     `pr-sentinel-watch.sh <PR>` records a `tool_use` id; when that background
     task exits, the harness records a `<task-notification>` carrying the same

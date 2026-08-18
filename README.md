@@ -143,7 +143,10 @@ but only one emitted inside that create's own tool call *and* naming a PR the
 transcript has not mentioned before. (Both conditions carry weight. The harness
 emits a `pr-link` for *any* PR URL the session surfaces, and re-emits an
 already-linked one after unrelated commands, so a bare record would read a `gh
-pr view` on someone else's PR as "opened this session".) It
+pr view` on someone else's PR as "opened this session".) The route is
+best-effort: the records the harness emits are overwhelmingly for the session's
+own repository, so a create run against a *different* repo leaves nothing to
+correlate and the backstop stays silent. It
 treats a watcher as live when its background-task launch has no completion
 notification yet, and reads the watcher's output file directly to see whether the
 PR was handed off — so that signal holds whether the session surfaced the output

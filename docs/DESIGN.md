@@ -496,6 +496,12 @@ PR body or comments**:
   opened nothing. Without this route the backstop resolved ownership from the
   same PR URL the nudge does, so a create that printed no parseable URL defeated
   both at once — nudge and backstop failing for one reason is not a backstop.
+  The route is best-effort, and its limit is measured: across 11,191 `pr-link`
+  records in local transcripts, 94 named a repository other than the session's
+  own, and a redirected create run against another repo produced none at all.
+  So this closes the redirected create in the session's own repo — the common
+  shape, because redirecting to a file is what a session does when a pipeline
+  would hide the exit status — and leaves the cross-repo one open.
 - **Detect a live watcher** from the same transcript: a `run_in_background`
   launch of `pr-sentinel-watch.sh <PR>` records a `tool_use` id, and when that
   background task exits the harness records a `<task-notification>` carrying the
