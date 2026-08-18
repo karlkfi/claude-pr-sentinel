@@ -78,8 +78,12 @@ cheaper trade.
 
    ```
    git tag -a v<X.Y.Z> -m "v<X.Y.Z>"
-   git push origin main --tags
+   git push origin main v<X.Y.Z>
    ```
+
+   Name the tag rather than reaching for `--tags`, which pushes **every** local
+   tag — an abandoned release candidate or a tag from another clone rides along
+   and cannot be taken back once consumers pin it.
 
 7. **Publish the Release from the notes file:**
 
