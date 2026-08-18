@@ -11,6 +11,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
+# Claude Code reads a hook `timeout` in seconds (default 600). These hooks
+# parse a transcript and at most shell out to `git rev-parse`; the suites run
+# them under a 15s subprocess timeout. 60 is the ceiling a wedged one waits.
+MAX_HOOK_TIMEOUT_SECONDS = 60
+
 
 def load(rel):
     return json.loads((REPO / rel).read_text(encoding="utf-8"))
@@ -65,6 +70,19 @@ class Wiring(unittest.TestCase):
         self.assertTrue(script.is_file())
         self.assertTrue(os.access(script, os.X_OK),
                         "stop hook script must be executable")
+
+    def test_hook_timeouts_are_bounded(self):
+        """Every registered hook declares a timeout, in seconds. A value meant as
+        milliseconds reads as hours and leaves a hung hook wedged (#72)."""
+        hooks = load("hooks/hooks.json")
+        for event, entries in hooks["hooks"].items():
+            for entry in entries:
+                for hook in entry["hooks"]:
+                    self.assertIn("timeout", hook,
+                                  f"{event} hook must declare a timeout")
+                    self.assertLessEqual(
+                        hook["timeout"], MAX_HOOK_TIMEOUT_SECONDS,
+                        f"{event} hook timeout is in seconds, not milliseconds")
 
     def test_watcher_present_and_executable(self):
         watcher = REPO / "scripts" / "pr-sentinel-watch.sh"
