@@ -2,6 +2,10 @@
 
 Backlog item [Q10](../STATUS.md).
 
+**Status:** the age-proportional rule below has landed
+(`PR_SENTINEL_POLL_AGE_DIVISOR`, default 10). The optional refinement is filed
+as backlog item Q12.
+
 ## Goal (one sentence)
 
 Stop a check failure waiting up to five minutes to wake the session, without
@@ -72,6 +76,12 @@ run carries its own start and end timestamps.
 Treat this as a second step. The clamp is only as good as `D`, and a workflow
 whose duration just changed will mis-predict; the age-proportional rule beneath
 it degrades gracefully and should land first.
+
+Those timestamps ride on a response `gh_base_run` already fetches, so obtaining
+`D` widens the `-q` projection rather than adding a request. It still reads more
+GitHub data than today, so `PRIVACY.md` has to name the fields —
+`test_every_graphql_read_is_named_in_privacy` reads the GraphQL surface only and
+will not catch a REST projection.
 
 ## Non-goals
 

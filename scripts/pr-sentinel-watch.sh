@@ -58,6 +58,15 @@ INTERVAL="${PR_SENTINEL_INTERVAL:-30}"          # base poll interval, seconds
 MAX_INTERVAL="${PR_SENTINEL_MAX_INTERVAL:-300}"  # backoff ceiling, seconds
 BACKOFF_NUM="${PR_SENTINEL_BACKOFF_NUM:-3}"      # backoff multiplier numerator
 BACKOFF_DEN="${PR_SENTINEL_BACKOFF_DEN:-2}"      # backoff multiplier denominator
+# While checks are pending the poll is paced by how long they have been running
+# rather than by how many times we have already asked: age divided by this,
+# clamped to [INTERVAL, MAX_INTERVAL]. At 10, a suite forty minutes in is polled
+# every four; anything under five minutes old stays at INTERVAL. See
+# docs/plan/adaptive-poll-interval.md.
+POLL_AGE_DIVISOR="${PR_SENTINEL_POLL_AGE_DIVISOR:-10}"  # pending poll = check age / this
+# Zero would divide by zero and kill the watch, so anything but a positive
+# integer falls back to the default (same fail-safe stance as HEAL/WATCH_UNTIL).
+[[ "$POLL_AGE_DIVISOR" =~ ^[1-9][0-9]*$ ]] || POLL_AGE_DIVISOR=10
 TIMEOUT="${PR_SENTINEL_TIMEOUT:-3600}"           # overall watch budget, seconds
 LOG_MAX_BYTES="${PR_SENTINEL_LOG_MAX_BYTES:-8192}"  # CI log excerpt cap, bytes
 # Transient-failure retry horizon: a `gh` query that keeps failing without
@@ -114,6 +123,11 @@ BLOCKED_SEEN=0
 
 # Consecutive polls the PR has looked green. Same reset rule.
 GREEN_SEEN=0
+
+# When the current run of pending checks was first seen, or 0 when the last poll
+# saw nothing pending. This is what paces a pending poll; clearing it on a poll
+# with no pending checks is what makes a push restart the clock.
+PENDING_SINCE=0
 
 # Set to 1 once a poll has seen the PR hold a merge-queue entry. From then on
 # the queue owns the PR: branch-state events are suspended (their remedies all
@@ -847,6 +861,10 @@ main() {
 			# watch from here.
 			GREEN_SEEN=0
 			BLOCKED_SEEN=0
+			# No check buckets were fetched, and what the watch is waiting for
+			# is the queue's own progress — nobody's schedule. Pace it with the
+			# idle backoff rather than a check age this poll never read.
+			PENDING_SINCE=0
 			local confirmed_green=0
 		else
 			# (b) conflicting
@@ -874,6 +892,15 @@ main() {
 							pass_count=$((pass_count + 1)) ;;
 					esac
 				done <<<"$checks"
+			fi
+
+			# The clock the pacing block at the end of the loop reads: stamped
+			# when a run of pending checks begins, cleared when it ends. Set
+			# before the absorption below, which cannot change pending_count.
+			if (( pending_count > 0 )); then
+				(( PENDING_SINCE == 0 )) && PENDING_SINCE=$(now)
+			else
+				PENDING_SINCE=0
 			fi
 
 			# A failing check whose run still concluded `success` was made
@@ -987,6 +1014,18 @@ main() {
 
 		# --- nothing terminal: back off and poll again, respecting the budget ---
 		if (( $(now) >= deadline )); then emit_timeout; fi
+		# Checks are still running: pace the poll to how long they have been
+		# running, not to how many times we have already asked. Seconds-old
+		# checks get a tight loop and a forty-minute build a wide one, so the
+		# wake latency stays a proportion of the run it interrupts instead of
+		# reaching MAX_INTERVAL ten minutes into every watch. The unconditional
+		# backoff below still owns a settled PR: past green, what the watch
+		# waits for is a sibling merge or a close, which no age predicts.
+		if (( PENDING_SINCE > 0 )); then
+			sleep_for=$(( ( $(now) - PENDING_SINCE ) / POLL_AGE_DIVISOR ))
+			(( sleep_for < INTERVAL )) && sleep_for="$INTERVAL"
+			(( sleep_for > MAX_INTERVAL )) && sleep_for="$MAX_INTERVAL"
+		fi
 		# A green poll awaiting confirmation is not an idle poll: it asks
 		# whether a run registered in the last few seconds, so it must not
 		# inherit a backoff that has reached MAX_INTERVAL over a long CI run.

@@ -33,6 +33,9 @@ Per-call variation (to test transitions like pending -> fail) is supported by
 suffixed files pr_checks.1, pr_checks.2, ... which the stub selects by a
 per-key call counter.
 
+Tests that assert how long the watcher waits between polls pass
+virtual_clock=True, which stubs `sleep` and `date` as well — see SLEEP_STUB.
+
 Fixture rule: never use real PR URLs, hosts, or credentials — synthetic
 owner/repo and run ids exercise identical code paths with zero risk.
 """
@@ -110,16 +113,61 @@ GH_STUB = textwrap.dedent(
 )
 
 
+# A virtual clock, for the tests that assert how long the watcher sleeps.
+# `sleep` records its argument and advances the clock instead of blocking, and
+# `date +%s` reads it back, so a whole watch runs instantly and the pacing is
+# exactly reproducible. Anything but `+%s` is delegated to the real date.
+SLEEP_STUB = textwrap.dedent(
+    """\
+    #!/usr/bin/env bash
+    set -u
+    echo "SLEEP ${1}" >&2
+    clock="$GH_STUB_DIR/.clock"
+    n=0; [[ -f "$clock" ]] && n=$(cat "$clock")
+    echo $(( n + ${1%%.*} )) > "$clock"
+    """
+)
+
+DATE_STUB = textwrap.dedent(
+    """\
+    #!/usr/bin/env bash
+    set -u
+    if [[ "${1:-}" == "+%s" ]]; then
+      clock="$GH_STUB_DIR/.clock"
+      n=0; [[ -f "$clock" ]] && n=$(cat "$clock")
+      echo $(( 1700000000 + n ))
+      exit 0
+    fi
+    exec /bin/date "$@"
+    """
+)
+
+
+def sleeps(stderr):
+    """The durations the watcher asked for, in order (virtual_clock runs only)."""
+    return [int(m) for m in re.findall(r"^SLEEP (\d+)$", stderr, re.M)]
+
+
 class WatcherCase(unittest.TestCase):
-    def run_watcher(self, files, pr="123", env=None, timeout=20):
-        """Set up a stub-gh scenario dir, run the watcher, return (rc, stdout)."""
+    def run_watcher(self, files, pr="123", env=None, timeout=20,
+                    virtual_clock=False):
+        """Set up a stub-gh scenario dir, run the watcher, return (rc, stdout).
+
+        virtual_clock also stubs `sleep` and `date`, so the watch costs no wall
+        time and every sleep it asks for is reported on stderr — see sleeps().
+        """
         scen = tempfile.mkdtemp(prefix="pr-sentinel-test-")
         bindir = os.path.join(scen, "bin")
         os.makedirs(bindir)
-        gh = os.path.join(bindir, "gh")
-        with open(gh, "w", encoding="utf-8") as f:
-            f.write(GH_STUB)
-        os.chmod(gh, 0o755)
+        stubs = {"gh": GH_STUB}
+        if virtual_clock:
+            stubs["sleep"] = SLEEP_STUB
+            stubs["date"] = DATE_STUB
+        for name, body in stubs.items():
+            path = os.path.join(bindir, name)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(body)
+            os.chmod(path, 0o755)
         for name, content in files.items():
             with open(os.path.join(scen, name), "w", encoding="utf-8") as f:
                 f.write(content)
@@ -1164,6 +1212,98 @@ class WatcherCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("PR-SENTINEL EVENT: error", out)
         self.assertIn("transient", out)
+
+    # -- poll pacing while checks are pending ---------------------------------
+    # See docs/plan/adaptive-poll-interval.md. These use the virtual clock, so
+    # the sleeps below are exact rather than approximate.
+
+    def _pending_then(self, last_view, polls, env):
+        """polls-1 pending polls, then `last_view`, under the virtual clock."""
+        files = {"pr_checks": "pending\tbuild\tlink\n",
+                 "pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
+                 "pr_view.%d" % polls: last_view}
+        run_env = {"PR_SENTINEL_TIMEOUT": "100000"}
+        run_env.update(env)
+        rc, out, err = self.run_watcher(files, env=run_env, virtual_clock=True)
+        self.assertEqual(rc, 0, msg=err)
+        return out, sleeps(err)
+
+    def test_virtual_clock_observes_the_backoff_it_is_measuring(self):
+        """The instrument first: a settled watch must still show the ramp, or a
+        flat pending sequence proves nothing about the pending case."""
+        files = {"pr_checks": "pass\tlint\tlink\n",
+                 "pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
+                 "pr_view.6": "MERGED\tUNKNOWN\tmain\tabc1234def\n"}
+        rc, out, err = self.run_watcher(
+            files, virtual_clock=True,
+            env={"PR_SENTINEL_INTERVAL": "2", "PR_SENTINEL_MAX_INTERVAL": "60",
+                 "PR_SENTINEL_GREEN_POLLS": "1", "PR_SENTINEL_TIMEOUT": "100000",
+                 "PR_SENTINEL_WATCH_UNTIL": "closed"})
+        self.assertEqual(rc, 0, msg=err)
+        self.assertIn("PR-SENTINEL EVENT: closed", out)
+        # 2 x 3/2 = 3, 3 x 3/2 = 4, ... — the unconditional ramp, which is
+        # correct once nothing is pending: a sibling merge is on nobody's clock.
+        self.assertEqual(sleeps(err), [2, 3, 4, 6, 9])
+
+    def test_pending_polls_do_not_widen(self):
+        """The defect this replaced: every idle poll multiplied the interval,
+        so ~10min into a watch a failure waited five minutes to wake the
+        session."""
+        out, slept = self._pending_then(
+            "MERGED\tUNKNOWN\tmain\tabc1234def\n", polls=7,
+            env={"PR_SENTINEL_INTERVAL": "2", "PR_SENTINEL_MAX_INTERVAL": "60"})
+        self.assertIn("PR-SENTINEL EVENT: closed", out)
+        # Age never reaches 2 x the divisor, so every poll sits on the floor.
+        # The unconditional backoff would have given 2, 3, 4, 6, 9, 13.
+        self.assertEqual(slept, [2, 2, 2, 2, 2, 2])
+
+    def test_pending_pace_widens_with_the_age_of_the_run(self):
+        """A forty-minute build must not be polled every two seconds either:
+        past the floor the interval tracks how long checks have been running."""
+        _, slept = self._pending_then(
+            "MERGED\tUNKNOWN\tmain\tabc1234def\n", polls=8,
+            env={"PR_SENTINEL_INTERVAL": "2", "PR_SENTINEL_MAX_INTERVAL": "20",
+                 "PR_SENTINEL_POLL_AGE_DIVISOR": "2"})
+        # age/2, floored at 2: ages 0, 2, 4, 6, 9, 13, 19.
+        self.assertEqual(slept, [2, 2, 2, 3, 4, 6, 9])
+
+    def test_pending_pace_respects_the_ceiling(self):
+        """MAX_INTERVAL still caps it — proportional, not unbounded."""
+        _, slept = self._pending_then(
+            "MERGED\tUNKNOWN\tmain\tabc1234def\n", polls=8,
+            env={"PR_SENTINEL_INTERVAL": "2", "PR_SENTINEL_MAX_INTERVAL": "5",
+                 "PR_SENTINEL_POLL_AGE_DIVISOR": "2"})
+        # The floor holds for three polls before age/2 passes it, which the
+        # unconditional ramp (2, 3, 4, 5, 5, ...) would have left at once.
+        self.assertEqual(slept, [2, 2, 2, 3, 4, 5, 5])
+
+    def test_a_second_run_of_checks_starts_a_fresh_clock(self):
+        """A push restarts CI, which is exactly when the session wants a tight
+        loop again — so the age of the *previous* run must not carry over."""
+        files = {"pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
+                 "pr_view.9": "MERGED\tUNKNOWN\tmain\tabc1234def\n",
+                 "pr_checks": "pending\tbuild\tlink\n",
+                 "pr_checks.5": "pass\tlint\tlink\n",
+                 "pr_checks.6": "pass\tlint\tlink\n"}
+        rc, _, err = self.run_watcher(
+            files, virtual_clock=True,
+            env={"PR_SENTINEL_INTERVAL": "2", "PR_SENTINEL_MAX_INTERVAL": "60",
+                 "PR_SENTINEL_POLL_AGE_DIVISOR": "2",
+                 "PR_SENTINEL_GREEN_POLLS": "1", "PR_SENTINEL_TIMEOUT": "100000",
+                 "PR_SENTINEL_WATCH_UNTIL": "closed"})
+        self.assertEqual(rc, 0, msg=err)
+        # Four pending polls, two settled, then pending again: the last pair is
+        # back on the floor. Carrying the old clock would give 9 and 14.
+        self.assertEqual(sleeps(err), [2, 2, 2, 3, 4, 6, 2, 2])
+
+    def test_unusable_poll_age_divisor_falls_back(self):
+        """Zero would divide by zero and kill the watch mid-CI."""
+        out, slept = self._pending_then(
+            "MERGED\tUNKNOWN\tmain\tabc1234def\n", polls=3,
+            env={"PR_SENTINEL_INTERVAL": "2", "PR_SENTINEL_MAX_INTERVAL": "60",
+                 "PR_SENTINEL_POLL_AGE_DIVISOR": "0"})
+        self.assertIn("PR-SENTINEL EVENT: closed", out)
+        self.assertEqual(slept, [2, 2])
 
     # -- input validation ----------------------------------------------------
 

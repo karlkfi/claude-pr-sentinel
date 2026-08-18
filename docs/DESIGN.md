@@ -70,9 +70,9 @@ task's stdout to the session as the wake payload.
 
 1. **Watcher** — `scripts/pr-sentinel-watch.sh`. Bash, `set -euo pipefail`,
    shellcheck-clean. Launched per-PR as a background task. Polls `gh` for check
-   conclusions and `mergeStateStatus` on a configurable interval with backoff,
-   and **exits** when: (a) a required check fails, (b) the PR becomes
-   `CONFLICTING`/`BEHIND`, (b′) the PR leaves the merge queue while still open
+   conclusions and `mergeStateStatus` — pacing the poll by how long the checks
+   have been running, and backing off once they settle — and **exits** when:
+   (a) a required check fails, (b) the PR becomes `CONFLICTING`/`BEHIND`, (b′) the PR leaves the merge queue while still open
    — see [Queue membership](#queue-membership-is-a-different-fact-from-pr-health)
    — (c) all checks are green and the PR is mergeable on
    two consecutive polls,
@@ -289,6 +289,32 @@ the session hostage in the meantime. A cron/scheduled agent runs in a *fresh*
 session without the working context; a foreground loop holds the current
 session but burns tokens and blocks all other work. A sleeping background bash
 process is free, and its exit is a clean, first-class wake.
+
+### Why the poll interval tracks the run's age, not the poll count
+
+A sleeping watcher is free, so the only thing polling costs is `gh` API calls,
+and the only thing *not* polling costs is how long a failure waits to reach the
+session. A backoff on the poll count makes that trade on a signal that predicts
+neither cost: how many times the watcher has already asked. The ramp
+(30 → 45 → 67 → 101 → 151 → 227 → 300) put every poll past roughly ten minutes
+`MAX_INTERVAL` apart, so a check that failed just after one waited five minutes
+to wake the session — and a thirty-second suite got the same ramp as an
+hour-long one.
+
+The signal that does predict it is already in the watch: how long the checks
+have been running. `sleep = clamp(age ÷ K, INTERVAL, MAX_INTERVAL)` self-tunes
+to both suites with no stored history, no extra query, and no duration estimate
+— which also makes it correct on the first run of a brand-new workflow, where an
+estimate has nothing to estimate from.
+
+The backoff still owns the settled case. Past green under `WATCH_UNTIL=closed`
+the watch is waiting for a sibling PR's merge or a close, which no age predicts,
+so widening to `MAX_INTERVAL` there is right. A poll that sees checks pending
+again restarts the clock, which is exactly what a push should do.
+
+The refinement this leaves out — clamping the sleep so it never overshoots the
+duration the same workflow took on the base branch — is derived alongside it in
+[`plan/adaptive-poll-interval.md`](plan/adaptive-poll-interval.md).
 
 ### How conflicts are healed: rebase by default, merge on request
 

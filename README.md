@@ -237,7 +237,7 @@ needed:
 | PR merged or closed | **closed** | done; stop watching |
 | watch budget elapsed | **timeout** | re-check and relaunch if still open |
 | no `gh` credentials, PR unresolvable, or transient failures past the retry horizon | **error** | check `gh auth status`, relaunch |
-| checks still pending | *(keep polling, with backoff)* | — |
+| checks still pending | *(keep polling, paced by how long they've been running)* | — |
 
 Every event report starts with a stable `PR-SENTINEL EVENT: <type>` line, so
 it's greppable in the transcript. Every event that asks you to push —
@@ -367,8 +367,10 @@ comment-channel exposure.
 2. **Background watch.** The session runs
    [`scripts/pr-sentinel-watch.sh <PR>`](scripts/pr-sentinel-watch.sh) as a
    background task (`run_in_background`). The watcher polls `gh` for check
-   buckets, `mergeStateStatus`, and merge-queue membership on a configurable
-   interval with backoff, sleeping between polls (no token cost while idle).
+   buckets, `mergeStateStatus`, and merge-queue membership, sleeping between
+   polls (no token cost while idle). While checks are running the interval
+   tracks how long they have been running; once they settle it backs off. See
+   [How often it polls](#how-often-it-polls).
 3. **Wake on exit.** When an attention-worthy condition is met, the watcher
    prints its one-event report and exits. The harness delivers that report to
    the session as the wake payload.
@@ -443,7 +445,8 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | Env var | Default | Effect |
 | --- | --- | --- |
 | `PR_SENTINEL_INTERVAL` | `30` | base poll interval, seconds |
-| `PR_SENTINEL_MAX_INTERVAL` | `300` | backoff ceiling, seconds |
+| `PR_SENTINEL_MAX_INTERVAL` | `300` | poll-interval ceiling, seconds |
+| `PR_SENTINEL_POLL_AGE_DIVISOR` | `10` | while checks are pending, poll every *age ÷ this* seconds — floored at `PR_SENTINEL_INTERVAL`, capped at `PR_SENTINEL_MAX_INTERVAL` (see [How often it polls](#how-often-it-polls)); anything but a positive integer falls back to `10` |
 | `PR_SENTINEL_TIMEOUT` | `3600` | overall watch budget before a `timeout` event, seconds |
 | `PR_SENTINEL_LOG_MAX_BYTES` | `8192` | CI log excerpt cap (tail kept), bytes |
 | `PR_SENTINEL_GH_RETRY_HORIZON` | `900` | how long (seconds) to retry *transient* `gh` failures with backoff before an `error` event; permanent failures (no credentials, unresolvable PR) exit at once |
@@ -453,7 +456,7 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_GREEN_POLLS` | `2` | consecutive green polls before `ready` fires, so a push whose run hasn't registered yet can't read as green (see [Green is not the same as ready](#green-is-not-the-same-as-ready)); `1` decides on a single poll |
 | `PR_SENTINEL_DEQUEUED_POLLS` | `2` | consecutive polls a once-queued, still-open PR must be missing from the merge queue before `dequeued` fires; the confirming poll turns a queue merge in flight into `closed` instead of a phantom eviction (see [Merge queues](#merge-queues)) |
 | `PR_SENTINEL_BASE_CHECK` | (on) | compare each failing check against the same workflow's latest run on the base branch, and report `base_failure` instead of `check_failure` when the base is already red; `0`/`false`/empty wakes on every failure as before (see [Failures inherited from the base branch](#failures-inherited-from-the-base-branch)) |
-| `PR_SENTINEL_BACKOFF_NUM` / `_DEN` | `3` / `2` | backoff multiplier (interval × num ÷ den each idle poll) |
+| `PR_SENTINEL_BACKOFF_NUM` / `_DEN` | `3` / `2` | backoff multiplier once checks have settled (interval × num ÷ den each poll) |
 | `PR_SENTINEL_AUTOALLOW` | (on) | auto-approve the plugin's own watcher launch so it isn't prompted by the base Bash permission; `0`/`false`/empty keeps the prompt (see below) |
 | `PR_SENTINEL_OVERLAP_ENABLED` | (on) | deny a `gh pr create` whose branch edits lines an open PR already changes; `false`/`0`/empty turns the check off, and with it the only GitHub query any hook makes (see [Overlapping pull requests](#overlapping-pull-requests)) |
 | `PR_SENTINEL_OVERLAP_IGNORE` | (unset) | colon-separated glob patterns the overlap check discounts — for the file every branch edits by construction, e.g. `docs/STATUS.md:CHANGELOG.md` |
@@ -534,6 +537,31 @@ green**, so it can't announce "ready for review" the moment it happens — the
 notice lands in the watcher's task output instead. And a watch that now spans
 human review time usually wants a larger `PR_SENTINEL_TIMEOUT` than the 1-hour
 default, or it will wake with a `timeout` event and need a relaunch.
+
+### How often it polls
+
+While checks are still running, the poll interval tracks **how long they have
+been running**: `age ÷ PR_SENTINEL_POLL_AGE_DIVISOR`, floored at
+`PR_SENTINEL_INTERVAL` and capped at `PR_SENTINEL_MAX_INTERVAL`. At the
+defaults, anything under five minutes old is polled every 30 seconds, a suite
+twenty minutes in every two minutes, and one past fifty minutes every five: a
+run that has been going forty minutes is unlikely to finish in the next four,
+and one that started seconds ago might finish now.
+
+A backoff on the *poll count* can't do that, because it widens on the number of
+polls already made: ten minutes into any watch, every poll would sit at
+`MAX_INTERVAL` — five minutes for a failed check to reach the session — whether
+CI had been running ten minutes or thirty seconds.
+
+Once nothing is pending, the multiplicative backoff takes over
+(`PR_SENTINEL_BACKOFF_NUM` / `_DEN` per poll, up to `MAX_INTERVAL`). That is the
+right shape there: past green under `PR_SENTINEL_WATCH_UNTIL=closed`, what the
+watch is waiting for is a conflict from someone else's merge, or a close — on
+nobody's schedule, and no age predicts them.
+
+Any poll that sees checks pending again starts the clock over, so a push that
+restarts CI restores the tight loop. Nothing is stored between watches and no
+extra query is made: the elapsed time is already in the watch.
 
 ### Green is not the same as ready
 
