@@ -14,7 +14,6 @@ next task from the top of the Queue. Maintenance rules: see
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
 | <a id="Q5"></a>Q5 | Don't nudge on a push whose target is the default branch | `bug` `hook` | 🔲 | S | A release push (`git push origin HEAD:main v0.9.0`) reads as a branch push, so the hook asks for a watcher on a branch that will never have a PR. Extend the classifier as #34 did for tag refspecs. |
-| <a id="Q6"></a>Q6 | Stop the release runbook pushing every local tag | `docs` `infra` | 🔲 | S | `docs/development/release-process.md` step 6 says `git push origin main --tags`, which publishes any stray local tag. Change it to name the one tag; branch-guard already objects to the blanket form. |
 | <a id="Q7"></a>Q7 | Fix the wrong issue citation in the Stop hook docstring | `docs` | 🔲 | S | `scripts/pr-sentinel-stop-hook.py:30` cites #34 for the `pr-link` false-positive blocks, but #34 is the tag-push nudge bug and never mentions `pr-link`. Find the right issue or drop the number. |
 
 ## Deferred
