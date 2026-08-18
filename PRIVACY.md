@@ -36,8 +36,8 @@ two hooks and the migration helper).
   - whether the PR currently holds a merge-queue entry (a GraphQL
     `mergeQueueEntry` read);
   - who removed the PR from the merge queue — the `__typename` and `login` of
-    the actor on the most recent `REMOVED_FROM_MERGE_QUEUE_EVENT` (a GraphQL
-    timeline read), so the report can tell a queue eviction from a person
+    the `actor` on the most recent `REMOVED_FROM_MERGE_QUEUE_EVENT` (a GraphQL
+    `timelineItems` read), so the report can tell a queue eviction from a person
     removing it deliberately. Read once, when that event is reported, never
     per poll. The event's own free-form text is not requested;
   - the PR's check results (`gh pr checks`);

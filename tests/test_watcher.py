@@ -37,6 +37,7 @@ Fixture rule: never use real PR URLs, hosts, or credentials — synthetic
 owner/repo and run ids exercise identical code paths with zero risk.
 """
 import os
+import re
 import subprocess
 import tempfile
 import textwrap
@@ -1227,6 +1228,62 @@ class WatcherCase(unittest.TestCase):
         # The one metadata query lists only the allowed, GitHub-controlled fields.
         self.assertIn("state,mergeStateStatus,baseRefName,headRefOid,url",
                       WATCHER.read_text(encoding="utf-8"))
+
+
+# --- PRIVACY.md must name what the watcher reads ---------------------------
+
+PRIVACY = REPO / "PRIVACY.md"
+
+# GraphQL names that traverse to a PR without naming anything read about it.
+_SCAFFOLDING = {"query", "repository", "pullRequest", "nodes"}
+
+
+def undisclosed_reads(script, privacy):
+    """The GraphQL names in `script` that `privacy` does not mention.
+
+    Two things count as naming a read: an object the query traverses into
+    (`mergeQueueEntry`, `timelineItems`, `actor`) and an enum value selecting
+    what to fetch (`REMOVED_FROM_MERGE_QUEUE_EVENT`). Those are the shapes a
+    new read arrives in, and #64 added one of each without touching PRIVACY.md.
+
+    Deliberately narrow. A `gh api` REST path assembled from shell variables is
+    invisible here, and so is a `--json` field PRIVACY.md describes in prose
+    ("head commit" for `headRefOid`). This catches the GraphQL surface, which
+    is where the reads worth disclosing have actually appeared.
+    """
+    names = set()
+    for block in re.findall(r"-f query='(.*?)'", script, re.DOTALL):
+        # An inline fragment's type condition restates the enum; skip it.
+        block = re.sub(r"\.\.\.\s*on\s+\w+", "", block)
+        names |= set(re.findall(r"\b[A-Z][A-Z0-9_]{3,}\b", block))
+        names |= {m for m in
+                  re.findall(r"\b([A-Za-z_]\w*)\s*(?:\([^)]*\))?\s*\{", block)
+                  if m not in _SCAFFOLDING}
+    return sorted(n for n in names
+                  if not re.search(r"\b%s\b" % re.escape(n), privacy))
+
+
+class PrivacyDisclosure(unittest.TestCase):
+    def test_every_graphql_read_is_named_in_privacy(self):
+        """The PR template asks whether a change adds a GitHub read, and that
+        box is self-attested — v0.9.0 shipped a merge-queue actor read the
+        policy never listed. This is the same question, asked by CI."""
+        missing = undisclosed_reads(
+            WATCHER.read_text(encoding="utf-8"),
+            PRIVACY.read_text(encoding="utf-8"))
+        self.assertEqual(
+            missing, [],
+            msg=("the watcher reads these and PRIVACY.md does not name them: "
+                 + ", ".join(missing)))
+
+    def test_the_check_can_fail(self):
+        """A clean report and a broken extraction look identical, so prove the
+        needle is found before trusting its absence."""
+        privacy = PRIVACY.read_text(encoding="utf-8").replace(
+            "REMOVED_FROM_MERGE_QUEUE_EVENT", "")
+        self.assertIn(
+            "REMOVED_FROM_MERGE_QUEUE_EVENT",
+            undisclosed_reads(WATCHER.read_text(encoding="utf-8"), privacy))
 
 
 if __name__ == "__main__":
