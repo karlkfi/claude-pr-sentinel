@@ -135,10 +135,18 @@ Everything it decides comes from local files the harness already points it at �
 the session's own transcript, plus each watcher's own output file (its path is in
 the completion notification). It identifies the session's own PRs from the
 transcript — the session's `gh pr create` correlated with the PR URL that
-command printed, plus any PR the session launched a watcher for. (The harness's
-`pr-link` records are deliberately ignored: the harness emits one for *any* PR
-URL the session surfaces, so a `gh pr view` or `gh pr comment` on someone else's
-PR would otherwise read as "opened this session".) It
+command printed, plus any PR the session launched a watcher for. When that URL
+never reached the transcript — the create sent its output to a log, or it was
+truncated — one more route resolves the number, so the backstop does not go
+quiet for the same reason the nudge did: the harness's own `pr-link` record,
+but only one emitted inside that create's own tool call *and* naming a PR the
+transcript has not mentioned before. (Both conditions carry weight. The harness
+emits a `pr-link` for *any* PR URL the session surfaces, and re-emits an
+already-linked one after unrelated commands, so a bare record would read a `gh
+pr view` on someone else's PR as "opened this session".) The route is
+best-effort: the records the harness emits are overwhelmingly for the session's
+own repository, so a create run against a *different* repo leaves nothing to
+correlate and the backstop stays silent. It
 treats a watcher as live when its background-task launch has no completion
 notification yet, and reads the watcher's output file directly to see whether the
 PR was handed off — so that signal holds whether the session surfaced the output
@@ -629,7 +637,9 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
   unrecognised failure can produce a nudge for a PR that doesn't exist. The
   cost is that a create printing a URL the hook can't parse — anything but
   `https://github.com/<owner>/<repo>/pull/<n>` — goes unnudged, and a later
-  push to the branch is what brings the nudge back.
+  push to the branch is what brings the nudge back. The Stop backstop does not
+  rest on that parse alone: a correlated `pr-link` resolves the create whose
+  output went to a log, so the two don't fall silent together.
 - **`git push` without a PR URL** can't resolve the PR number locally (the hook
   makes no network call), so the nudge asks the session to resolve it — and to
   ignore the nudge if the branch has no open PR at all. A PR created earlier

@@ -84,8 +84,10 @@ def tool_result(text, tool_id="toolu_1"):
 def pr_link(number):
     """A harness `pr-link` record. The harness emits one for ANY PR URL the
     session surfaces (a `gh pr view`/`gh pr comment` on someone else's PR
-    included), so the hook must treat it as "referenced", never "opened" —
-    regression tests below assert it does NOT confer ownership."""
+    included) and re-emits an already-linked PR after unrelated commands, so on
+    its own it marks "referenced", never "opened" — regression tests below
+    assert it confers no ownership except inside a `gh pr create`'s own window,
+    for a PR number the transcript has not mentioned before."""
     return {"type": "pr-link", "prNumber": number,
             "prUrl": f"https://github.com/o/r/pull/{number}", "prRepository": "o/r"}
 
@@ -96,6 +98,20 @@ def created_pr(number, tool_id="toolu_c"):
     return [
         assistant_bash("gh pr create --fill", tool_id),
         tool_result(f"https://github.com/o/r/pull/{number}\n", tool_id),
+    ]
+
+
+def created_pr_redirected(number, tool_id="toolu_c"):
+    """A `gh pr create` that DID open a PR but whose URL never reaches the
+    transcript — output redirected to a log, only the exit code echoed. The
+    harness still emits its `pr-link`, and on this shape it lands AFTER the
+    tool_result and before the next tool call: the ordering measured on four
+    real redirected creates, in three repositories."""
+    return [
+        assistant_bash("gh pr create --fill > tmp/pr.log 2>&1; echo \"EXIT=$?\"",
+                       tool_id),
+        tool_result("EXIT=0\n", tool_id),
+        pr_link(number),
     ]
 
 
@@ -292,6 +308,60 @@ class NeedsWatcherLogic(unittest.TestCase):
         # same record as creating one — so on its own it must never register a
         # PR as session-owned.
         self.assertEqual(needs([pr_link(42)]), set())
+
+    def test_pr_link_in_create_window_resolves_a_redirected_create(self):
+        # #60: the create really opened a PR, but its output went to a log, so
+        # the URL never reaches the transcript and the PostToolUse nudge stayed
+        # silent. The harness's own `pr-link`, correlated with that create's
+        # tool call, is what keeps the backstop from failing for the same
+        # reason the nudge did.
+        self.assertEqual(needs(created_pr_redirected(42)), {"42"})
+
+    def test_pr_link_before_the_tool_result_also_resolves(self):
+        # The other ordering the harness produces: on a create whose URL IS
+        # visible it emits the record between the tool_use and the tool_result.
+        # Nothing rests on the record there — the URL already resolves it — but
+        # the window spans both sides of the result so neither ordering is a
+        # special case.
+        self.assertEqual(needs([
+            assistant_bash("gh pr create --fill > tmp/pr.log 2>&1", "toolu_c"),
+            pr_link(42),
+            tool_result("EXIT=0\n", "toolu_c"),
+        ]), {"42"})
+
+    def test_stale_pr_link_in_create_window_does_not_confer_ownership(self):
+        # The failure mode the novelty condition exists for: the session viewed
+        # someone else's PR, so the harness keeps re-emitting its `pr-link` —
+        # including inside the window of a later create that opened nothing.
+        # #99 was mentioned before that create, so it is not this create's PR.
+        self.assertEqual(needs([
+            assistant_bash("gh pr view 99 --repo o/r", "toolu_v"),
+            tool_result("url: https://github.com/o/r/pull/99\n", "toolu_v"),
+            pr_link(99),
+            assistant_bash("gh pr create --fill > tmp/pr.log 2>&1", "toolu_c"),
+            pr_link(99),
+            tool_result("EXIT=1\n", "toolu_c"),
+        ]), set())
+
+    def test_pr_link_after_a_later_tool_call_does_not_confer_ownership(self):
+        # The window closes at the next tool call, so a `pr-link` emitted after
+        # some unrelated command is a re-emission, not this create's result.
+        self.assertEqual(needs([
+            assistant_bash("gh pr create --fill > tmp/pr.log 2>&1", "toolu_c"),
+            tool_result("EXIT=0\n", "toolu_c"),
+            assistant_bash("git status", "toolu_s"),
+            pr_link(42),
+            tool_result("clean\n", "toolu_s"),
+        ]), set())
+
+    def test_redirected_create_still_needs_the_pr_link(self):
+        # Without the harness record there is nothing local to resolve the
+        # number from, and the hook stays silent rather than guessing (the
+        # remaining #60 rows: a non-github.com host, or output truly discarded).
+        self.assertEqual(needs([
+            assistant_bash("gh pr create --fill > /dev/null 2>&1", "toolu_c"),
+            tool_result("", "toolu_c"),
+        ]), set())
 
     def test_foreign_pr_viewed_and_commented_does_not_block(self):
         # The reported false positive: the session views and comments on a PR

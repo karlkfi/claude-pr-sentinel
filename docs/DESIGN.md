@@ -481,11 +481,27 @@ PR body or comments**:
   session's own `gh pr create` correlated with the PR URL `gh` printed, plus any
   PR the session launched a watcher for (babysitting a PR is taking
   responsibility for it, which covers a session resumed onto a branch whose PR
-  an earlier session opened). The harness's `pr-link` record is deliberately
-  **not** used as an ownership signal: the harness emits one for *any* PR URL
+  an earlier session opened). A create whose URL never reached the transcript
+  — output redirected to a log, or truncated — has one more route to a number:
+  the harness's own `pr-link` record. That record is **not** an ownership signal
+  on its own, and is never read as one: the harness emits it for *any* PR URL
   the session surfaces, so a `gh pr view`/`gh pr comment` on someone else's PR
-  produces the same record as a create — treating it as "opened this session"
+  produces the same record as a create, and it re-emits an already-linked PR
+  after unrelated commands. Treating a bare record as "opened this session"
   caused false-positive blocks over PRs the session had merely commented on.
+  What is read is a record meeting both conditions: emitted inside that
+  create's own tool call, and naming a PR number the transcript has not
+  mentioned before it. The first keeps a foreign PR's record out; the second
+  keeps a *stale* re-emission from being read as the result of a create that
+  opened nothing. Without this route the backstop resolved ownership from the
+  same PR URL the nudge does, so a create that printed no parseable URL defeated
+  both at once — nudge and backstop failing for one reason is not a backstop.
+  The route is best-effort, and its limit is measured: across 11,191 `pr-link`
+  records in local transcripts, 94 named a repository other than the session's
+  own, and a redirected create run against another repo produced none at all.
+  So this closes the redirected create in the session's own repo — the common
+  shape, because redirecting to a file is what a session does when a pipeline
+  would hide the exit status — and leaves the cross-repo one open.
 - **Detect a live watcher** from the same transcript: a `run_in_background`
   launch of `pr-sentinel-watch.sh <PR>` records a `tool_use` id, and when that
   background task exits the harness records a `<task-notification>` carrying the
