@@ -215,8 +215,10 @@ These are the point of the plugin, not a footnote.
    membership (`gh pr view --json state,mergeStateStatus,baseRefName,headRefOid,url`,
    `gh pr checks`, a workflow run's `conclusion` / `workflow_id`, the base
    branch's latest run of that workflow (`conclusion`, `id`, `head_sha`,
-   `path`), and a GraphQL
-   `mergeQueueEntry` read). It never requests, and never parses, the PR
+   `path`), a GraphQL
+   `mergeQueueEntry` read, and — only when reporting `dequeued` — the actor's
+   type and login on the PR's latest `REMOVED_FROM_MERGE_QUEUE_EVENT`, never
+   that event's free-form `reason`). It never requests, and never parses, the PR
    **body**, PR **review comments**, or **issue comments** — the exact channel the built-in
    autofix trigger uses (#66097). The only free-form text it surfaces is the
    session's **own** CI log excerpts, handled as semi-untrusted data as above.
@@ -421,14 +423,14 @@ action, same trust boundary as ever.
 Mechanism notes, in the order they were forced:
 
 - **Membership is GraphQL-only.** `gh pr view` has no queue field
-  (`mergeQueueEntry` is not in its `--json` list), so this is the watcher's one
-  query outside `gh pr view`/`gh pr checks` — a second API call per poll, still
-  GitHub-controlled metadata. The REST issue-timeline events were rejected:
-  they need pagination, and `removed_from_merge_queue` also fires on every
-  successful queue merge, which overcounts evictions severalfold. The PR's
-  canonical `url` joined the `gh pr view` field list so the GraphQL query can
-  be addressed (owner/repo/number) when the watcher was launched with a bare
-  PR number.
+  (`mergeQueueEntry` is not in its `--json` list), so this is a query outside
+  `gh pr view`/`gh pr checks` — a second API call per poll, still
+  GitHub-controlled metadata. The REST issue-timeline events were rejected as
+  the *detector*: they need pagination, and `removed_from_merge_queue` also
+  fires on every successful queue merge, which overcounts evictions
+  severalfold. The PR's canonical `url` joined the `gh pr view` field list so
+  the GraphQL query can be addressed (owner/repo/number) when the watcher was
+  launched with a bare PR number.
 - **While queued, branch-state events are suspended.** The queue owns the PR:
   every remedy `conflict`/`behind` prescribes is a push, and any push to a
   queued PR evicts it. A queued PR whose base has advanced reads `BEHIND` —
@@ -448,6 +450,19 @@ Mechanism notes, in the order they were forced:
   than un-suspending on a blip. Detection therefore needs the same run to have
   seen the PR queued — a watcher launched after an eviction has no before-state
   and stays silent about it.
+- **Who removed it is a third query, made once.** The detector above sees the
+  entry vanish; it cannot see *why*, and the first report asserted eviction
+  regardless — wrong whenever somebody had dequeued the PR deliberately, which
+  GitHub's `GH006` rejection of a push to a queued branch makes the documented
+  way to update one (#63). The GraphQL timeline answers it:
+  `timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT])` needs
+  no pagination, and the overcount that ruled the same event out as a detector
+  does not apply to reading it once a removal has already been confirmed. `Bot`
+  is the queue, and keeps the eviction wording and its cause guesses; any other
+  actor gets a report with no causal claim, whose next action is the waiting
+  push rather than a re-read of the checks. The read happens inside
+  `emit_dequeued`, so the poll loop still costs two calls per cycle, and an
+  actor that cannot be read names both possibilities rather than picking one.
 
 `dequeued` is deliberately **not** in the Stop hook's concluded set: an evicted
 PR is the opposite of handed off, and the backstop should keep holding the

@@ -173,7 +173,7 @@ needed:
 | `mergeStateStatus == DIRTY` | **conflict** | rebase onto `<base>` (default), resolve, `git push --force-with-lease`, relaunch — or merge (`PR_SENTINEL_HEAL=merge`) |
 | `mergeStateStatus == BEHIND` | **behind** | rebase onto `<base>` (default) and force-push with lease, relaunch — or merge to fast-forward (`PR_SENTINEL_HEAL=merge`) |
 | the PR holds a **merge-queue entry** | *(keep polling, hands off)* | nothing — the queue is merging it, and any push to a queued PR evicts it (see [Merge queues](#merge-queues)) |
-| the queue entry is **gone** but the PR is still open, for `PR_SENTINEL_DEQUEUED_POLLS` polls | **dequeued** | the queue evicted it: heal whatever the report names, then hand back to a human to **re-enqueue** — never enqueue or merge yourself |
+| the queue entry is **gone** but the PR is still open, for `PR_SENTINEL_DEQUEUED_POLLS` polls | **dequeued** | heal whatever the report names, then hand back to a human to **re-enqueue** — never enqueue or merge yourself. The report names who removed it: the queue (an eviction) or a person (deliberate, often to allow a push) |
 | all checks green, no conflict, a computed `mergeStateStatus` (not `BLOCKED`, not `UNKNOWN`), for `PR_SENTINEL_GREEN_POLLS` polls running | **ready** | hand back to a human for merge review — **never auto-merge** |
 | the same, **and** `PR_SENTINEL_WATCH_UNTIL=closed` | *(notice: **ready_watching**, keep polling)* | nothing — the watch continues past green (see [Configuration](#configuration)) |
 | all checks green but `mergeStateStatus == BLOCKED` for `PR_SENTINEL_BLOCKED_POLLS` polls running | **blocked** | don't treat it as green: a required check may never have registered, or an approval is outstanding (see [Green is not the same as ready](#green-is-not-the-same-as-ready)) |
@@ -328,8 +328,8 @@ comment-channel exposure.
 These are the point of the plugin.
 
 - **Never ingest human/attacker-writable channels.** The watcher queries only
-  GitHub-controlled check metadata, mergeable state, and merge-queue
-  membership. It never requests or
+  GitHub-controlled check metadata, mergeable state, merge-queue membership,
+  and the login of whoever removed the PR from the queue. It never requests or
   parses the PR **body**, PR **review comments**, or **issue comments** — the
   exact channel the built-in "Autofix" trigger uses
   ([#66097](https://github.com/anthropics/claude-code/issues/66097)). The only
@@ -577,9 +577,10 @@ the PR held a merge-queue entry on an earlier poll of this watch and the entry
 is gone while the PR is still open.
 
 `gh pr view` exposes no queue field, so membership is one extra GraphQL read
-(`mergeQueueEntry`) per poll — the watcher's only query beyond `gh pr view` /
-`gh pr checks`, still GitHub-controlled metadata. Three behaviors follow from
-tracking it:
+(`mergeQueueEntry`) per poll, and naming who removed the PR is one more, made
+only when `dequeued` is reported — the watcher's only queries beyond
+`gh pr view` / `gh pr checks`, still GitHub-controlled metadata. Four
+behaviors follow from tracking it:
 
 - **While the PR is queued, the watcher keeps its hands off.** The queue owns
   the PR: every branch-state remedy (`conflict`, `behind`) prescribes a push,
@@ -596,6 +597,17 @@ tracking it:
   the `PR_SENTINEL_HEAL`-appropriate heal commands when the branch is `DIRTY`
   or `BEHIND`, and ends with the handback: re-enqueueing starts a merge, so it
   stays a **human** action — the session must never re-enqueue or merge.
+- **It says who removed the PR, and only guesses a cause when that is the
+  queue.** One more GraphQL read — the actor on the most recent
+  `REMOVED_FROM_MERGE_QUEUE_EVENT`, made once at report time, not per poll —
+  separates two different situations. `github-merge-queue` is a `Bot`, so the
+  queue acted: the report keeps the eviction wording and its usual causes (a
+  sibling merge, a group reset). A person's login means somebody chose to
+  remove it, which is the documented way to update a queued branch, since
+  GitHub rejects a push to one (`GH006`). That report claims no cause, and its
+  next action is the waiting push rather than a re-read of the checks. If the
+  actor can't be read, the report names **both** possibilities and asserts
+  neither.
 
 `dequeued` is a wake, not a handoff: the Stop hook keeps holding the session
 responsible for the PR until it is healed, re-watched, and handed back.
@@ -683,7 +695,9 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
   branch-dirtying eviction). And if the membership query fails — say a token
   that cannot run GraphQL — queue tracking disables itself and the watcher
   behaves exactly as it did before the feature (see
-  [Merge queues](#merge-queues)).
+  [Merge queues](#merge-queues)). The same token can't name who removed the PR
+  either, so a `dequeued` report from a partially-failing query names both
+  possible causes instead of one.
 - **An inherited failure is matched by workflow, not by check.** The base
   comparison asks whether the *workflow* is red on the base, so a workflow whose
   jobs fail for one reason on `main` and a different reason on the PR reads as
