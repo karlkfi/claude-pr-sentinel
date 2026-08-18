@@ -496,12 +496,24 @@ PR body or comments**:
   opened nothing. Without this route the backstop resolved ownership from the
   same PR URL the nudge does, so a create that printed no parseable URL defeated
   both at once — nudge and backstop failing for one reason is not a backstop.
-  The route is best-effort, and its limit is measured: across 11,191 `pr-link`
+  That route is best-effort, and its limit is measured: across 11,191 `pr-link`
   records in local transcripts, 94 named a repository other than the session's
   own, and a redirected create run against another repo produced none at all.
-  So this closes the redirected create in the session's own repo — the common
-  shape, because redirecting to a file is what a session does when a pipeline
-  would hide the exit status — and leaves the cross-repo one open.
+  Which is why there is a third route, and the one that carries most of the
+  weight: **read the file the create redirected its output to**. Redirecting to
+  a file is what a session does when a pipeline would hide the exit status, so
+  it is the common shape rather than an exotic one, and `gh` wrote the URL there
+  in full. Of 346 file-redirected creates in local transcripts, 221 still had
+  their file months later and 215 of those yielded a PR URL; at stop time the
+  file was written seconds earlier, so that is a floor rather than a rate. Three
+  guards keep it honest: the path is taken only from the create's own command
+  string (model-authored — never tool output, never CI-log text) and only when
+  it needs no expansion; the read is byte-capped; and a file whose mtime
+  predates the create is ignored, because log paths get reused and a failed
+  create must not inherit the previous run's URL. Because this route recovers
+  the whole URL rather than a number, the block names the URL — which is how a
+  PR in another repository gets a watcher pointed at the right repo, the case
+  the `pr-link` route cannot reach.
 - **Detect a live watcher** from the same transcript: a `run_in_background`
   launch of `pr-sentinel-watch.sh <PR>` records a `tool_use` id, and when that
   background task exits the harness records a `<task-notification>` carrying the

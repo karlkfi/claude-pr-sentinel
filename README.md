@@ -131,9 +131,10 @@ The two shapes that reach it differ, and the notice says which one it is:
   local gate before pushing, so the remote head *cannot* have moved yet. A
   relaunch here has no move available at all.
 
-Everything it decides comes from local files the harness already points it at —
-the session's own transcript, plus each watcher's own output file (its path is in
-the completion notification). It identifies the session's own PRs from the
+Everything it decides comes from local files — the session's own transcript,
+each watcher's own output file (its path is in the completion notification), and
+the file a `gh pr create` redirected its output to (its path is in the create's
+own command string). It identifies the session's own PRs from the
 transcript — the session's `gh pr create` correlated with the PR URL that
 command printed, plus any PR the session launched a watcher for. When that URL
 never reached the transcript — the create sent its output to a log, or it was
@@ -143,10 +144,16 @@ but only one emitted inside that create's own tool call *and* naming a PR the
 transcript has not mentioned before. (Both conditions carry weight. The harness
 emits a `pr-link` for *any* PR URL the session surfaces, and re-emits an
 already-linked one after unrelated commands, so a bare record would read a `gh
-pr view` on someone else's PR as "opened this session".) The route is
-best-effort: the records the harness emits are overwhelmingly for the session's
-own repository, so a create run against a *different* repo leaves nothing to
-correlate and the backstop stays silent. It
+pr view` on someone else's PR as "opened this session".)
+
+Failing that, it reads the file the create redirected its own output to —
+`gh pr create … > out.log` printed the URL, just not where the transcript could
+see it. The path comes from the create's own command string, the read is
+byte-capped, and a file older than the create is ignored, since log paths get
+reused and a failed create must not inherit the previous run's URL. This is the
+route that resolves a PR in a *different* repository from the one the session is
+sitting in: it recovers the whole URL, so the launch command names the URL rather
+than a bare number, which is what sends the watcher to the right repo. It
 treats a watcher as live when its background-task launch has no completion
 notification yet, and reads the watcher's output file directly to see whether the
 PR was handed off — so that signal holds whether the session surfaced the output
@@ -638,8 +645,9 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
   cost is that a create printing a URL the hook can't parse — anything but
   `https://github.com/<owner>/<repo>/pull/<n>` — goes unnudged, and a later
   push to the branch is what brings the nudge back. The Stop backstop does not
-  rest on that parse alone: a correlated `pr-link` resolves the create whose
-  output went to a log, so the two don't fall silent together.
+  rest on that parse alone: a correlated `pr-link`, and the create's own
+  redirected output file, resolve the PR the transcript never showed — so the
+  two don't fall silent together.
 - **`git push` without a PR URL** can't resolve the PR number locally (the hook
   makes no network call), so the nudge asks the session to resolve it — and to
   ignore the nudge if the branch has no open PR at all. A PR created earlier

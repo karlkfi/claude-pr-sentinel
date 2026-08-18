@@ -173,10 +173,21 @@ def needs(entries):
 
 
 def analyze(entries):
-    """(block, dampened) from a synthetic transcript."""
+    """(block, dampened) from a synthetic transcript. `_analyze` also returns the
+    resolved-URL map; `analyze_urls` is the accessor for it."""
     path = write_transcript(entries)
     try:
-        return hook._analyze(path)
+        return hook._analyze(path)[:2]
+    finally:
+        os.unlink(path)
+
+
+def analyze_urls(entries):
+    """{PR: full URL} for PRs the hook resolved from a create's redirected
+    output file."""
+    path = write_transcript(entries)
+    try:
+        return hook._analyze(path)[2]
     finally:
         os.unlink(path)
 
@@ -301,6 +312,47 @@ class ClassifierUnit(unittest.TestCase):
         self.assertIn("#42", hook.build_warning({"42": "something_new"}))
 
 
+class RedirectPathUnit(unittest.TestCase):
+    """`gh pr create > out.log` prints the URL to a file instead of the
+    transcript. These pin which redirect shapes the hook will follow."""
+
+    def test_absolute_target(self):
+        self.assertEqual(
+            hook._create_redirect_path(
+                'cd /w/other-repo && gh pr create --title x --body-file /b.md'
+                ' > /s/pr.txt 2>&1; echo "EXIT=$?"', "/session/cwd"),
+            "/s/pr.txt")
+
+    def test_relative_target_resolves_against_a_leading_cd(self):
+        self.assertEqual(
+            hook._create_redirect_path(
+                'cd /w/other-repo && gh pr create --fill > out.txt 2>&1',
+                "/session/cwd"),
+            "/w/other-repo/out.txt")
+
+    def test_relative_target_resolves_against_the_entry_cwd(self):
+        self.assertEqual(
+            hook._create_redirect_path("gh pr create --fill > tmp/pr.log 2>&1",
+                                       "/session/cwd"),
+            "/session/cwd/tmp/pr.log")
+
+    def test_unexpandable_target_is_declined(self):
+        # The hook cannot expand `$S`, and guessing would read the wrong file.
+        self.assertIsNone(hook._create_redirect_path(
+            'gh pr create --fill > "$S/pr.log" 2>&1', "/session/cwd"))
+
+    def test_devnull_and_no_redirect_are_declined(self):
+        self.assertIsNone(hook._create_redirect_path(
+            "gh pr create --fill > /dev/null 2>&1", "/session/cwd"))
+        self.assertIsNone(hook._create_redirect_path(
+            "gh pr create --fill", "/session/cwd"))
+
+    def test_redirect_on_a_later_command_is_not_the_creates(self):
+        # Only the create's own simple command counts.
+        self.assertIsNone(hook._create_redirect_path(
+            "gh pr create --fill; git log > /tmp/log.txt", "/session/cwd"))
+
+
 class NeedsWatcherLogic(unittest.TestCase):
     def test_pr_link_record_alone_does_not_block(self):
         # Regression: the harness emits `pr-link` for ANY PR URL the session
@@ -328,6 +380,69 @@ class NeedsWatcherLogic(unittest.TestCase):
             pr_link(42),
             tool_result("EXIT=0\n", "toolu_c"),
         ]), {"42"})
+
+    def test_redirected_output_file_resolves_the_pr(self):
+        # #60, the shape the harness emits no `pr-link` for: the create printed
+        # its URL into the log it was redirected to. The hook reads that file.
+        with real_outfile("https://github.com/o/r/pull/42\n") as path:
+            self.assertEqual(needs([
+                assistant_bash(f"gh pr create --fill > {path} 2>&1; "
+                               f'echo "EXIT=$?"', "toolu_c"),
+                tool_result("EXIT=0\n", "toolu_c"),
+            ]), {"42"})
+
+    def test_redirected_file_resolves_a_pr_in_another_repository(self):
+        # The cross-repo create: the session sits in one repo and opens a PR in
+        # another. The bare number would send the watcher to the wrong repo, so
+        # the resolved URL is what the block has to name.
+        url = "https://github.com/other-owner/other-repo/pull/173"
+        with real_outfile(url + "\n") as path:
+            entries = [
+                assistant_bash(f"cd /w/other-repo && gh pr create --fill "
+                               f"> {path} 2>&1", "toolu_c"),
+                tool_result("EXIT=0\n", "toolu_c"),
+            ]
+            self.assertEqual(needs(entries), {"173"})
+            self.assertEqual(analyze_urls(entries), {"173": url})
+            self.assertIn(url, hook.build_reason({"173"}, {"173": url}))
+
+    def test_redirected_file_without_a_url_resolves_nothing(self):
+        # A create that opened nothing — `--help`, a failure, `--dry-run` — puts
+        # no URL in the file, so the file being readable proves nothing on its
+        # own.
+        with real_outfile("pull request create failed: HTTP 503\n") as path:
+            self.assertEqual(needs([
+                assistant_bash(f"gh pr create --fill > {path} 2>&1", "toolu_c"),
+                tool_result("EXIT=1\n", "toolu_c"),
+            ]), set())
+
+    def test_redirect_file_older_than_the_create_is_ignored(self):
+        # Log paths get reused: `tmp/prcreate.log` in the same worktree, run
+        # after run. A create that failed must not read the PREVIOUS run's URL
+        # and claim a PR this session never opened.
+        with real_outfile("https://github.com/o/r/pull/42\n") as path:
+            entry = assistant_bash(f"gh pr create --fill > {path} 2>&1",
+                                   "toolu_c")
+            entry["timestamp"] = "2099-01-01T00:00:00.000Z"   # long after mtime
+            self.assertEqual(needs([entry, tool_result("EXIT=1\n", "toolu_c")]),
+                             set())
+
+    def test_redirect_file_newer_than_the_create_resolves(self):
+        # The same guard the other way: the file was written by THIS create.
+        with real_outfile("https://github.com/o/r/pull/42\n") as path:
+            entry = assistant_bash(f"gh pr create --fill > {path} 2>&1",
+                                   "toolu_c")
+            entry["timestamp"] = "2000-01-01T00:00:00.000Z"   # long before mtime
+            self.assertEqual(needs([entry, tool_result("EXIT=0\n", "toolu_c")]),
+                             {"42"})
+
+    def test_missing_redirect_file_resolves_nothing(self):
+        # The file is gone (or was never written): fail open, no block.
+        self.assertEqual(needs([
+            assistant_bash("gh pr create --fill > /nonexistent/dir/pr.log 2>&1",
+                           "toolu_c"),
+            tool_result("EXIT=0\n", "toolu_c"),
+        ]), set())
 
     def test_stale_pr_link_in_create_window_does_not_confer_ownership(self):
         # The failure mode the novelty condition exists for: the session viewed

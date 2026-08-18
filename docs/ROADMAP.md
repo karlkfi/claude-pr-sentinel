@@ -15,10 +15,12 @@ is what turns "advisory" into "reliable."
 
 The two open problems were solved from the session's own transcript alone: the
 PR is identified from the session's own `gh pr create` output URL and its
-watcher launches, with the harness's `pr-link` record as a narrow fallback when
-the create's URL never reached the transcript (a bare record marks any PR the
+watcher launches, with two fallbacks for a create whose URL never reached the
+transcript — the harness's `pr-link` record (a bare record marks any PR the
 session *references*, not ones it opened, so it counts only inside that create's
-own tool call and only for a PR not mentioned before it), and a watcher is
+own tool call and only for a PR not mentioned before it), and the file the create
+redirected its output to, which also recovers a PR in another repository — and a
+watcher is
 treated as live only while its
 `run_in_background` launch has no matching `<task-notification>` completion
 record — no network call, no process table, and no PR body/comment ingestion.
