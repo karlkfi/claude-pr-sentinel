@@ -2,7 +2,16 @@
 """PreToolUse hook: DENY foreground CI-poll commands and ALLOW the plugin's own
 background watcher launch, pointing the session at the watcher either way.
 
-Fires on a `Bash` command the session is *about to run*. Two branches:
+Fires on a `Bash` command the session is *about to run*. Three branches:
+
+* **Duplicate deny** — if the command is this plugin's own watcher launch for a
+  PR this session already has a live watcher on, it returns a `deny` naming the
+  running task. One watcher per PR is enough: it re-reads the PR head on every
+  poll, so it covers the latest push, and a second one wakes the session twice
+  for every event. The deny names the `TaskStop` call that stops the incumbent,
+  so restarting the watch stays available. Off under `PR_SENTINEL_DISABLE=1`
+  and under the `PR_SENTINEL_OVERRIDE` escape hatch; an unreadable transcript
+  or an unrecognised launch shape defers, never denies.
 
 * **Auto-allow** — if the command is *unambiguously* this plugin's own watcher
   launch (`bash <own-watcher> <PR>`), it returns a PreToolUse `allow` so the
@@ -37,8 +46,9 @@ as well as in the hook's own environment; the inline form is the only one a
 session can reach from inside a Bash call, and it's the form the deny message
 names. This mirrors prod-guard's `PROD_GUARD_OVERRIDE`.
 
-The hook is PURELY LOCAL: it inspects only the proposed command string and
-never makes a network call or reads any PR text.
+The hook is PURELY LOCAL: it inspects the proposed command string and reads
+the session transcript for the watchers this session launched. It never makes a
+network call and never reads any PR text.
 
 Fail modes: defers silently (emits nothing) on ANY uncertainty — non-Bash tool,
 unparseable command/input, a shape it doesn't recognise. It NEVER denies a
@@ -52,6 +62,13 @@ import os
 import re
 import shlex
 import sys
+
+# A second watcher on a PR one is already watching wakes the session twice for
+# every event and polls GitHub twice as often. The live-watcher read is the
+# same one the Stop hook uses; the path insert makes the sibling import work
+# whether this file is run as a script or loaded by path (as the tests load it).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pr_sentinel_watchers as watchers   # noqa: E402
 
 # Shell keywords that can lead a simple-command group but aren't the command
 # word itself (e.g. `do sleep 5`). Stripped before reading the leading word.
@@ -95,34 +112,42 @@ def _expected_watcher_path():
         return None
 
 
-def is_watcher_launch(command):
-    """True ONLY if `command` is unambiguously `bash <own-watcher> <PR>`:
+def watcher_launch_pr(command):
+    """The PR number if `command` is unambiguously `bash <own-watcher> <PR>`:
 
       * no shell operator / redirect / substitution / glob (`_AUTOALLOW_FORBIDDEN`)
       * exactly three tokens, `argv[0]` basename `bash`
       * `argv[1]` realpath-equals this plugin's own watcher script
       * `argv[2]` a bare positive integer (the PR number)
 
-    Any doubt returns False so the caller defers rather than allows."""
+    Any doubt returns None so the caller defers rather than allowing — or, for
+    the duplicate check, rather than denying."""
     if any(c in _AUTOALLOW_FORBIDDEN for c in command):
-        return False
+        return None
     try:
         argv = shlex.split(command)  # posix; respects quotes
     except ValueError:
-        return False
+        return None
     if len(argv) != 3:
-        return False
+        return None
     if os.path.basename(argv[0]) != 'bash':
-        return False
+        return None
     if not re.match(r'\A[1-9][0-9]*\Z', argv[2]):
-        return False
+        return None
     expected = _expected_watcher_path()
     if expected is None:
-        return False
+        return None
     try:
-        return os.path.realpath(argv[1]) == expected
+        if os.path.realpath(argv[1]) != expected:
+            return None
     except OSError:
-        return False
+        return None
+    return argv[2]
+
+
+def is_watcher_launch(command):
+    """True if `command` is this plugin's own watcher launch."""
+    return watcher_launch_pr(command) is not None
 
 
 def simple_commands(command):
@@ -296,6 +321,20 @@ def build_reason(shape):
     )
 
 
+def build_duplicate_reason(pr, task_ids):
+    """The reason attached to a duplicate-launch deny. Names the running task so
+    the session can stop it in one call rather than being left with no move."""
+    return (
+        f'pr-sentinel: refusing a SECOND watcher on #{pr} — this session '
+        f'already has one running, and it re-reads the PR head on every poll, '
+        f'so it covers the latest push. Two watchers wake this session twice '
+        f'for every event and poll GitHub twice as often. Do nothing: the '
+        f'running watcher will wake you. '
+        + watchers.stop_hint(pr, task_ids)
+        + ' If you genuinely need a second one, re-run with an inline '
+          'PR_SENTINEL_OVERRIDE=<reason> prefix.')
+
+
 def build_allow_reason():
     """The reason attached to the watcher-launch auto-allow."""
     return (
@@ -317,6 +356,24 @@ def main():
     command = tool_input.get('command') or ''
     if not command.strip():
         return
+
+    # A launch for a PR this session is already watching is pure duplication;
+    # deny it and name the task that would stop the incumbent. Checked before
+    # the auto-allow, which would otherwise wave the duplicate straight through.
+    # Fail-safe both ways: an unrecognised launch shape yields no PR number, and
+    # an unreadable transcript yields no live watchers, so either defers.
+    launch_pr = watcher_launch_pr(command)
+    if (launch_pr and os.environ.get('PR_SENTINEL_DISABLE') != '1'
+            and not os.environ.get('PR_SENTINEL_OVERRIDE', '').strip()
+            and not inline_override(command)):
+        live = watchers.live_watchers(data.get('transcript_path'))
+        if launch_pr in live:
+            print(json.dumps({'hookSpecificOutput': {
+                'hookEventName': 'PreToolUse',
+                'permissionDecision': 'deny',
+                'permissionDecisionReason': build_duplicate_reason(
+                    launch_pr, live[launch_pr])}}))
+            return
 
     # Auto-allow the plugin's OWN watcher launch (default on) so the session
     # isn't prompted by the base Bash permission on every (re)launch. The match

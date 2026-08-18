@@ -49,6 +49,8 @@ nudge to (re)launch the watcher after a PR-opening or branch-push command:
 | `gh pr create --fill` (output has a PR URL) | **nudge** — launch watcher for `#N` |
 | `git push -u origin claude/foo` | **nudge** — launch watcher for this branch's PR |
 | `git push origin HEAD && gh pr create` | **nudge** — PR create wins |
+| a push whose PR already has a **live watcher** in this session | **stand down** — don't launch a second; names the `TaskStop` call that would restart the running one instead |
+| a push with no resolvable PR number, while some PR **is** watched | **nudge**, naming the already-watched PRs so a covered branch doesn't get a second watcher |
 | `gh pr create --help` · `--web` · `--dry-run`, or any create whose output has no PR URL | silent (no PR was opened) |
 | `git push … ` that printed `! [rejected]` / `error:` | silent (push failed) |
 | `gh pr create` · `git push` that printed `HTTP 503` (or any 4xx/5xx) | silent (the API call failed) |
@@ -74,6 +76,7 @@ fix-it at the background watcher. Unlike the advisory nudge, a deny is
 | any of the above submitted with `run_in_background` | allow (deferred — a backgrounded call can't block the session) |
 | any of the above with an inline `PR_SENTINEL_OVERRIDE=<reason>` prefix (or the variable set in the session env) | **allow** (deferred to normal permissions) |
 | `bash …/pr-sentinel-watch.sh N` (the plugin's own watcher) | **allow** — auto-approved (no base Bash prompt), gated by `PR_SENTINEL_AUTOALLOW` |
+| the same launch for a PR this session is **already watching** | **deny** — one watcher is enough; the reason names the `TaskStop` call that frees the PR for a fresh one |
 | `gh pr checks` · `gh run view` | allow (not a blocking poll — deferred to normal permissions) |
 | a poll loop around a non-`gh` subject (`until curl …; do sleep …; done`) | allow (not CI polling — not this plugin's business) |
 | a bare `sleep N` (no loop) · unrecognised shape | allow (fail-open — never deny when unsure) |
@@ -98,6 +101,16 @@ only a single simple `bash <this-plugin's-watch.sh> <PR-number>` (no operators,
 redirects, substitutions, or globs; the script path is compared by resolved
 realpath) is approved; anything else falls through to normal permissions. Set
 `PR_SENTINEL_AUTOALLOW=0` to keep the prompt (see [Configuration](#configuration)).
+
+That allow stops short of a **second** watcher on a PR one is already watching.
+Stacked watchers wake the session once each for the same event and poll GitHub
+once each, and they compound: every wake asks for a fix and a push, and each
+push used to ask for another watcher. A running watcher re-reads the PR's head
+commit on every poll, so it already covers whatever was just pushed — there is
+nothing a relaunch adds. The deny names the background task id, so restarting
+the watch (to reset its watch budget, say) is one `TaskStop` call and then the
+launch again, rather than a dead end. `PR_SENTINEL_OVERRIDE=<reason>` allows the
+duplicate for the rare case that wants one.
 
 **The Stop hook** is the backstop that makes the advisory nudge reliable. When
 the session tries to end its turn, it **blocks the stop at most once per

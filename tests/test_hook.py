@@ -39,7 +39,7 @@ def run_hook(payload, env=None):
     return proc.stdout, proc.stderr
 
 
-def bash_payload(command, response="", cwd=None):
+def bash_payload(command, response="", cwd=None, transcript=None):
     payload = {
         "tool_name": "Bash",
         "tool_input": {"command": command},
@@ -47,7 +47,40 @@ def bash_payload(command, response="", cwd=None):
     }
     if cwd:
         payload["cwd"] = cwd
+    if transcript:
+        payload["transcript_path"] = transcript
     return payload
+
+
+def transcript_with_live_watcher(prs, tmpdir, completed=()):
+    """A synthetic transcript in which this session launched a background
+    watcher on each PR in `prs`; those also in `completed` have exited."""
+    entries = []
+    for pr in prs:
+        tool_id = f"toolu_w{pr}"
+        task_id = f"bk{pr}"
+        entries.append({"type": "assistant", "message": {
+            "role": "assistant", "content": [
+                {"type": "tool_use", "id": tool_id, "name": "Bash", "input": {
+                    "command": f'bash "/opt/w/pr-sentinel-watch.sh" {pr}',
+                    "run_in_background": True}}]}})
+        entries.append({"type": "user",
+                        "toolUseResult": {"backgroundTaskId": task_id},
+                        "message": {"role": "user", "content": [
+                            {"type": "tool_result", "tool_use_id": tool_id,
+                             "content": "Command running in background with "
+                                        f"ID: {task_id}."}]}})
+        if pr in completed:
+            entries.append({"type": "queue-operation", "content": (
+                "<task-notification>\n"
+                f"<tool-use-id>{tool_id}</tool-use-id>\n"
+                f"<output-file>/tmp/s/tasks/{task_id}.output</output-file>\n"
+                "<status>completed</status>\n</task-notification>")})
+    path = os.path.join(tmpdir, "transcript.jsonl")
+    with open(path, "w") as fh:
+        for e in entries:
+            fh.write(json.dumps(e) + "\n")
+    return path
 
 
 def make_repo(path):
@@ -282,3 +315,66 @@ class HookEndToEnd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LiveWatcherSuppression(unittest.TestCase):
+    """A push to a PR this session is already watching must not produce a
+    launch nudge: the running watcher re-reads the PR head every poll, so a
+    second one only doubles the wake-ups."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _context(self, out):
+        self.assertTrue(out.strip(), "expected additionalContext, got silence")
+        return json.loads(out)["hookSpecificOutput"]["additionalContext"]
+
+    def test_push_naming_a_watched_pr_is_told_not_to_relaunch(self):
+        t = transcript_with_live_watcher(["42"], self.tmp.name)
+        out, _ = run_hook(bash_payload(
+            "git push", "https://github.com/o/r/pull/42\n", transcript=t))
+        ctx = self._context(out)
+        self.assertIn("ALREADY running", ctx)
+        self.assertIn('TaskStop(task_id="bk42")', ctx)
+        self.assertNotIn("Launch the PR Sentinel watcher", ctx)
+
+    def test_push_naming_an_unwatched_pr_still_gets_the_launch_nudge(self):
+        t = transcript_with_live_watcher(["42"], self.tmp.name,
+                                         completed=["42"])
+        out, _ = run_hook(bash_payload(
+            "git push", "https://github.com/o/r/pull/42\n", transcript=t))
+        self.assertIn("Launch the PR Sentinel watcher", self._context(out))
+
+    def test_push_with_no_resolvable_number_names_the_live_prs(self):
+        # The common shape: `git push` prints no PR URL, so the hook cannot tell
+        # which PR this was. It names what is already watched and lets the
+        # session decide, rather than asking for a launch unconditionally.
+        t = transcript_with_live_watcher(["42", "43"], self.tmp.name)
+        out, _ = run_hook(bash_payload("git push", "", transcript=t))
+        ctx = self._context(out)
+        self.assertIn("#42, #43", ctx)
+        self.assertIn("do not launch a second watcher", ctx)
+
+    def test_push_with_no_live_watcher_says_nothing_about_one(self):
+        t = transcript_with_live_watcher([], self.tmp.name)
+        out, _ = run_hook(bash_payload("git push", "", transcript=t))
+        ctx = self._context(out)
+        self.assertNotIn("already has a live watcher", ctx)
+        self.assertIn("Launch the PR Sentinel watcher", ctx)
+
+    def test_never_advises_restarting_a_running_watcher(self):
+        # A live watcher re-reads the head SHA on every poll, so "restart it so
+        # it tracks the latest push" was both wrong and the main source of
+        # stacked watchers.
+        for payload in (bash_payload("git push", ""),
+                        bash_payload("gh pr create --fill",
+                                     "https://github.com/o/r/pull/9\n")):
+            out, _ = run_hook(payload)
+            self.assertNotIn("restart it", self._context(out))
+
+    def test_unreadable_transcript_falls_back_to_the_plain_nudge(self):
+        out, _ = run_hook(bash_payload(
+            "git push", "https://github.com/o/r/pull/42\n",
+            transcript="/nonexistent/t.jsonl"))
+        self.assertIn("Launch the PR Sentinel watcher", self._context(out))
