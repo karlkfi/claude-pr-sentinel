@@ -603,7 +603,7 @@ _DAMPEN_DETAIL = {
         'either the update is done locally and still waiting on your gate, or '
         'it needs a human',
     'dequeued':
-        'a merge-queue eviction still reported at the same commit across '
+        'a merge-queue removal still reported at the same commit across '
         'repeated watcher reports — re-enqueueing is a human\'s call, so there '
         'is nothing further to do here',
 }

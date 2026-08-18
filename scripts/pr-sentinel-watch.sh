@@ -39,8 +39,9 @@
 #   blocked_watching  the same relationship to `blocked`, for the same reason.
 #
 # SECURITY: this script queries ONLY GitHub-controlled check metadata,
-# mergeable state, and merge-queue membership. It never requests or parses the
-# PR body, PR review comments, or issue comments — those are human/attacker-writable and are the
+# mergeable state, merge-queue membership, and the login of whoever removed the
+# PR from the queue. It never requests or parses the PR body, PR review
+# comments, or issue comments — those are human/attacker-writable and are the
 # indirect-prompt-injection channel this plugin deliberately excludes. The
 # only free-form text it surfaces is the session's own CI log excerpt, which
 # is size-capped, ANSI-stripped, and wrapped in an explicit
@@ -123,6 +124,13 @@ QUEUED_SEEN=0
 # Consecutive polls the queue entry has been absent since QUEUED_SEEN.
 DEQUEUE_SEEN=0
 
+# Who removed the PR from the merge queue, read once when `dequeued` is
+# reported: the actor's login, and "bot" (the queue itself) or "human"
+# (somebody chose to). Both stay empty when the actor cannot be read, and the
+# report then claims no cause at all.
+DEQUEUE_ACTOR=""
+DEQUEUE_ACTOR_KIND=""
+
 # The failed-check set last reported as inherited from the base branch, so the
 # `base_failure` notice fires once per distinct failure rather than on every
 # poll of a state that by definition does not move. Non-empty also tells the
@@ -189,8 +197,8 @@ gh_pr_state() {
 }
 
 # Whether the PR currently holds a merge-queue entry. `gh pr view` exposes no
-# queue field (mergeQueueEntry is GraphQL-only), so this is the watcher's one
-# query outside `gh pr view`/`gh pr checks` — a second API call per poll, still
+# queue field (mergeQueueEntry is GraphQL-only), so this is a query outside
+# `gh pr view`/`gh pr checks` — a second API call per poll, still
 # GitHub-controlled metadata only. Prints "true"/"false"; a non-zero exit means
 # UNKNOWN, and the caller must not act on it.
 gh_queue_entry() {
@@ -201,6 +209,47 @@ gh_queue_entry() {
 			repository(owner: $owner, name: $name) {
 				pullRequest(number: $number) { mergeQueueEntry { id } } } }' \
 		-q '.data.repository.pullRequest.mergeQueueEntry != null'
+}
+
+# The actor on the PR's most recent removed-from-queue timeline event, as
+# "typename\tlogin". `github-merge-queue` is a Bot and is the queue evicting
+# the PR; a User is somebody who removed it deliberately — GitHub rejects a
+# push to a queued branch (GH006), so that is the documented way to unblock an
+# update, and the two need different reports. `last: 1` keeps this to one node
+# with no pagination. Still GitHub-controlled metadata: an actor type and a
+# login, never the event's free-form text.
+gh_dequeue_actor() {
+	# shellcheck disable=SC2016  # $owner/$name/$number are GraphQL variables, not shell
+	gh api graphql \
+		-F owner="$QUEUE_OWNER" -F name="$QUEUE_REPO" -F number="$QUEUE_NUM" \
+		-f query='query($owner: String!, $name: String!, $number: Int!) {
+			repository(owner: $owner, name: $name) {
+				pullRequest(number: $number) {
+					timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) {
+						nodes { ... on RemovedFromMergeQueueEvent {
+							actor { __typename login } } } } } } }' \
+		-q '.data.repository.pullRequest.timelineItems.nodes[0].actor
+			| [.__typename, .login] | @tsv'
+}
+
+# Fill DEQUEUE_ACTOR / DEQUEUE_ACTOR_KIND. Called once, from emit_dequeued, so
+# the poll loop keeps its two queries per cycle. Every uncertain answer leaves
+# both empty: an unread actor must produce a report that names no cause, not a
+# guessed one.
+read_dequeue_actor() {
+	local out typename login
+	[[ -n "$QUEUE_OWNER" ]] || return 0
+	out=$(gh_dequeue_actor 2>/dev/null) || return 0
+	IFS=$'\t' read -r typename login <<<"$out"
+	# The report echoes this login back, so accept only what a login can be.
+	[[ "$login" =~ ^[A-Za-z0-9-]+$ ]] || return 0
+	DEQUEUE_ACTOR="$login"
+	# Bot is the queue acting on its own; every other Actor type is a someone.
+	if [[ "$typename" == "Bot" ]]; then
+		DEQUEUE_ACTOR_KIND="bot"
+	else
+		DEQUEUE_ACTOR_KIND="human"
+	fi
 }
 
 # Decide whether `gh auth status` proves there are no credentials. Returns 0
@@ -521,16 +570,39 @@ emit_behind() {
 }
 
 emit_dequeued() {
+	read_dequeue_actor
 	report_header dequeued
 	echo "State: OPEN"
 	echo "mergeStateStatus: ${MERGE}"
 	echo "Head SHA: ${HEAD_SHA}"
 	echo "Base branch: ${BASE}"
+	[[ -n "$DEQUEUE_ACTOR" ]] \
+		&& echo "Removed from queue by: ${DEQUEUE_ACTOR} (${DEQUEUE_ACTOR_KIND})"
 	echo
-	echo "The PR was in the merge queue and has left it without merging — the"
-	echo "queue evicted it (typically a sibling merge made it conflicting, or the"
-	echo "queue reset its group). No merge is in progress any more: once the"
-	echo "branch is healthy again, the PR needs a HUMAN to re-enqueue it."
+	case "$DEQUEUE_ACTOR_KIND" in
+		bot)
+			echo "The PR was in the merge queue and has left it without merging — the"
+			echo "queue evicted it (${DEQUEUE_ACTOR}), typically because a sibling merge"
+			echo "made it conflicting or the queue reset its group. No merge is in"
+			echo "progress any more: once the branch is healthy again, the PR needs a"
+			echo "HUMAN to re-enqueue it."
+			;;
+		human)
+			echo "The PR was in the merge queue and has left it without merging:"
+			echo "${DEQUEUE_ACTOR} removed it. That is a deliberate removal, not an eviction"
+			echo "— GitHub rejects a push to a queued branch (GH006), so dequeueing is how"
+			echo "such a push gets unblocked. No merge is in progress any more, and"
+			echo "re-enqueueing is a HUMAN's call."
+			;;
+		*)
+			echo "The PR was in the merge queue and has left it without merging. Who"
+			echo "removed it could not be read, so this is EITHER the queue evicting it"
+			echo "(a sibling merge made it conflicting, or the queue reset its group) OR"
+			echo "somebody removing it deliberately, e.g. to allow a push GitHub would"
+			echo "otherwise reject (GH006). No merge is in progress any more, and"
+			echo "re-enqueueing is a HUMAN's call."
+			;;
+	esac
 	echo
 	if [[ "$MERGE" == "DIRTY" || "$MERGE" == "BEHIND" ]]; then
 		if [[ "$HEAL" == "merge" ]]; then
@@ -544,6 +616,10 @@ emit_dequeued() {
 		fi
 		echo "Run the local gate, push, relaunch this watcher — then hand back to a"
 		echo "human for re-enqueue."
+	elif [[ "$DEQUEUE_ACTOR_KIND" == "human" ]]; then
+		echo "Next action: no branch damage is visible from here (state above). If a"
+		echo "push to this branch was waiting on the dequeue, run the local gate and"
+		echo "push it now, then hand back to a human for re-enqueue."
 	else
 		echo "Next action: no branch damage is visible from here (state above)."
 		echo "Verify the checks are still green, then hand back to a human for"
