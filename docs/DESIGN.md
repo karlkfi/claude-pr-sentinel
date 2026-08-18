@@ -117,7 +117,38 @@ bare PR number — no operators, redirects, substitutions, or globs. Anything
 ambiguous falls through to normal permissions (fail-safe: defer, never allow on
 doubt), so the convenience can't be weaponised into approving a chained or
 look-alike command. It's gated by `PR_SENTINEL_AUTOALLOW` (default on) and
-suppressed when the plugin is disabled. The **Stop-hook backstop**
+suppressed when the plugin is disabled.
+
+The same hook carries one check that is not about polling at all: at `gh pr
+create` it refuses to open a second pull request over lines an open one already
+changes. It arrived here from
+[pipe-guard](https://github.com/karlkfi/claude-pipe-guard), which had built it
+and then found it sitting in the wrong conceptual box — that plugin is about
+exit status, while this one already owns the PR lifecycle and already classifies
+this exact command for the PostToolUse nudge. Relocating it costs no extra
+`PreToolUse` registration, since both plugins had one on `Bash` regardless.
+
+The design property worth preserving rather than reimplementing is that it
+compares **line ranges, not paths**. Path-only intersection produced real false
+denials downstream — three in two days in one repo, each costing a manual
+`git merge-tree` and an override — because two branches touching one file is
+ordinary. Both sides are read from the diff's pre-image side, so two diffs from
+a shared ancestor are numbered in that ancestor, and each range reaches the
+three lines of context a hunk carries: edits within six lines meet, edits seven
+apart do not. `gh pr diff` has no `-U0`, so the PR's side arrives with that
+context already counted inside the hunk and is *not* widened again — doing so
+would stretch its reach to nine lines and quietly undo the narrowing.
+
+This is the one place a hook talks to GitHub, so the field list is the security
+surface: `number`, `headRefName`, `files`, and the diffs of at most three PRs
+that already share a path. Not the title — a denial's text lands in the
+session's context, and a title is written by whoever opened that PR, which is
+the channel this plugin exists to keep shut. Every probe fails silent, so the
+cost of a missing `gh`, an unresolvable base ref or a rate-limited token is a
+missed catch rather than a create nobody can make. `PR_SENTINEL_OVERLAP_ENABLED`
+turns it off, and with it the queries.
+
+The **Stop-hook backstop**
 ([`scripts/pr-sentinel-stop-hook.py`](../scripts/pr-sentinel-stop-hook.py))
 turns the advisory nudge into a reliable one — see [Why the nudge is
 advisory](#why-the-nudge-is-advisory). Both stayed out of the initial MVP so it
@@ -468,16 +499,23 @@ Mechanism notes, in the order they were forced:
 PR is the opposite of handed off, and the backstop should keep holding the
 session responsible until the branch is healed, re-watched, and handed back.
 
-### Why the watcher uses `gh` but the hook does not
+### Why the watcher uses `gh` and the nudge does not
 
 The watcher's whole function is to observe remote GitHub state, so it must talk
-to GitHub (via the already-authenticated `gh` CLI). The **hook**, by contrast,
-stays purely local: it inspects the just-run command and its output text and
-emits a nudge. Its one lookup outside that text is also local — on a push
-naming a bare ref, `git rev-parse` says whether the ref is a tag, so a release
-cut doesn't read as PR work. Keeping the hook network-free keeps it fast (it
+to GitHub (via the already-authenticated `gh` CLI). The **PostToolUse nudge**,
+by contrast, stays purely local: it inspects the just-run command and its output
+text and emits a nudge. Its one lookup outside that text is also local — on a
+push naming a bare ref, `git rev-parse` says whether the ref is a tag, so a
+release cut doesn't read as PR work. Keeping it network-free keeps it fast (it
 runs on the `Bash` critical path) and keeps its privacy story simple (see
 [`PRIVACY.md`](../PRIVACY.md)).
+
+The PreToolUse guard is local for the same reason in three of its four
+branches, and deliberately not in the fourth: the overlap check cannot answer
+"does an open PR already change these lines" from the command string alone.
+That branch pays the critical-path cost only on a `gh pr create` — once per PR,
+not once per Bash call — bounds every probe at five seconds, and fails silent,
+so the worst case is a create that proceeds unchecked.
 
 ### Why the nudge is advisory
 

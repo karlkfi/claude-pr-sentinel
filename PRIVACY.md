@@ -3,9 +3,10 @@
 _Last updated: 2026-08-18_
 
 pr-sentinel is a Claude Code plugin that runs on your local machine. Its
-components have different data profiles, described honestly below: three hooks
-and a migration helper that never leave your machine, and one watcher that
-talks to GitHub.
+components have different data profiles, described honestly below: two hooks
+and a migration helper that never leave your machine, one watcher that talks to
+GitHub, and one hook that asks GitHub a single narrow question before you open
+a pull request.
 
 ## Data we collect
 
@@ -34,16 +35,36 @@ three hooks and the migration helper).
 
 ## The PreToolUse hook (`scripts/pr-sentinel-guard.py`)
 
-- Runs **entirely locally with no network access.** It denies a Bash command
-  that would foreground-poll continuous integration (CI), and auto-approves the
-  plugin's own watcher launch.
-- Receives, via standard input, the Bash command Claude Code is about to run,
-  plus `CLAUDE_PLUGIN_ROOT` and the optional `PR_SENTINEL_*` configuration
-  values (via environment). It inspects the command string only — never the
-  command's output, and never any PR text.
+- Denies a Bash command that would foreground-poll continuous integration (CI),
+  auto-approves the plugin's own watcher launch, and denies a `gh pr create`
+  that would open a second pull request over lines an open one already changes.
+- Receives, via standard input, the Bash command Claude Code is about to run
+  and your working directory, plus `CLAUDE_PLUGIN_ROOT` and the optional
+  `PR_SENTINEL_*` configuration values (via environment). It inspects the
+  command string only — never the command's output.
 - Reads your **session transcript** for the same narrow fact the PostToolUse
   hook reads it for — which watchers are still running — so it can refuse a
   duplicate watcher on a PR already covered.
+- **Runs locally for every decision except the overlap check.** The poll deny,
+  the auto-allow and the duplicate deny make no network call at all.
+- **The overlap check talks to GitHub**, through your already-authenticated
+  `gh` CLI, and only when you run a `gh pr create`. It reads your local repo
+  with `git diff` / `git merge-base` to learn which lines this branch changes,
+  then issues two read-only queries:
+  - `gh pr list --json number,headRefName,files` — the open PRs, their head
+    branch names, and the paths each one touches;
+  - `gh pr diff <number>` — the diff of at most **three** PRs, and only ones
+    that already share a path with your branch, to compare line ranges rather
+    than filenames.
+- That field list is the whole of it. The check **never** requests the PR body,
+  review comments, issue comments, or even the PR **title** — a title is
+  written by its author, and the denial message goes straight into your
+  session's context. A denial names the PR **number** and the shared **paths**
+  from your own diff, nothing else.
+- Every probe **fails silent**: no `gh`, no credentials, an unresolvable base
+  ref, or a slow call costs a missed catch, never a blocked command. Set
+  `PR_SENTINEL_OVERLAP_ENABLED=false` to switch the check — and its two
+  queries — off entirely.
 - Writes nothing to disk, and emits only its allow/deny decision to standard
   output.
 
@@ -106,8 +127,10 @@ three hooks and the migration helper).
 
 ## Third parties
 
-The plugin shares no data with any third party. The watcher's only network
-peer is GitHub, reached through the `gh` CLI you have already authenticated.
+The plugin shares no data with any third party. Its only network peer is
+GitHub, reached through the `gh` CLI you have already authenticated — the
+watcher on every poll, and the PreToolUse hook's overlap check when you open a
+pull request.
 
 ## Changes to this policy
 
