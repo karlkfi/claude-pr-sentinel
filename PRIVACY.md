@@ -1,15 +1,17 @@
 # Privacy Policy — pr-sentinel
 
-_Last updated: 2026-08-08_
+_Last updated: 2026-08-18_
 
-pr-sentinel is a Claude Code plugin that runs on your local machine. It has two
-components with different data profiles, described honestly below.
+pr-sentinel is a Claude Code plugin that runs on your local machine. Its
+components have different data profiles, described honestly below: two hooks
+and a migration helper that never leave your machine, and one watcher that
+talks to GitHub.
 
 ## Data we collect
 
 None. The plugin has no analytics, no telemetry, and no data collection of any
 kind. It ships as one bash watcher and a few stdlib-only Python scripts (the
-hooks and the migration helper).
+two hooks and the migration helper).
 
 ## The PostToolUse hook (`scripts/pr-sentinel-hook.py`)
 
@@ -33,6 +35,11 @@ hooks and the migration helper).
     canonical URL (`gh pr view --json`);
   - whether the PR currently holds a merge-queue entry (a GraphQL
     `mergeQueueEntry` read);
+  - who removed the PR from the merge queue — the `__typename` and `login` of
+    the actor on the most recent `REMOVED_FROM_MERGE_QUEUE_EVENT` (a GraphQL
+    timeline read), so the report can tell a queue eviction from a person
+    removing it deliberately. Read once, when that event is reported, never
+    per poll. The event's own free-form text is not requested;
   - the PR's check results (`gh pr checks`);
   - a failing check's workflow run — its conclusion, and its workflow id and
     that workflow's latest completed run on the **base branch**, to tell a
@@ -46,6 +53,22 @@ hooks and the migration helper).
 - It writes nothing to disk. The failing-run log excerpt is sanitized
   (ANSI-stripped, size-capped) and printed to the background task's standard
   output, which the Claude Code harness delivers to your session.
+
+## The Stop hook (`scripts/pr-sentinel-stop-hook.py`)
+
+- Runs **entirely locally with no network access.** It blocks the end of a turn
+  once when the session has an open PR that nothing is watching.
+- Reads three local files, all of them paths the session itself produced: your
+  Claude Code **session transcript** (the harness supplies the path), each
+  **watcher's own output file** (the path is in the background task's completion
+  notification), and, when a `gh pr create` sent its output to a log rather than
+  to the transcript, **that log** — the path is parsed out of the create's own
+  command string, the read is capped at 8 KiB, and a file older than the create
+  is ignored so a reused log path cannot donate a stale PR URL.
+- Extracts nothing from the redirected log but a `github.com` PR URL. It does
+  **not** read PR bodies or comments, and it inspects no process table.
+- Writes nothing to disk, and emits only its block decision and an optional
+  non-blocking notice to standard output.
 
 ## The migration helper (`scripts/pr-sentinel-migrate-autofix.py`)
 
