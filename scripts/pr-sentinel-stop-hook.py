@@ -31,7 +31,13 @@ process table, writes nothing, and never touches the PR body or comment stream
     two conditions keep the fallback clear of that while giving the backstop a
     resolution path the PostToolUse nudge does not share (#60). Best-effort: the
     harness emits these records for the session's own repo, so a create run
-    against a different one leaves nothing to correlate.
+    against a different one leaves nothing to correlate. That case — and the
+    larger one where no record is emitted at all — is covered by reading the
+    file the create redirected its own output to: `gh pr create … > out.log`
+    printed the URL, just not where the transcript could see it. The path comes
+    from the create's own command string (model-authored, never tool output or
+    CI-log text), is read byte-capped, and yields nothing unless it holds a
+    github.com PR URL — so a command that opened no PR resolves nothing.
   * Is a watcher still running?  -> a `run_in_background` launch of
     `pr-sentinel-watch.sh <PR>` records a `tool_use` id; when that background
     task exits, the harness records a `<task-notification>` carrying the same
@@ -75,10 +81,12 @@ disables it (parity with the PostToolUse nudge).
 
 Reads the Stop hook JSON on stdin, emits a block decision on stdout (or nothing).
 """
+import calendar
 import json
 import os
 import re
 import sys
+import time
 
 # A github.com PR URL, e.g. https://github.com/owner/repo/pull/123
 PR_URL_RE = re.compile(r'https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)')
@@ -163,6 +171,88 @@ def pr_number(token):
         return token
     m = PR_URL_RE.search(token)
     return m.group(1) if m else None
+
+
+# The redirect on the same simple command as a `gh pr create`: `> out.log`,
+# `>> out.log`, `&> out.log`. A target carrying `$` or a backtick is left alone —
+# the hook cannot expand it, and guessing would read the wrong file.
+_REDIRECT_RE = re.compile(r"""(?:&|\d)?>>?\s*("[^"$`]+"|'[^'$`]+'|[^\s;&|<>$`]+)""")
+
+# A `cd` to a literal path earlier in the same command, which is what a relative
+# redirect target resolves against (`cd /path/to/repo && gh pr create … > o.log`).
+_CD_RE = re.compile(r"""\bcd\s+("[^"$`]+"|'[^'$`]+'|[^\s;&|<>$`]+)""")
+
+# The create's redirected output is read only for its URL, so a small cap is
+# plenty: `gh` prints the URL on the first line.
+_REDIRECT_READ_CAP = 8192
+
+# How far a redirect file's mtime may predate its create's own entry timestamp
+# before the file reads as a leftover from an earlier run. Only clock jitter
+# needs absorbing — a genuinely stale log is minutes or hours old, not seconds.
+_MTIME_SLACK = 60
+
+
+def _unquote(token):
+    return token.strip().strip('"\'')
+
+
+def _create_redirect_path(command, cwd):
+    """The absolute path a `gh pr create` in this command sent its output to, or
+    None. Only the create's own simple command is considered, so an unrelated
+    redirect elsewhere in a chain is not mistaken for it. A relative target
+    resolves against a literal `cd` earlier in the command, else the entry's
+    `cwd`; `/dev/…` and anything the hook cannot expand yield None."""
+    m = re.search(r'\bgh\b(?:\s+\S+)*?\s+pr\s+create\b', command)
+    if not m:
+        return None
+    segment = re.split(r'[;\n]|&&|\|\||(?<![0-9&])\|', command[m.end():])[0]
+    rm = _REDIRECT_RE.search(segment)
+    if not rm:
+        return None
+    target = _unquote(rm.group(1))
+    if not target or target.startswith('/dev/'):
+        return None
+    if target.startswith('~'):
+        target = os.path.expanduser(target)
+    if os.path.isabs(target):
+        return target
+    cm = _CD_RE.search(command[:m.start()])
+    base = os.path.expanduser(_unquote(cm.group(1))) if cm else (cwd or '')
+    if not os.path.isabs(base):
+        return None
+    return os.path.join(base, target)
+
+
+def _entry_epoch(timestamp):
+    """An entry's ISO-8601 UTC `timestamp` as epoch seconds, or None if absent
+    or in a shape this cannot read."""
+    if not isinstance(timestamp, str):
+        return None
+    try:
+        return calendar.timegm(time.strptime(timestamp[:19], '%Y-%m-%dT%H:%M:%S'))
+    except ValueError:
+        return None
+
+
+def _redirected_pr_urls(path, created_after=None):
+    """The github.com PR URLs in a create's redirected output file. Empty on any
+    I/O trouble or when the file names no PR — a create that opened nothing
+    (`--help`, a failure, `--dry-run`) leaves no URL to find.
+
+    `created_after` is the create's own timestamp, and a file older than that is
+    ignored: log paths get reused (`tmp/prcreate.log` in the same worktree run
+    after run), so a create that failed would otherwise read the PREVIOUS run's
+    URL and claim a PR this session never opened. An unreadable timestamp skips
+    the check rather than suppressing the route."""
+    try:
+        if created_after is not None:
+            if os.path.getmtime(path) < created_after - _MTIME_SLACK:
+                return []
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            text = fh.read(_REDIRECT_READ_CAP)
+    except OSError:
+        return []
+    return [m.group(0) for m in PR_URL_RE.finditer(text)]
 
 
 def _is_pr_create(command):
@@ -311,6 +401,8 @@ def _analyze(path):
     result_text = {}           # tool_use_id -> concatenated result text
     seen_prs = set()           # PR numbers this transcript has mentioned so far
     in_create = False          # the most recent tool_use ran `gh pr create`
+    redirects = []             # files a `gh pr create` sent its output to
+    url_by_pr = {}             # PR number -> the full URL, when one was resolved
 
     try:
         with open(path, encoding='utf-8', errors='replace') as fh:
@@ -367,6 +459,10 @@ def _analyze(path):
                             if _is_pr_create(cmd):
                                 create_ids.append(b.get('id'))
                                 in_create = True
+                                rp = _create_redirect_path(cmd, obj.get('cwd'))
+                                if rp:
+                                    redirects.append(
+                                        (rp, _entry_epoch(obj.get('timestamp'))))
                             concluded |= _pr_close_targets(cmd)
                         elif btype == 'tool_result':
                             tid = b.get('tool_use_id')
@@ -378,13 +474,24 @@ def _analyze(path):
                 if fp:
                     reads.append((fp, _entry_text(obj, content)))
     except OSError:
-        return set(), {}
+        return set(), {}, {}
 
     # Opened PRs: the number gh printed in the create command's own output
     # (plus any resolved from a correlated `pr-link` above).
     for tid in create_ids:
         for m in PR_URL_RE.finditer(result_text.get(tid, '')):
             created.add(m.group(1))
+
+    # The same output, when the create redirected it to a file: the URL is on
+    # disk rather than in the transcript. This resolves the cross-repo create
+    # too, and it resolves the full URL, which is what lets the block name a PR
+    # in a repository other than the one the session is sitting in.
+    for rp, created_at in redirects:
+        for url in _redirected_pr_urls(rp, created_at):
+            num = pr_number(url)
+            if num:
+                created.add(num)
+                url_by_pr.setdefault(num, url)
 
     # Map each watcher's output file to the PR it watches (path from the
     # completion notification, PR from the launch's `pr-sentinel-watch.sh` arg).
@@ -435,7 +542,7 @@ def _analyze(path):
             if len(files) >= 2:
                 dampened[pr] = sig[0]
                 break
-    return block - set(dampened), dampened
+    return block - set(dampened), dampened, url_by_pr
 
 
 def prs_needing_watcher(path):
@@ -444,19 +551,24 @@ def prs_needing_watcher(path):
     return _analyze(path)[0]
 
 
-def watcher_command(pr):
+def watcher_command(pr, url=None):
+    """The launch line for one PR. `url` is passed when the hook resolved the
+    full URL — the watcher accepts either, and the URL is what makes the launch
+    land on the right repository when the PR is not in the one the session is
+    sitting in."""
     plugin_root = os.environ.get('CLAUDE_PLUGIN_ROOT', '')
     watcher = os.path.join(plugin_root, 'scripts', 'pr-sentinel-watch.sh') \
         if plugin_root else 'scripts/pr-sentinel-watch.sh'
-    return f'    bash "{watcher}" {pr}'
+    return f'    bash "{watcher}" {url or pr}'
 
 
-def build_reason(prs):
+def build_reason(prs, urls=None):
     """The block message fed back to the model."""
+    urls = urls or {}
     prs = sorted(prs, key=int)
     label = 'pull request #' + prs[0] if len(prs) == 1 \
         else 'pull requests ' + ', '.join('#' + p for p in prs)
-    commands = '\n'.join(watcher_command(p) for p in prs)
+    commands = '\n'.join(watcher_command(p, urls.get(p)) for p in prs)
     return (
         f'pr-sentinel: you are ending your turn with an open {label} this '
         f'session opened or was watching, but no watcher is tracking it and CI may still be '
@@ -532,14 +644,14 @@ def main():
     transcript = data.get('transcript_path')
     if not transcript:
         return
-    unwatched, dampened = _analyze(transcript)
+    unwatched, dampened, urls = _analyze(transcript)
     if not unwatched and not dampened:
         return  # nothing opened-and-unwatched, nothing to warn about: allow
 
     out = {}
     if unwatched:
         out['decision'] = 'block'
-        out['reason'] = build_reason(unwatched)
+        out['reason'] = build_reason(unwatched, urls)
     if dampened:
         # Non-blocking notice; survives even when the stop is allowed.
         out['systemMessage'] = build_warning(dampened)
