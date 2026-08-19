@@ -7,7 +7,7 @@ next task from the top of the Queue. Maintenance rules: see
 **Status:** 🔲 ready · 🚫 blocked
 **Size:**   S = one session/PR · M = 2–3 sessions · L = needs a plan doc under `docs/plan/`
 **Labels:** `security` `tests` `docs` `infra` `bug` `watcher` `hook` `retro`
-**Next ID:** Q13
+**Next ID:** Q14
 
 ## Queue
 
@@ -17,7 +17,7 @@ next task from the top of the Queue. Maintenance rules: see
 | <a id="Q5"></a>Q5 | Don't nudge on a push whose target is the default branch | `bug` `hook` | 🔲 | S | A release push (`git push origin HEAD:main v0.9.0`) reads as a branch push, so the hook asks for a watcher on a branch that will never have a PR. Extend the classifier as #34 did for tag refspecs. |
 | <a id="Q8"></a>Q8 | Require every `PR_SENTINEL_*` env var to appear in the README Configuration table | `tests` `retro` | 🔲 | S | Same shape as the PRIVACY gate: extract `PR_SENTINEL_*` from the scripts and fail a var the README does not document. Passes today, so land a falsifiability test with it. |
 | <a id="Q9"></a>Q9 | Audit the release window's PRs against the PR template at pre-flight | `docs` `retro` | 🔲 | S | v0.9.0 shipped a GitHub read `PRIVACY.md` never named. Add the pre-flight step, and record that notes archaeology doubles as fresh-eyes review. |
-| <a id="Q12"></a>Q12 | Clamp the pending poll so it never overshoots the expected finish | `watcher` | 🔲 | S | Age-proportional pacing is loosest right when a long build is about to finish: `sleep = min(age/K, D - age + slack, MAX_INTERVAL)`. Second step in [`plan/adaptive-poll-interval.md`](plan/adaptive-poll-interval.md), which names where `D` comes from. |
+| <a id="Q13"></a>Q13 | Extend the PRIVACY disclosure gate to REST reads | `tests` `security` | 🔲 | S | `undisclosed_reads` reads the GraphQL surface only, so Q12's `gh api .../actions/workflows/<id>/runs` was disclosed by hand with nothing to catch it. Literal path segments extract the same way. |
 | <a id="Q7"></a>Q7 | Fix the wrong issue citation in the Stop hook docstring | `docs` | 🔲 | S | `scripts/pr-sentinel-stop-hook.py:30` cites #34 for the `pr-link` false-positive blocks, but #34 is the tag-push nudge bug and never mentions `pr-link`. Find the right issue or drop the number. |
 
 ## Deferred
