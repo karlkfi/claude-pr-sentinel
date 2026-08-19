@@ -14,8 +14,10 @@ The essentials, for sessions without the skill loaded:
 - Pick with `python3 scripts/queue.py next`; run `gh pr list` first, because an
   open PR is the in-flight signal. Three statuses: `ready`, `blocked`,
   `deferred`.
-- New item: claim an ID (below), compute a rank with `queue.py rank`, then
-  write `docs/queue/QN.md`. Never hand-type a rank.
+- New item: confirm the defect is still there on current `origin/main` (a
+  branch cut before the fix merged still shows it), then claim an ID (below),
+  compute a rank with `queue.py rank`, and write `docs/queue/QN.md`. Never
+  hand-type a rank. [`docs/queue/README.md`](../queue/README.md) has the check.
 - Done item: `git rm docs/queue/QN.md`. Reference items by bare Q-ID (`Q4`,
   never `#4`) in commits and PR bodies.
 
