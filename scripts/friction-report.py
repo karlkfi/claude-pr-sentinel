@@ -136,9 +136,16 @@ REPORT_LINES = 40
 #   deny    the error the blocked call handed back, whose text is verbatim the
 #           reason the guard printed, joined to its command by ``tool_use_id``.
 #
-# A defer leaves neither: the guard prints nothing when it has no opinion, and
-# nothing is exactly what an escape-hatch downgrade produces too — see
-# ``inline_override`` for the only trace an override does leave.
+# A defer leaves neither, and three unlike things produce one: the guard had no
+# opinion; an escape-hatch downgrade removed the opinion it had (see
+# ``inline_override`` for the only trace that leaves); or it could not reach one.
+# The last is the overlap branch, whose probes fail silent —
+# ``pr_sentinel_overlap.capture`` returns the same ``(None, '')`` for a `gh` call
+# that timed out as for one that never launched — so a check that could not run
+# reads here exactly like a check that found nothing. Zero overlap denies is
+# therefore not evidence that no branch overlapped. That distinction is not in
+# the transcript, and no reading of it can recover what the guard did not
+# record.
 #
 # Measured over the local corpus (893 transcripts, 2026-08-19): 2234 allow
 # attachments, all ``hook_success``; 52 denies recovered from tool results (34
