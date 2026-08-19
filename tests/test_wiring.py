@@ -105,6 +105,19 @@ class Wiring(unittest.TestCase):
         self.assertIn("pr-sentinel-migrate-autofix.py", text,
                       "command must point at the helper script")
 
+    def test_friction_report_present_and_executable(self):
+        script = REPO / "scripts" / "friction-report.py"
+        self.assertTrue(script.is_file())
+        self.assertTrue(os.access(script, os.X_OK),
+                        "activity report must be executable")
+
+    def test_friction_report_command_present(self):
+        cmd = REPO / "commands" / "pr-sentinel-friction-report.md"
+        self.assertTrue(cmd.is_file(), "activity report slash command must exist")
+        text = cmd.read_text(encoding="utf-8")
+        self.assertIn("friction-report.py", text,
+                      "command must point at the report script")
+
     def test_agents_symlink(self):
         agents = REPO / "AGENTS.md"
         self.assertTrue(agents.is_symlink(), "AGENTS.md should symlink to CLAUDE.md")

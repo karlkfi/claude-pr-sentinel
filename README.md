@@ -30,6 +30,7 @@ comments, issue comments, or the PR body.
 - [Security invariants](#security-invariants)
 - [Why not just auto-fix CI?](#why-not-just-auto-fix-ci)
 - [Configuration](#configuration)
+- [Activity report](#activity-report)
 - [Agent guidance](#agent-guidance)
 - [Limitations](#limitations)
 - [Roadmap](#roadmap)
@@ -724,6 +725,56 @@ behaviors follow from tracking it:
 `dequeued` is a wake, not a handoff: the Stop hook keeps holding the session
 responsible for the PR until it is healed, re-watched, and handed back.
 
+## Activity report
+
+Is the nudge actually being followed, and what is the watcher waking you for?
+The bundled report answers both by re-reading what Claude Code already recorded
+in your local session transcripts:
+
+```
+/pr-sentinel-friction-report
+```
+
+It adds no telemetry and makes no network call — it parses transcripts that are
+already on your disk (see [Privacy](#privacy)). The script takes the same
+arguments directly:
+
+```
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/friction-report.py"              # last 7 days
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/friction-report.py" --since all
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/friction-report.py" --repo my-service --json
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--since` | `7d` | window: `Nd`/`Nh`/`Nm`, `YYYY-MM-DD`, or `all` |
+| `--repo` | _(none)_ | only activity whose working directory contains this substring |
+| `--top` | `15` | rows per ranking |
+| `--json` | off | machine-readable output |
+| `--transcripts` | `~/.claude/projects` | transcript root |
+
+Three things it reports, and how to read them:
+
+- **Follow-through** — nudged pull requests that got a watcher. The nudge is
+  advisory (a hook cannot make the model call a tool), so this is the number
+  that says whether the advice lands. Read it together with the **Stop-hook
+  backstop** count underneath: a high follow-through next to a non-zero backstop
+  count does not mean the nudge alone was enough — it means the
+  [backstop](#what-it-does) caught the turns that were about to end unwatched,
+  and the session launched a watcher after it fired.
+- **Events by kind** — `work` (`check_failure`, `conflict`, `behind`,
+  `dequeued`, `blocked`) is the plugin earning its keep; `done` (`ready`,
+  `closed`) means the PR needed no babysitting; `degraded` (`timeout`, `error`)
+  means the watch ended with no verdict, which usually calls for a larger
+  `PR_SENTINEL_TIMEOUT`.
+- **Foreground launches** — a watcher that was not backgrounded pinned the main
+  thread. That is the anti-pattern the plugin exists to replace, so any non-zero
+  count is worth chasing back to the session that did it.
+
+Nudges that name no PR number (a branch push where the hook could not resolve
+one) are counted separately and left out of the follow-through rate, rather than
+scored as unanswered.
+
 ## Agent guidance
 
 Paste this into your project's `CLAUDE.md` (or `AGENTS.md`) so the agent uses
@@ -824,12 +875,13 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
 
 ## Roadmap
 
-Scaffolded, not yet built — see [`docs/ROADMAP.md`](docs/ROADMAP.md):
-
-- **Friction/activity report** — a read-only analyzer over local transcripts.
+Everything scaffolded in [`docs/ROADMAP.md`](docs/ROADMAP.md) has shipped.
 
 Shipped since the MVP:
 
+- **Friction/activity report** — `/pr-sentinel-friction-report` and a backing
+  read-only analyzer rank how often the nudge fired, whether a watcher followed,
+  and which watcher events dominated (see [Activity report](#activity-report)).
 - **PreToolUse foreground-poll deny** — denies foreground `gh pr checks
   --watch`, `gh run watch`, and `while/until … sleep` loops around `gh`, with a
   fix-it pointing at the watcher; backgrounded calls pass, and
@@ -873,8 +925,9 @@ The hooks run entirely on your machine with one exception: the PreToolUse
 change, and only when you run a `gh pr create`. The **watcher** queries GitHub
 through your already-authenticated `gh` CLI (check status and merge state only —
 never comments or the PR body). Neither reads the PR body, comments, or titles,
-and nothing writes to disk. See [`PRIVACY.md`](PRIVACY.md) for the full
-policy.
+and nothing writes to disk. The [activity report](#activity-report) is
+read-only and local: it re-reads transcripts already on your disk and makes
+no network call. See [`PRIVACY.md`](PRIVACY.md) for the full policy.
 
 ## Contributing
 
