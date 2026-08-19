@@ -57,6 +57,36 @@ whatever has been claimed. Ask the remote:
 git ls-remote origin 'refs/queue-ids/*'
 ```
 
+### Every ID ever spent holds a claim, not just the live ones
+
+A completed item's file is deleted, so the store cannot say whether `Q11` was
+ever used. Only the claim can, which is why the namespace is never pruned.
+
+The floor the allocator computes is a high-water mark — it walks up from the
+highest ID it can see and never offers a lower one — so the ID that comes back
+is one spent *above* that floor. Q17 did: it was filed into the old
+`docs/STATUS.md` table and never existed as a file under `docs/queue/`, and
+`highest_local` reads the table only when passed `--table`. With every spent ID
+claimed, the ascending walk skips them whatever the floor computes, so the
+claims rather than the floor are what keep an ID from being handed out twice.
+
+The namespace was seeded from the live store, which left the eight IDs spent by
+already-completed items unclaimed; they were backfilled on 2026-08-19. Nothing
+enforces this, so check it rather than assuming it:
+
+```bash
+comm -23 \
+	<({ git log --all --name-only --pretty=format: -- docs/queue/
+	    git log --all -p --pretty=format: -- docs/STATUS.md; } |
+		grep -oE '\bQ[0-9]+\b' | sort -u) \
+	<(git ls-remote origin 'refs/queue-ids/*' | grep -oE 'Q[0-9]+$' | sort -u)
+```
+
+Empty is the answer you want, so read the left-hand list as well: a command
+that cannot reach history prints the same empty result as a complete namespace.
+`--all` is load-bearing — without it an ID filed on a branch that has not
+merged is invisible.
+
 ## Checks
 
 `python3 scripts/queue.py lint` checks the store and is enforced as a
