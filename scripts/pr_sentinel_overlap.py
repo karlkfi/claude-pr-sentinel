@@ -55,12 +55,17 @@ def enabled():
 
 
 def ignore_patterns():
-    """fnmatch globs from `PR_SENTINEL_OVERLAP_IGNORE`, colon-separated.
+    """fnmatch globs from `PR_SENTINEL_OVERLAP_IGNORE`, comma-separated.
 
     For the file every branch edits by construction — a changelog, a backlog
-    table — where a shared range is the normal case rather than a finding."""
+    table — where a shared range is the normal case rather than a finding.
+
+    Comma because branch-guard's `BRANCH_GUARD_OVERLAP_IGNORE` spells the same
+    list that way, and a repo that has worked one out copies it across. On a
+    colon here, `a.md,b.md` pasted in would parse as one glob matching nothing,
+    and nothing would report that the list had stopped discounting."""
     raw = os.environ.get('PR_SENTINEL_OVERLAP_IGNORE') or ''
-    return [p for p in (part.strip() for part in raw.split(':')) if p]
+    return [p for p in (part.strip() for part in raw.split(',')) if p]
 
 
 def capture(argv, cwd, timeout=PROBE_TIMEOUT):
@@ -165,7 +170,9 @@ def ranges_meet(mine, theirs):
 
 
 def is_ignored(path, patterns):
-    return any(fnmatch.fnmatch(path, pat) for pat in patterns)
+    """`fnmatchcase`, not `fnmatch`: the same glob must select the same paths
+    on every platform, and branch-guard's `overlap_ignored` matches that way."""
+    return any(fnmatch.fnmatchcase(path, pat) for pat in patterns)
 
 
 def current_branch(root):

@@ -219,6 +219,37 @@ class RangesMeet(unittest.TestCase):
         self.assertTrue(overlap.ranges_meet([(10, 20)], [(1, 10)]))
 
 
+class IgnoreList(unittest.TestCase):
+    """The list's spelling, which has to stay the one branch-guard reads: the
+    same globs get copied between the two plugins, and a separator that parses
+    on one side and not the other loses the whole list without saying so."""
+
+    def setUp(self):
+        os.environ.pop("PR_SENTINEL_OVERLAP_IGNORE", None)
+
+    tearDown = setUp
+
+    def test_commas_separate(self):
+        os.environ["PR_SENTINEL_OVERLAP_IGNORE"] = "docs/*.md, CHANGELOG.md ,"
+        self.assertEqual(overlap.ignore_patterns(),
+                         ["docs/*.md", "CHANGELOG.md"])
+
+    def test_a_colon_is_part_of_the_glob(self):
+        os.environ["PR_SENTINEL_OVERLAP_IGNORE"] = "docs/*:CHANGELOG.md"
+        self.assertEqual(overlap.ignore_patterns(), ["docs/*:CHANGELOG.md"])
+
+    def test_unset_discounts_nothing(self):
+        self.assertEqual(overlap.ignore_patterns(), [])
+
+    def test_matching_is_case_sensitive(self):
+        """`fnmatchcase`, so one value selects one set of paths everywhere.
+        `fnmatch` passes this on a POSIX host, where `normcase` is the identity
+        — the case it separates is Windows, so read this as pinning the intent
+        rather than as a case a mutation here would go red on."""
+        self.assertTrue(overlap.is_ignored("CHANGELOG.md", ["CHANGELOG.md"]))
+        self.assertFalse(overlap.is_ignored("changelog.md", ["CHANGELOG.md"]))
+
+
 class Enabled(unittest.TestCase):
     def setUp(self):
         for var in ("PR_SENTINEL_OVERLAP_ENABLED", "PR_SENTINEL_DISABLE"):
@@ -321,7 +352,18 @@ class OverlapDetection(unittest.TestCase):
         s.pr_list([(7, "other", ["app.py"])])
         s.pr_diff(7, "app.py", 40)
         self.assertEqual(
-            s.hits({"PR_SENTINEL_OVERLAP_IGNORE": "docs/*:app.py"}), [])
+            s.hits({"PR_SENTINEL_OVERLAP_IGNORE": "docs/*,app.py"}), [])
+
+    def test_a_colon_separated_list_is_not_a_list(self):
+        """The other direction of the same rule: a colon-joined value is one
+        glob that matches nothing, so the overlap is still reported. The list
+        that quietly stops discounting is what this spelling is chosen against,
+        and a deny is the side to fail on."""
+        s = self.one_file(40)
+        s.pr_list([(7, "other", ["app.py"])])
+        s.pr_diff(7, "app.py", 40)
+        hits = s.hits({"PR_SENTINEL_OVERLAP_IGNORE": "docs/*:app.py"})
+        self.assertEqual([n for n, _paths, _precise in hits], [7])
 
     def test_gh_failing_is_a_missed_catch_not_a_deny(self):
         s = self.one_file(40)          # no pr_list fixture: `gh pr list` exits 1
