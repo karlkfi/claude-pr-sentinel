@@ -9,8 +9,8 @@ already has a live watcher on that PR, in which case it says so and names the
 `TaskStop` call, because a running watcher re-reads the PR head on every poll
 and a second one only doubles the wake-ups. It is ADVISORY — a hook
 cannot force the model to call a tool, so this asks; it does not compel. The
-(roadmapped) Stop-hook backstop is what makes the launch reliable (see
-docs/ROADMAP.md).
+Stop-hook backstop (`scripts/pr-sentinel-stop-hook.py`) is what makes the
+launch reliable, and recovers a nudge this hook never emitted.
 
 The hook is PURELY LOCAL: it inspects the just-run command string and its
 output text, reads the session transcript for the watchers this session
@@ -65,6 +65,10 @@ def _lex(text):
     quote."""
     lex = shlex.shlex(text, posix=True, punctuation_chars=';()<>|&\n')
     lex.whitespace_split = True
+    # shlex counts a newline as whitespace and eats it before the punctuation
+    # rule can split on it, folding `heredoc … <newline> gh pr create` into one
+    # argv headed by the wrong command (issue #76).
+    lex.whitespace = lex.whitespace.replace('\n', '')
     return list(lex)
 
 
