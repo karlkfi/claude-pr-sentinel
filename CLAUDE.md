@@ -111,16 +111,30 @@ make check          # shellcheck + unittest
 python3 -m unittest discover tests
 ```
 
-Four suites:
+Eleven suites:
 - `tests/test_watcher.py` — runs the watcher as a subprocess against a **stub
   `gh`** on PATH (canned, jq-projected fixtures) and asserts each exit event
   and the report sanitization (ANSI strip, size cap). Add the scenario that
   motivated any change as a fixture.
 - `tests/test_hook.py` — unit + subprocess tests of command classification, the
   failure heuristic, and the emitted `additionalContext`.
+- `tests/test_guard.py` — the PreToolUse foreground-poll deny: the poll-shape
+  classifier, and the emitted deny, silence, or override.
+- `tests/test_stop_hook.py` — the Stop backstop's block decision, driven from
+  synthetic session transcripts.
+- `tests/test_watchers.py` — the shared "is a watcher already live for this PR"
+  read, and recovery of the background task id.
+- `tests/test_overlap.py` — the branch-overlap detector and the `gh pr create`
+  deny, against temporary git repos and a stub `gh`.
 - `tests/test_migrate.py` — runs the migration helper against a synthetic
   session store (fixture `local_*.json`) and asserts the scope rules, backup,
   app-running refusal, and schema no-op.
+- `tests/test_alloc.py` — Q-ID allocation: claims land in `refs/queue-ids` on a
+  throwaway bare remote and an ID someone else holds is never reissued.
+- `tests/test_queue_store.py` — the `docs/queue/` store's invariants: no
+  committed index, no drift back to a single table.
+- `tests/test_friction_report.py` — the friction analyzer's detection, joins
+  and rankings, over synthetic transcripts.
 - `tests/test_wiring.py` — the manifests/hook registration are valid and agree
   on version, the scripts exist and are executable, and every
   `PR_SENTINEL_*` var the scripts read has a README Configuration row.
