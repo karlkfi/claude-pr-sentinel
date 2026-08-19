@@ -32,6 +32,7 @@ REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "friction-report.py"
 HOOK = REPO / "scripts" / "pr-sentinel-hook.py"
 STOP_HOOK = REPO / "scripts" / "pr-sentinel-stop-hook.py"
+GUARD = REPO / "scripts" / "pr-sentinel-guard.py"
 WATCHER = REPO / "scripts" / "pr-sentinel-watch.sh"
 
 # A synthetic plugin root, so the generated nudge names a watcher path with the
@@ -50,6 +51,33 @@ def _load(path, name):
 fr = _load(SCRIPT, "friction_report")
 hook = _load(HOOK, "pr_sentinel_hook")
 stop_hook = _load(STOP_HOOK, "pr_sentinel_stop_hook")
+guard = _load(GUARD, "pr_sentinel_guard")
+overlap = _load(REPO / "scripts" / "pr_sentinel_overlap.py", "pr_sentinel_overlap")
+
+# Every reason the guard hands to `permissionDecisionReason`, and the real text
+# each one produces. Generated from the guard's own builders, so a reworded
+# branch fails the classification tests instead of silently reporting zero.
+GUARD_BUILDERS = {
+    "build_allow_reason": lambda: guard.build_allow_reason(),
+    "build_reason": lambda: guard.build_reason("gh_run_watch"),
+    "build_duplicate_reason": lambda: guard.build_duplicate_reason(
+        "41", ["task-1"]),
+    "overlap.build_reason": lambda: overlap.build_reason(
+        [("41", ["src/synthetic.py"], True)]),
+}
+
+GUARD_CATEGORIES = {
+    "build_allow_reason": "auto-allow",
+    "build_reason": "poll",
+    "build_duplicate_reason": "duplicate",
+    "overlap.build_reason": "overlap",
+}
+
+
+def guard_reason_builders():
+    """Every builder named at a `permissionDecisionReason` call site."""
+    text = GUARD.read_text(encoding="utf-8")
+    return set(re.findall(r"'permissionDecisionReason':\s*([\w.]+)\(", text))
 
 def _signatures():
     """The real nudge and Stop-block texts, from the hooks' own builders.
@@ -130,6 +158,29 @@ def rec_result(text, ts=TS, cwd=CWD, tool_use_id="toolu_result"):
             "message": {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": tool_use_id,
                  "content": text}]}}
+
+
+def rec_guard_allow(reason=None, ts=TS, cwd=CWD, tool_use_id="toolu_guard",
+                    atype="hook_success", stdout=None):
+    """A PreToolUse attachment carrying the guard's verdict."""
+    if stdout is None:
+        stdout = json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "allow",
+            "permissionDecisionReason":
+                reason if reason is not None else guard.build_allow_reason()}})
+    return {"type": "attachment", "timestamp": ts, "cwd": cwd,
+            "attachment": {
+                "type": atype, "hookName": "PreToolUse:Bash",
+                "command": 'python3 "/plugins/pr-sentinel/scripts/'
+                           'pr-sentinel-guard.py"',
+                "toolUseID": tool_use_id, "stdout": stdout}}
+
+
+def rec_guard_deny(reason, ts=TS, cwd=CWD, tool_use_id="toolu_bash"):
+    """The error a denied call hands back — the only record of a deny."""
+    rec = rec_result(reason, ts=ts, cwd=cwd, tool_use_id=tool_use_id)
+    rec["message"]["content"][0]["is_error"] = True
+    return rec
 
 
 def rec_stop_block(reason, ts=TS, cwd=CWD):
@@ -404,6 +455,137 @@ class TestFollowThrough(TranscriptCase):
     def test_ignores_another_hooks_stop_block(self):
         self.write([rec_stop_block("other-guard: you are ending your turn")])
         self.assertEqual(0, self.report()["stop_blocks"])
+
+
+# --- the PreToolUse guard ----------------------------------------------------
+
+class TestGuardContract(unittest.TestCase):
+
+    def test_guard_categories_cover_every_branch(self):
+        """A new decision branch in the guard must be classified here, or the
+        report buckets it as 'other' and the ranking quietly loses meaning."""
+        named = guard_reason_builders()
+        self.assertTrue(named, "no permissionDecisionReason call sites found — "
+                               "the signature regex has drifted from the guard")
+        self.assertEqual(named, set(GUARD_BUILDERS),
+                         "the guard names these reason builders and this test "
+                         "does not exercise them all")
+        for name, expected in GUARD_CATEGORIES.items():
+            self.assertEqual(expected,
+                             fr.guard_category(GUARD_BUILDERS[name]()),
+                             "%s no longer classifies as %s" % (name, expected))
+
+    def test_every_category_has_a_hint(self):
+        self.assertEqual(set(fr.GUARD_CATEGORY) | {"other"}, set(fr.GUARD_HINT))
+
+    def test_an_unknown_reason_is_other(self):
+        self.assertEqual("other", fr.guard_category("pr-sentinel: something "
+                                                    "this report has not met"))
+
+
+class TestGuardDecisions(TranscriptCase):
+
+    def test_counts_an_auto_allow(self):
+        self.write([rec_guard_allow()])
+        r = self.report()
+        self.assertEqual(1, r["guard_total"])
+        self.assertEqual({"allow": 1}, dict(r["guard_verdicts"]))
+        self.assertEqual({"auto-allow": 1}, dict(r["guard_categories"]))
+
+    def test_counts_a_deny_from_the_error_result(self):
+        """The deny leaves no attachment; only the blocked call's error."""
+        self.write([rec_bash("gh run watch 9"),
+                    rec_guard_deny(GUARD_BUILDERS["build_reason"]())])
+        r = self.report()
+        self.assertEqual({"deny": 1}, dict(r["guard_verdicts"]))
+        self.assertEqual({"poll": 1}, dict(r["guard_categories"]))
+
+    def test_deny_categories_are_distinguished(self):
+        self.write([rec_bash("gh pr create"),
+                    rec_guard_deny(GUARD_BUILDERS["overlap.build_reason"]())])
+        self.assertEqual({"overlap": 1}, dict(self.report()["guard_categories"]))
+
+    def test_harness_error_prefix_still_matches(self):
+        self.write([rec_bash("gh run watch 9"),
+                    rec_guard_deny("Error: "
+                                   + GUARD_BUILDERS["build_reason"]())])
+        self.assertEqual(1, self.report()["denies"])
+
+    def test_deny_with_no_bash_call_behind_it_is_ignored(self):
+        """Nothing joins it to a Bash command, so it is not this guard's."""
+        self.write([rec_guard_deny(GUARD_BUILDERS["build_reason"](),
+                                   tool_use_id="toolu_nothing")])
+        self.assertEqual(0, self.report()["guard_total"])
+
+    def test_a_failing_command_is_not_a_deny(self):
+        self.write([rec_bash("make check"),
+                    rec_guard_deny("make: *** [check] Error 1")])
+        self.assertEqual(0, self.report()["guard_total"])
+
+    def test_another_hooks_pretooluse_attachment_is_ignored(self):
+        rec = rec_guard_allow()
+        rec["attachment"]["command"] = 'python3 "/plugins/bash-other-guard.py"'
+        self.write([rec])
+        self.assertEqual(0, self.report()["guard_total"])
+
+    def test_a_silent_attachment_is_not_a_decision(self):
+        self.write([rec_guard_allow(stdout="")])
+        self.assertEqual(0, self.report()["guard_total"])
+
+    def test_a_hook_that_never_ran_is_an_error_not_an_allow(self):
+        self.write([rec_guard_allow(atype="hook_non_blocking_error")])
+        r = self.report()
+        self.assertEqual({"error": 1}, dict(r["guard_verdicts"]))
+        self.assertEqual({}, dict(r["guard_categories"]))
+        self.assertEqual({"hook_non_blocking_error": 1}, dict(r["guard_errors"]))
+
+
+class TestOverrides(TranscriptCase):
+
+    def test_counts_an_inline_prefix(self):
+        self.write([rec_bash('PR_SENTINEL_OVERRIDE="just this once" '
+                             'gh run watch 9')])
+        r = self.report()
+        self.assertEqual(1, r["overrides"])
+        self.assertEqual(1, r["override_commands"].most_common(1)[0][1])
+
+    def test_counts_a_prefix_on_a_later_link(self):
+        self.write([rec_bash('mkdir -p out && PR_SENTINEL_OVERRIDE=why '
+                             'gh run watch 9')])
+        self.assertEqual(1, self.report()["overrides"])
+
+    def test_the_name_as_an_argument_is_not_an_override(self):
+        self.write([rec_bash("echo PR_SENTINEL_OVERRIDE=why && gh pr view 41")])
+        self.assertEqual(0, self.report()["overrides"])
+
+    def test_an_empty_value_is_not_an_override(self):
+        self.write([rec_bash("PR_SENTINEL_OVERRIDE= gh run watch 9")])
+        self.assertEqual(0, self.report()["overrides"])
+
+    def test_a_leading_env_assignment_is_masked(self):
+        """The ranking prints a command back; a credential a session inlined
+        must not come with it."""
+        self.write([rec_bash('GH_TOKEN=ghp_synthetic PR_SENTINEL_OVERRIDE=why '
+                             'gh run watch 9')])
+        cmd = self.report()["override_commands"].most_common(1)[0][0]
+        self.assertNotIn("ghp_synthetic", cmd)
+        self.assertIn("GH_TOKEN=", cmd)
+        self.assertIn("PR_SENTINEL_OVERRIDE=why", cmd)
+        self.assertIn("gh run watch 9", cmd)
+
+    def test_a_heredoc_body_is_not_an_override(self):
+        """The guard's own docs and source name the variable in prose; a `cat`
+        or `git commit` carrying that text is writing, not overriding."""
+        self.write([rec_bash("git commit -F - <<'EOF'\n"
+                             "docs: name the escape hatch\n\n"
+                             "PR_SENTINEL_OVERRIDE=<reason> downgrades it.\n"
+                             "EOF")])
+        self.assertEqual(0, self.report()["overrides"])
+
+    def test_an_override_after_a_closed_heredoc_still_counts(self):
+        self.write([rec_bash("cat > f <<'EOF'\ntext\nEOF\n"
+                             "PR_SENTINEL_OVERRIDE=why gh run watch 9")])
+        self.assertEqual(1, self.report()["overrides"])
 
 
 # --- filters and output ------------------------------------------------------

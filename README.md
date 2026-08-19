@@ -773,7 +773,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/friction-report.py" --repo my-service --j
 | `--json` | off | machine-readable output |
 | `--transcripts` | `~/.claude/projects` | transcript root |
 
-Three things it reports, and how to read them:
+Four things it reports, and how to read them:
 
 - **Follow-through** — nudged pull requests that got a watcher. The nudge is
   advisory (a hook cannot make the model call a tool), so this is the number
@@ -790,6 +790,14 @@ Three things it reports, and how to read them:
 - **Foreground launches** — a watcher that was not backgrounded pinned the main
   thread. That is the anti-pattern the plugin exists to replace, so any non-zero
   count is worth chasing back to the session that did it.
+- **Guard decisions** — what the [PreToolUse guard](#what-it-does) did, split by
+  the branch that fired: `auto-allow` for the plugin's own watcher launch, and
+  `poll`, `duplicate` or `overlap` for a deny. Underneath it is the count of
+  inline `PR_SENTINEL_OVERRIDE=` prefixes, which is the number the guard cannot
+  report on itself — an override makes it defer, and a defer is silence, so the
+  count is read off the commands sessions ran. Read it against the denies: an
+  override tally near the deny count means the escape hatch is doing the guard's
+  job.
 
 Nudges that name no PR number (a branch push where the hook could not resolve
 one) are counted separately and left out of the follow-through rate, rather than
@@ -901,7 +909,8 @@ Shipped since the MVP:
 
 - **Friction/activity report** — `/pr-sentinel-friction-report` and a backing
   read-only analyzer rank how often the nudge fired, whether a watcher followed,
-  and which watcher events dominated (see [Activity report](#activity-report)).
+  which watcher events dominated, and how the PreToolUse guard decided (see
+  [Activity report](#activity-report)).
 - **PreToolUse foreground-poll deny** — denies foreground `gh pr checks
   --watch`, `gh run watch`, and `while/until … sleep` loops around `gh`, with a
   fix-it pointing at the watcher; backgrounded calls pass, and

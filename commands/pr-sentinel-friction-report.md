@@ -1,5 +1,5 @@
 ---
-description: Show how often the pr-sentinel nudge fired, whether a watcher followed, and which watcher events dominated — from your local Claude Code session transcripts.
+description: Show how often the pr-sentinel nudge fired, whether a watcher followed, which watcher events dominated, and how the PreToolUse guard decided — from your local Claude Code session transcripts.
 argument-hint: "[--since 30d] [--repo name] [--json] [--top N]"
 allowed-tools: Bash(python3 *)
 ---
@@ -9,7 +9,7 @@ Code already recorded in your local session transcripts. It adds no telemetry
 and makes no network call — see PRIVACY.md. Show it to me verbatim, then add at
 most two sentences naming what stands out. Do not edit any files.
 
-The report answers three questions:
+The report answers four questions:
 
 - **Nudges fired vs watchers launched** — the follow-through rate. The nudge is
   advisory: a hook cannot make the model call a tool. A rate well below 100%
@@ -22,6 +22,13 @@ The report answers three questions:
   count (`timeout`, `error`) means watches are ending with no verdict — raise
   `PR_SENTINEL_TIMEOUT`, or check that `gh` is authenticated.
 - **Events by repository** — where the CI time actually goes.
+- **Guard decisions** — what the PreToolUse guard did: `auto-allow` for the
+  plugin's own watcher launch, and `poll`, `duplicate` or `overlap` for a deny.
+  Read the `PR_SENTINEL_OVERRIDE` count beneath it against the deny count: every
+  downgrade is a deny the guard did not get to make, so a tally approaching the
+  denies means the escape hatch is doing the guard's job. A non-zero hook-failure
+  row is worth more attention than any of them — the guard never ran, so those
+  calls went unguarded.
 
 Two numbers are worth reading carefully rather than at face value:
 
