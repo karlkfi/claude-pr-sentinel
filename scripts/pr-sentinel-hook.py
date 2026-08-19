@@ -19,8 +19,8 @@ default branch. It never makes a network call. It never reads the PR body or
 any comment stream — the only PR text it ever touches is a URL it echoes back.
 
 Fail modes: defers silently (emits nothing) on any uncertainty — non-Bash
-tool, unparseable command, unrecognised command, cancelled command, disabled
-flag. It can never break a session.
+tool, unrecognised command, cancelled command, disabled flag. It can never
+break a session.
 
 Reads the hook JSON on stdin, emits a PostToolUse decision on stdout.
 """
@@ -60,17 +60,38 @@ FAILURE_SIGNALS = (
 HTTP_ERROR_RE = re.compile(r'\bHTTP [45]\d\d\b')
 
 
+def _lex(text):
+    """shlex tokens for a command string. Raises ValueError on an unbalanced
+    quote."""
+    lex = shlex.shlex(text, posix=True, punctuation_chars=';()<>|&\n')
+    lex.whitespace_split = True
+    return list(lex)
+
+
+def _lex_by_line(command):
+    """Tokens for a command shlex will not take whole. An unbalanced quote —
+    a contraction in a heredoc PR body is the ordinary source — otherwise
+    costs the whole string, so retry a line at a time and fall back to a plain
+    split for the line carrying it, rarely the line running `gh`."""
+    tokens = []
+    for line in command.splitlines():
+        try:
+            tokens.extend(_lex(line))
+        except ValueError:
+            tokens.extend(line.split())
+        tokens.append('\n')
+    return tokens
+
+
 def simple_commands(command):
     """Split a bash command string into simple commands on the shell operators
-    that separate them (`&&`, `||`, `|`, `;`, newlines). Best-effort: on a
-    tokenizing failure we return a single-element list so the caller still gets
-    a chance to match, but never crashes."""
+    that separate them (`&&`, `||`, `|`, `;`, newlines). Best-effort: a string
+    shlex rejects is retried line by line rather than dropped, so a stray quote
+    never leaves the caller with nothing to match."""
     try:
-        lex = shlex.shlex(command, posix=True, punctuation_chars=';()<>|&\n')
-        lex.whitespace_split = True
-        tokens = list(lex)
+        tokens = _lex(command)
     except ValueError:
-        return []
+        tokens = _lex_by_line(command)
     groups, cur = [], []
     for tok in tokens:
         if tok and all(c in ';()<>|&\n' for c in tok):

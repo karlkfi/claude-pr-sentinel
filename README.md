@@ -50,6 +50,7 @@ nudge to (re)launch the watcher after a PR-opening or branch-push command:
 | `gh pr create --fill` (output has a PR URL) | **nudge** — launch watcher for `#N` |
 | `git push -u origin claude/foo` | **nudge** — launch watcher for this branch's PR |
 | `git push origin HEAD && gh pr create` | **nudge** — PR create wins |
+| a heredoc PR body holding an apostrophe, then `gh pr create --body-file` | **nudge** — a quote shlex can't balance retries line by line rather than dropping the whole command |
 | a push whose PR already has a **live watcher** in this session | **stand down** — don't launch a second; names the `TaskStop` call that would restart the running one instead |
 | a push with no resolvable PR number, while some PR **is** watched | **nudge**, naming the already-watched PRs so a covered branch doesn't get a second watcher |
 | `gh pr create --help` · `--web` · `--dry-run`, or any create whose output has no PR URL | silent (no PR was opened) |
