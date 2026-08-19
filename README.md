@@ -447,6 +447,7 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_INTERVAL` | `30` | base poll interval, seconds |
 | `PR_SENTINEL_MAX_INTERVAL` | `300` | poll-interval ceiling, seconds |
 | `PR_SENTINEL_POLL_AGE_DIVISOR` | `10` | while checks are pending, poll every *age ÷ this* seconds — floored at `PR_SENTINEL_INTERVAL`, capped at `PR_SENTINEL_MAX_INTERVAL` (see [How often it polls](#how-often-it-polls)); anything but a positive integer falls back to `10` |
+| `PR_SENTINEL_POLL_CLAMP` | (on) | also hold a pending poll inside the run's expected finish, measured from the base branch's last green run of the same workflow; `0`/`false`/empty paces on check age alone and makes no such query (see [How often it polls](#how-often-it-polls)) |
 | `PR_SENTINEL_TIMEOUT` | `3600` | overall watch budget before a `timeout` event, seconds |
 | `PR_SENTINEL_LOG_MAX_BYTES` | `8192` | CI log excerpt cap (tail kept), bytes |
 | `PR_SENTINEL_GH_RETRY_HORIZON` | `900` | how long (seconds) to retry *transient* `gh` failures with backoff before an `error` event; permanent failures (no credentials, unresolvable PR) exit at once |
@@ -553,6 +554,24 @@ polls already made: ten minutes into any watch, every poll would sit at
 `MAX_INTERVAL` — five minutes for a failed check to reach the session — whether
 CI had been running ten minutes or thirty seconds.
 
+Age alone is loosest exactly when a long build is about to end: twenty-eight
+minutes into a thirty-minute run it would sleep another three. So a pending poll
+is also held inside the run's expected finish. `PR_SENTINEL_POLL_CLAMP` measures
+how long the base branch's last **green** run of the same workflow took, and no
+poll sleeps past that mark. Where several workflows are pending, the longest of
+them wins — the PR isn't done until its slowest one is.
+
+That estimate is weak evidence and is treated as such. A workflow the base has
+never run green — a new one, or one whose paths the base has never touched —
+yields nothing, and the age rule carries on alone. So does a run that has already
+outlasted the estimate: the workflow got slower, the prediction is spent, and
+pinning the whole overrun to the 30-second floor would cost more than the clamp
+ever saves.
+
+It costs two `gh api` reads per pending workflow, taken once and cached against
+the run they were measured for. `PR_SENTINEL_POLL_CLAMP=0` turns the clamp off
+along with those two reads.
+
 Once nothing is pending, the multiplicative backoff takes over
 (`PR_SENTINEL_BACKOFF_NUM` / `_DEN` per poll, up to `MAX_INTERVAL`). That is the
 right shape there: past green under `PR_SENTINEL_WATCH_UNTIL=closed`, what the
@@ -560,8 +579,9 @@ watch is waiting for is a conflict from someone else's merge, or a close — on
 nobody's schedule, and no age predicts them.
 
 Any poll that sees checks pending again starts the clock over, so a push that
-restarts CI restores the tight loop. Nothing is stored between watches and no
-extra query is made: the elapsed time is already in the watch.
+restarts CI restores the tight loop and re-measures. Nothing is stored between
+watches: the elapsed time is already in the watch, and the expected duration is
+read fresh from GitHub each time.
 
 ### Green is not the same as ready
 

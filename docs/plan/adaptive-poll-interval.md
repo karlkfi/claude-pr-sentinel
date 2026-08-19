@@ -1,10 +1,8 @@
-# Plan — Q10: poll at the base interval while checks are pending
+# Plan — Q10/Q12: pace the pending poll by how long checks have been running
 
-Backlog item [Q10](../STATUS.md).
-
-**Status:** the age-proportional rule below has landed
-(`PR_SENTINEL_POLL_AGE_DIVISOR`, default 10). The optional refinement is filed
-as backlog item Q12.
+**Status:** done. The age-proportional rule landed as
+`PR_SENTINEL_POLL_AGE_DIVISOR` (default 10), and the overshoot clamp below as
+`PR_SENTINEL_POLL_CLAMP` (default on).
 
 ## Goal (one sentence)
 
@@ -59,7 +57,7 @@ waiting for then is a conflict landed by someone else's merge, or a close —
 events driven by other people, on nobody's schedule. Backing off to
 `MAX_INTERVAL` there is right.
 
-## Optional refinement — never overshoot an expected finish
+## Second step — never overshoot an expected finish
 
 Age-proportional widening keeps widening, so it is at its loosest right when a
 long build is about to finish. With an expected duration `D`:
@@ -69,7 +67,9 @@ sleep = min(age / K, D - age + slack, MAX_INTERVAL)
 ```
 
 That gives wide polls in the middle of a build and a tight one at the expected
-finish. `D` is cheap to obtain: the watcher already fetches the base branch's
+finish. `slack` turned out to be redundant: the `FLOOR` the age rule already
+applies is what a slack term buys, so the shipped clamp is
+`min(age / K, D - age)` under the same floor. `D` is cheap to obtain: the watcher already fetches the base branch's
 latest completed run of the same workflow for `PR_SENTINEL_BASE_CHECK`, and that
 run carries its own start and end timestamps.
 
@@ -77,11 +77,24 @@ Treat this as a second step. The clamp is only as good as `D`, and a workflow
 whose duration just changed will mis-predict; the age-proportional rule beneath
 it degrades gracefully and should land first.
 
-Those timestamps ride on a response `gh_base_run` already fetches, so obtaining
-`D` widens the `-q` projection rather than adding a request. It still reads more
-GitHub data than today, so `PRIVACY.md` has to name the fields —
+**Correction, measured while implementing.** `D` does not ride on a response the
+watcher already fetches. `base_run_failure` — this document calls it
+`gh_base_run`, which is not the function's name — is reached only through
+`base_failures_only`, which the loop guards with `fail_count > 0`. A *pending*
+poll, the only poll the clamp paces, fetches no base run at all. So `D` costs
+two `gh api` reads of its own (the pending run's `workflow_id`, then the base
+query), and it needs a `status=success` query rather than that function's
+`status=completed` one: a run that failed or was cancelled stopped early, so its
+wall time does not predict a passing run's. Measuring once per run of pending
+checks, cached against the run set, is what keeps that off the per-poll path.
+
+The subtraction rides on the projection — `(.updated_at | fromdateiso8601) -
+(.run_started_at | fromdateiso8601)` — so the watcher never handles a timestamp
+and no `date(1)` dialect is involved.
+
+It reads more GitHub data than before, so `PRIVACY.md` names the fields;
 `test_every_graphql_read_is_named_in_privacy` reads the GraphQL surface only and
-will not catch a REST projection.
+does not catch a REST projection.
 
 ## Non-goals
 
@@ -100,3 +113,9 @@ fixtures, so a pending → pending → fail sequence can assert the interval nev
 widened while pending, and a settled sequence can assert it did. Pin the
 direction that would otherwise regress silently: a mutation removing the
 pending reset must go red.
+
+The clamp is pinned the same way. `PR_SENTINEL_POLL_CLAMP=0` over identical
+fixtures is the falsifiability partner — the polls the two runs differ on are
+the whole of what the clamp does — and the cache is proved by a stub that
+records each base query to a file, which measured 5 queries with the cache
+removed against 1 with it.

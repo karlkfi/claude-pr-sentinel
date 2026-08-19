@@ -305,15 +305,23 @@ The signal that does predict it is already in the watch: how long the checks
 have been running. `sleep = clamp(age ÷ K, INTERVAL, MAX_INTERVAL)` self-tunes
 to both suites with no stored history, no extra query, and no duration estimate
 — which also makes it correct on the first run of a brand-new workflow, where an
-estimate has nothing to estimate from.
+estimate has nothing to estimate from. That is why it is the layer underneath:
+the clamp below rides on it and can fall back to it, never the other way round.
 
 The backoff still owns the settled case. Past green under `WATCH_UNTIL=closed`
 the watch is waiting for a sibling PR's merge or a close, which no age predicts,
 so widening to `MAX_INTERVAL` there is right. A poll that sees checks pending
 again restarts the clock, which is exactly what a push should do.
 
-The refinement this leaves out — clamping the sleep so it never overshoots the
-duration the same workflow took on the base branch — is derived alongside it in
+Age alone still widens fastest right where the wait hurts most, since a run
+about to end looks exactly like one that just started widening. So the pending
+sleep is also held inside `D - age`, where `D` is how long the same workflow's
+last **green** run on the base branch took. That estimate is not free — two
+`gh api` reads, measured once per run of pending checks and cached against it —
+and it is not always available, so everything about it fails back to the age
+rule alone: a workflow the base has never run green yields nothing, and a run
+that has outlasted `D` has proved the estimate spent. `PR_SENTINEL_POLL_CLAMP=0`
+switches the clamp and its two reads off. Derived in
 [`plan/adaptive-poll-interval.md`](plan/adaptive-poll-interval.md).
 
 ### How conflicts are healed: rebase by default, merge on request
