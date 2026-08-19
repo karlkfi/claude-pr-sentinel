@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Run shellcheck
-        run: shellcheck scripts/pr-sentinel-watch.sh
+        run: shellcheck scripts/pr-sentinel-watch.sh scripts/alloc-queue-id.sh
 
   unittest:
     runs-on: ubuntu-latest
