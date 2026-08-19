@@ -112,6 +112,10 @@ three hooks, the migration helper, and the activity report).
   to the transcript, **that log** — the path is parsed out of the create's own
   command string, the read is capped at 8 KiB, and a file older than the create
   is ignored so a reused log path cannot donate a stale PR URL.
+- Also reads, from that same transcript, the harness's own record of an
+  **earlier block by this hook**, so it asks about a PR once rather than on
+  every turn end. Only the harness-written copies of its own message count —
+  it extracts nothing from your prompts or the model's replies.
 - Extracts nothing from the redirected log but a `github.com` PR URL. It does
   **not** read PR bodies or comments, and it inspects no process table.
 - Writes nothing to disk, and emits only its block decision and an optional

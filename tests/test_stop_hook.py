@@ -133,6 +133,24 @@ def task_notification(tool_id, outfile=OUTFILE, status="completed"):
     return {"type": "queue-operation", "operation": "enqueue", "content": content}
 
 
+def stop_block_record(*prs, shape="attachment"):
+    """The harness's own record of an earlier block by this hook, carrying the
+    reason verbatim. Three shapes exist and the hook reads all three; every one
+    is written by the harness, never by the model or a tool result."""
+    reason = hook.build_reason({str(pr) for pr in prs})
+    if shape == "attachment":
+        return {"type": "attachment",
+                "attachment": {"type": "hook_blocking_error", "hookName": "Stop",
+                               "hookEvent": "Stop",
+                               "blockingError": {"blockingError": reason}}}
+    if shape == "summary":
+        return {"type": "system", "subtype": "stop_hook_summary",
+                "hookCount": 1, "hookErrors": [reason]}
+    return {"type": "user", "isMeta": True,
+            "message": {"role": "user",
+                        "content": "Stop hook feedback:\n" + reason}}
+
+
 def read_file(file_path, text, tool_id="toolu_r"):
     """A Read tool result: content carries the file text; toolUseResult names
     the path that was read."""
@@ -292,6 +310,24 @@ class ClassifierUnit(unittest.TestCase):
             "PR-SENTINEL EVENT: ready_watching\nPR: 42\nState: OPEN\n"
             "mergeStateStatus: CLEAN\n\n" + conflict_report(sha="5e58804"))
         self.assertEqual(sig, ("conflict", "", "5e58804"))
+
+    def test_prior_block_prs_reads_every_harness_shape(self):
+        for shape in ("attachment", "summary", "feedback"):
+            self.assertEqual(hook._prior_block_prs(stop_block_record(42, shape=shape)),
+                             {"42"}, shape)
+        self.assertEqual(hook._prior_block_prs(stop_block_record(7, 9)), {"7", "9"})
+
+    def test_prior_block_prs_ignores_everything_else(self):
+        # Another hook's block, an ordinary entry, and — the one that matters —
+        # the block text quoted back inside a tool result, which is where a
+        # CI-log excerpt or an echoing session would put it.
+        other = {"type": "attachment",
+                 "attachment": {"type": "hook_blocking_error", "hookName": "PreToolUse",
+                                "blockingError": hook.build_reason({"42"})}}
+        self.assertEqual(hook._prior_block_prs(other), set())
+        self.assertEqual(hook._prior_block_prs({"type": "user"}), set())
+        self.assertEqual(
+            hook._prior_block_prs(tool_result(hook.build_reason({"42"}))), set())
 
     def test_build_warning(self):
         w = hook.build_warning({"42": "check_failure"})
@@ -848,6 +884,73 @@ class NeedsWatcherLogic(unittest.TestCase):
         self.assertEqual(b, {"42"})
         self.assertEqual(d, {})
 
+    # -- dampening a repeated ask the session cannot act on (issue #77) -------
+
+    def test_first_ask_still_blocks(self):
+        # Nothing dampens the first one: launching the watcher is the right ask
+        # even for a session that will never merge the PR itself.
+        b, d = analyze(created_pr(42))
+        self.assertEqual(b, {"42"})
+        self.assertEqual(d, {})
+
+    def test_second_ask_with_nothing_launched_warns(self):
+        # The reported case: the PR was concluded by another session, so there
+        # is no `gh pr merge` here and no watcher report either. Re-blocking
+        # every turn end cannot produce one.
+        b, d = analyze([*created_pr(42), stop_block_record(42)])
+        self.assertEqual(b, set())
+        self.assertEqual(d, {"42": hook.REPEAT_ASK})
+
+    def test_second_ask_after_a_launch_still_blocks(self):
+        # The session did act on the block: it launched a watcher, that watcher
+        # exited without a terminal report, and the PR is unwatched again. This
+        # is the backstop working, not a repeated ask.
+        b, d = analyze([
+            *created_pr(42),
+            stop_block_record(42),
+            launch_watcher(42, "toolu_w1"),
+            task_notification("toolu_w1", outfile="/tmp/session/tasks/gone.output"),
+        ])
+        self.assertEqual(b, {"42"})
+        self.assertEqual(d, {})
+
+    def test_a_launch_before_the_block_does_not_count(self):
+        # Ordering is what the signal means: a watcher launched BEFORE the block
+        # is the one whose completion left the PR unwatched, so it cannot excuse
+        # the PR from dampening on the next turn.
+        b, d = analyze([
+            *created_pr(42),
+            launch_watcher(42, "toolu_w1"),
+            task_notification("toolu_w1", outfile="/tmp/session/tasks/gone.output"),
+            stop_block_record(42),
+        ])
+        self.assertEqual(b, set())
+        self.assertEqual(d, {"42": hook.REPEAT_ASK})
+
+    def test_a_launch_for_another_pr_does_not_count(self):
+        b, d = analyze([*created_pr(42), stop_block_record(42),
+                        launch_watcher(7, "toolu_w1")])
+        self.assertEqual(b, set())
+        self.assertEqual(d, {"42": hook.REPEAT_ASK})
+
+    def test_repeated_report_reason_wins_over_repeated_ask(self):
+        # Both dampenings apply; the notice must name the failing check, which
+        # tells the session something the generic one does not.
+        b, d = analyze([stop_block_record(42),
+                        *self._two_reports(check_failure_report(sha="aaa"),
+                                           check_failure_report(sha="aaa"))])
+        self.assertEqual(b, set())
+        self.assertEqual(d, {"42": "check_failure"})
+
+    def test_a_concluded_pr_needs_no_dampening(self):
+        # The block set is empty to begin with, so a prior block record adds
+        # nothing to warn about.
+        b, d = analyze([*created_pr(42),
+                        stop_block_record(42),
+                        assistant_bash("gh pr merge 42 --squash", "toolu_m")])
+        self.assertEqual(b, set())
+        self.assertEqual(d, {})
+
     def test_no_created_pr_allows(self):
         self.assertEqual(needs([
             assistant_bash("git status", "toolu_s"),
@@ -931,6 +1034,18 @@ class StopHookEndToEnd(unittest.TestCase):
         self.assertNotIn("decision", obj)
         self.assertIn("#42", obj["systemMessage"])
         self.assertIn("merge conflict", obj["systemMessage"])
+
+    def test_repeated_ask_warns_without_blocking(self):
+        # Issue #77 end to end: a session that opened the PR, was asked once,
+        # and has no move left gets a notice instead of a second block.
+        out, rc = self.run_hook(
+            self.stop_input(),
+            transcript_entries=[*created_pr(42), stop_block_record(42)])
+        self.assertEqual(rc, 0)
+        obj = json.loads(out)
+        self.assertNotIn("decision", obj)
+        self.assertIn("#42", obj["systemMessage"])
+        self.assertIn("no watcher launched", obj["systemMessage"])
 
     def test_allows_when_watcher_live(self):
         out, _ = self.run_hook(self.stop_input(),

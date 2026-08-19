@@ -74,6 +74,18 @@ is proof no push happened; for the heal events (`conflict`, `behind`) the usual
 reason is that the heal is already committed locally and waiting on the
 project's gate, which is exactly when a relaunch has no move available (#50).
 
+The same dampening covers the case with no watcher report at all: a PR this hook
+already blocked over once, with no watcher launched since, is warned about
+rather than blocked again. The one signal it reads for that is a record only the
+harness writes — its own verbatim copy of the earlier block — so nothing a tool
+result carries can fake it. Repeating an ask the session did not act on cannot
+help the session that had no move to make: one working under a dispatch protocol
+never runs `gh pr merge` for a PR another session concludes, which leaves the
+watcher's terminal report as its only route to a quiet turn end, and nothing at
+all once the watcher fails to arm (#77). The first block still fires, because
+launching the watcher is the right ask even there — on an already-merged PR it
+answers `closed` on the first poll.
+
 Fail-open on ANY uncertainty: unparseable stdin, unreadable transcript, no
 opened PR, a concluded PR, or a live watcher -> emit nothing (allow the stop). It
 must never break a session. PR_SENTINEL_DEBUG=1 re-raises. PR_SENTINEL_DISABLE=1
@@ -135,6 +147,21 @@ LOG_EXCERPT_BANNER = '----- BEGIN CI LOG EXCERPT'
 DAMPENABLE_EVENT_RE = re.compile(
     r'PR-SENTINEL EVENT:\s*(check_failure|conflict|behind|dequeued)(?![\w-])')
 
+# The opening words of the block message, which double as how a block this hook
+# ALREADY made is found on a later turn: the harness records the reason verbatim
+# in records only it writes (see `_prior_block_prs`).
+BLOCK_MARKER = 'pr-sentinel: you are ending your turn'
+
+# The PRs a recorded block named, from that message's own phrasing
+# ("pull request #7" / "pull requests #7, #9").
+_BLOCKED_PRS_RE = re.compile(r'pull requests?\s+((?:#\d+(?:,\s*)?)+)')
+_HASH_NUM_RE = re.compile(r'#(\d+)')
+
+# The dampening reason for a PR this hook already blocked over once with no
+# watcher launched since. Not an event name, so a future watcher event cannot
+# collide with it.
+REPEAT_ASK = 'repeat_ask'
+
 # The report-header fields that identify WHICH occurrence of an event it is: the
 # head commit SHA (every dampenable event carries one) and, for `check_failure`,
 # the set of failed checks. Both are matched only in the header region (above the
@@ -164,7 +191,8 @@ TOOL_USE_LINE_RE = re.compile(r'"type":\s*"tool_use"')
 # signal we care about. Everything else (the bulk of a session) is skipped.
 # The shared scan's needles are unioned in so a single pass feeds it too.
 _NEEDLES = tuple(set(
-    ('PR-SENTINEL EVENT', 'pr create', 'pr merge', 'pr close', '/pull/')
+    ('PR-SENTINEL EVENT', 'pr create', 'pr merge', 'pr close', '/pull/',
+     BLOCK_MARKER)
 ) | set(watchers.SCAN_NEEDLES))
 
 
@@ -334,6 +362,42 @@ def _report_signature(text):
     return (event, fm.group(1).strip() if fm else '', sm.group(1))
 
 
+def _prior_block_prs(obj):
+    """PR numbers a PREVIOUS run of this hook already blocked this session over,
+    from the harness's own record of that block. Three shapes carry it — a
+    `hook_blocking_error` attachment, the `stop_hook_summary` system entry, and
+    the `Stop hook feedback:` message the block is fed back on — and all three
+    are written by the harness, never by the model or a tool result, so a
+    CI-log excerpt quoting the text cannot manufacture one. Empty set for any
+    other entry."""
+    texts = []
+    att = obj.get('attachment')
+    if isinstance(att, dict) and att.get('type') == 'hook_blocking_error' \
+            and att.get('hookName') == 'Stop':
+        err = att.get('blockingError')
+        if isinstance(err, dict):
+            err = err.get('blockingError')
+        if isinstance(err, str):
+            texts.append(err)
+    elif obj.get('type') == 'system' and obj.get('subtype') == 'stop_hook_summary':
+        texts += [e for e in (obj.get('hookErrors') or []) if isinstance(e, str)]
+    elif obj.get('type') == 'user':
+        msg = obj.get('message')
+        content = msg.get('content') if isinstance(msg, dict) else None
+        # A string content is a harness-injected message; a tool result is a
+        # list of blocks, so this can never read one.
+        if isinstance(content, str) and content.startswith('Stop hook feedback:'):
+            texts.append(content)
+    prs = set()
+    for text in texts:
+        if BLOCK_MARKER not in text:
+            continue
+        m = _BLOCKED_PRS_RE.search(text)
+        if m:
+            prs |= set(_HASH_NUM_RE.findall(m.group(1)))
+    return prs
+
+
 def _read_file_path(obj):
     """For a Read tool_result entry, the file path it read (or None)."""
     tur = obj.get('toolUseResult')
@@ -385,6 +449,8 @@ def _analyze(path):
     in_create = False          # the most recent tool_use ran `gh pr create`
     redirects = []             # files a `gh pr create` sent its output to
     url_by_pr = {}             # PR number -> the full URL, when one was resolved
+    asked = set()              # PRs a previous block by this hook already named
+    launched_since_ask = set()  # ... of those, ones watched since that block
 
     try:
         with open(path, encoding='utf-8', errors='replace') as fh:
@@ -411,6 +477,15 @@ def _analyze(path):
                     continue
                 seen_prs |= line_prs
 
+                # A block this hook already made, and which PRs it named. A
+                # later launch clears the PR again, so what survives is "asked
+                # for a watcher, and none launched since".
+                prior = _prior_block_prs(obj)
+                if prior:
+                    asked |= prior
+                    launched_since_ask -= prior
+                    continue
+
                 # The shared scan takes the watcher launches, their background
                 # task ids, and the completion notifications; True means the
                 # entry was a notification and carries nothing else we read.
@@ -428,7 +503,13 @@ def _analyze(path):
                             in_create = False
                             if b.get('name') != 'Bash':
                                 continue
-                            cmd = (b.get('input') or {}).get('command') or ''
+                            inp = b.get('input') or {}
+                            cmd = inp.get('command') or ''
+                            if inp.get('run_in_background'):
+                                for wm in WATCH_ARG_RE.finditer(cmd):
+                                    num = pr_number(wm.group(1))
+                                    if num:
+                                        launched_since_ask.add(num)
                             if _is_pr_create(cmd):
                                 create_ids.append(b.get('id'))
                                 in_create = True
@@ -508,12 +589,16 @@ def _analyze(path):
     # Dampen: an unresolved-and-unwatched PR whose identical terminal event was
     # reported by two separate watcher runs (two distinct output files, same
     # event + failed-set + SHA -> nothing pushed between them).
+    # A PR this hook already asked about once, with nothing launched since, is
+    # dampened too: the ask cannot be satisfied by repeating it (#77).
     dampened = {}
     for pr in block:
-        for sig, files in sig_outfiles.get(pr, {}).items():
-            if len(files) >= 2:
-                dampened[pr] = sig[0]
-                break
+        repeated = next((sig[0] for sig, files in sig_outfiles.get(pr, {}).items()
+                         if len(files) >= 2), None)
+        if repeated:
+            dampened[pr] = repeated
+        elif pr in asked and pr not in launched_since_ask:
+            dampened[pr] = REPEAT_ASK
     return block - set(dampened), dampened, url_by_pr
 
 
@@ -542,7 +627,7 @@ def build_reason(prs, urls=None):
         else 'pull requests ' + ', '.join('#' + p for p in prs)
     commands = '\n'.join(watcher_command(p, urls.get(p)) for p in prs)
     return (
-        f'pr-sentinel: you are ending your turn with an open {label} this '
+        f'{BLOCK_MARKER} with an open {label} this '
         f'session opened or was watching, but no watcher is tracking it and CI may still be '
         f'running. Launch the PR Sentinel watcher as a BACKGROUND task '
         f'(run_in_background) before you stop, so a CI failure or merge conflict '
@@ -578,6 +663,11 @@ _DAMPEN_DETAIL = {
         'a merge-queue removal still reported at the same commit across '
         'repeated watcher reports — re-enqueueing is a human\'s call, so there '
         'is nothing further to do here',
+    REPEAT_ASK:
+        'no watcher launched since this hook asked for one — it asks once per '
+        'pull request, so this is a notice rather than a second block; launch '
+        'the watcher if the PR is still open and yours, and nothing at all if '
+        'another session has already concluded it',
 }
 _DAMPEN_GENERIC = ('an unchanged watcher report at the same commit across '
                    'repeated runs — nothing has been pushed to move it')

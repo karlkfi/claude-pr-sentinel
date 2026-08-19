@@ -658,6 +658,46 @@ The non-terminal notices (`base_failure`, `ready_watching`, `blocked_watching`)
 are deliberately outside the set: the watcher keeps polling past them, so they
 are never the report a stop is being blocked over.
 
+### The ask the session cannot act on
+
+Signature dampening needs two watcher reports, so it cannot reach the case where
+there are none. A session ends its turn, the hook asks for a watcher, the session
+launches nothing, and the next turn end asks again — identically, forever.
+
+The reason a session has no move is usually that concluding the PR was never its
+job. Under a dispatch protocol a worker session is forbidden to merge: the
+orchestrator merges, from a different session, so `gh pr merge` cannot appear in
+the worker's transcript for a PR it opened. Both of the hook's handoff signals
+are therefore reduced to one — the watcher's terminal report — and when the
+watcher fails to arm the session is left with none, holding an open PR another
+session has already merged. That state is invisible to a hook that makes no
+network call, and correctly so.
+
+So the same bound applies without a report: a PR the hook already blocked over
+once, with no watcher launched since, is warned about rather than blocked again.
+The ordering is the whole signal — a launch *after* the block means the session
+acted on it and the next block is the backstop working, while a launch *before*
+it is the one whose completion left the PR unwatched in the first place.
+
+The first block still fires, because launching the watcher remains the right ask
+even under dispatch: on a PR that has already merged, the watcher answers
+`closed` on its first poll. What changes is only that the ask is made once.
+
+Finding the earlier block is a local read like every other input here. The
+harness records the block reason verbatim in three places — a
+`hook_blocking_error` attachment, the `stop_hook_summary` system entry, and the
+`Stop hook feedback:` message the block is fed back on — and the hook reads all
+three. Every one is harness-written, so the same text quoted inside a tool
+result (a CI-log excerpt, a session echoing its own feedback) reads as nothing,
+which is the property that matters: a forged prior block would silently disarm
+the backstop.
+
+Measured across 813 local session transcripts: 256 blocks over 143
+(session, PR) pairs — one first block each, plus 113 re-blocks. 97 of the pairs
+never drew a re-block at all. Of the 113, 71 followed a watcher launch made
+since the previous block, which is the backstop working; 42 followed none. This
+bounds those 42 and leaves the other 71 exactly as they were.
+
 ### One watcher per PR, and the one read that enforces it
 
 Sessions used to stack watchers. Across 622 local sessions that launched one,
