@@ -130,10 +130,13 @@ three hooks, the migration helper, and the activity report).
 - Runs **entirely locally with no network access.** You invoke it manually (or
   via the `/pr-sentinel-migrate-autofix` command) — it is not a hook and does
   not run on its own.
-- Reads the Claude **desktop app's** own session files under its
-  `claude-code-sessions` store to find the `autoFixEnabled` toggle, along with
-  the sibling `prState` / `prRepository` / `prNumber` / `title` fields it uses
-  to filter and to print a report. It does **not** read PR bodies or comments.
+- Reads the Claude **desktop app's** own session files — every `local_*.json`
+  at any depth under its `claude-code-sessions` store, skipping the
+  `.autofix-backup-*` directories this tool wrote itself — to find the
+  `autoFixEnabled` toggle, along with the sibling `prState` / `prRepository` /
+  `prNumber` / `title` fields it uses to filter and to print a report. A file
+  that does not parse as an object carrying that toggle is left untouched. It
+  does **not** read PR bodies or comments.
 - With `--apply` it **writes to disk** — the only component that does: it backs
   up each targeted file under `.autofix-backup-<timestamp>/` before setting
   `autoFixEnabled` to `false`. This is local file editing under your own
@@ -144,12 +147,13 @@ three hooks, the migration helper, and the activity report).
 - Runs **entirely locally with no network access.** You invoke it manually (or
   via the `/pr-sentinel-friction-report` command) — it is not a hook and does
   not run on its own.
-- Reads your Claude Code **session transcripts** under `~/.claude/projects`
-  (override with `--transcripts`) — the records Claude Code already writes for
-  every session. From them it extracts only: the plugin's own nudges, the
-  watcher launch commands, the watcher's own event reports, the Stop hook's
-  block message, each record's timestamp, and the working directory, which it
-  reduces to a directory name for the per-repository ranking.
+- Reads your Claude Code **session transcripts** — every `*.jsonl` at any
+  depth under `~/.claude/projects`, or under whatever `--transcripts` names —
+  the records Claude Code already writes for every session. From them it
+  extracts only: the plugin's own nudges, the watcher launch commands, the
+  watcher's own event reports, the Stop hook's block message, each record's
+  timestamp, and the working directory, which it reduces to a directory name
+  for the per-repository ranking.
 - It does **not** read PR bodies, PR review comments, or issue comments, and it
   parses nothing else out of your transcripts — not your prompts, not the
   model's replies, not other tools' output.

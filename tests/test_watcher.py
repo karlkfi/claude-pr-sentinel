@@ -1606,5 +1606,125 @@ class PrivacyDisclosure(unittest.TestCase):
                                    self.watcher_section(privacy)))
 
 
+# --- PRIVACY.md must name every component and the files it opens -----------
+
+HOOKS_MANIFEST = REPO / "hooks" / "hooks.json"
+COMMANDS = REPO / "commands"
+
+# A shipped script, spelled the way the manifests and the scripts spell it.
+_SCRIPT_REF = re.compile(r"scripts/[\w.-]+\.(?:py|sh)")
+
+
+def plugin_components():
+    """Every script the plugin runs in its own right.
+
+    Seeded from what the manifests declare — the hooks in `hooks/hooks.json`,
+    and the script each command invokes — then closed over the references
+    those scripts make. The closure is how the watcher is reached: no manifest
+    declares it, the hooks name its path when they nudge.
+
+    A module a component merely *imports* is deliberately not a component.
+    Its reads surface through whichever entry point imports it, and the policy
+    describes what a user runs rather than the file layout behind it.
+    """
+    frontier = set(_SCRIPT_REF.findall(
+        HOOKS_MANIFEST.read_text(encoding="utf-8")))
+    for command in sorted(COMMANDS.glob("*.md")):
+        frontier |= set(_SCRIPT_REF.findall(
+            command.read_text(encoding="utf-8")))
+    seen = set()
+    while frontier:
+        name = frontier.pop()
+        seen.add(name)
+        script = REPO / name
+        if script.exists():
+            frontier |= {ref for ref in _SCRIPT_REF.findall(
+                script.read_text(encoding="utf-8", errors="replace"))
+                if ref not in seen}
+    return sorted(seen)
+
+
+def undisclosed_components(privacy):
+    """The components `privacy` gives no section of its own.
+
+    The miss this catches is not a missing bullet, it is a missing section.
+    Replayed against v0.8.0, v0.8.1 and v0.9.0 this reports `guard.py` and
+    `stop-hook.py`: three releases shipped a registered hook the policy never
+    mentioned, and the release pre-flight walk is a human reading a diff.
+    """
+    return [c for c in plugin_components() if not privacy_section(privacy, c)]
+
+
+def undisclosed_globs(script, privacy):
+    """The glob patterns `script` reads by that `privacy` does not name.
+
+    A section that says which files a component opens should say it in the
+    unit the code uses — `local_*.json`, `*.jsonl` — since that is what a new
+    read changes. `**` is a recursion marker, not a file kind, so it is
+    dropped.
+
+    Scoped to lines that call a glob, which keeps a regex holding a `*` out of
+    the result. A pattern assembled across lines is invisible, the same
+    narrowness its GraphQL and REST siblings declare.
+    """
+    patterns = set()
+    for line in script.splitlines():
+        if line.strip().startswith("#") or not re.search(r"\b[ir]?glob\b",
+                                                         line):
+            continue
+        patterns |= {lit for lit in re.findall(r"""['"]([^'"\n]+)['"]""", line)
+                     if "*" in lit and lit != "**"}
+    return sorted(p for p in patterns if p not in privacy)
+
+
+class PrivacyComponents(unittest.TestCase):
+    def test_every_component_has_a_privacy_section(self):
+        """Every script the plugin runs gets its own section. v0.9.0 registered
+        three hooks and the policy described one of them, which no test asked
+        about — only the pre-flight walk, and it did not."""
+        missing = undisclosed_components(PRIVACY.read_text(encoding="utf-8"))
+        self.assertEqual(
+            missing, [],
+            msg="PRIVACY.md has no section for: " + ", ".join(missing))
+
+    def test_the_component_check_can_fail(self):
+        """A clean report and a broken closure look identical, so prove the
+        needle is found before trusting its absence."""
+        privacy = PRIVACY.read_text(encoding="utf-8").replace(
+            "## The Stop hook (`scripts/pr-sentinel-stop-hook.py`)",
+            "## The Stop hook")
+        self.assertIn("scripts/pr-sentinel-stop-hook.py",
+                      undisclosed_components(privacy))
+
+    def test_every_read_pattern_is_named_in_privacy(self):
+        """The local-file counterpart of the GitHub read gates: a component
+        that opens a new kind of file has to say so where it says the rest."""
+        privacy = PRIVACY.read_text(encoding="utf-8")
+        missing = {}
+        for component in plugin_components():
+            script = REPO / component
+            if not script.exists():
+                continue
+            gaps = undisclosed_globs(
+                script.read_text(encoding="utf-8", errors="replace"),
+                privacy_section(privacy, component))
+            if gaps:
+                missing[component] = gaps
+        self.assertEqual(
+            missing, {},
+            msg=("these components read by patterns their own PRIVACY.md "
+                 "section does not name: %r" % missing))
+
+    def test_the_read_pattern_check_can_fail(self):
+        """`*.jsonl` is every session transcript the activity report opens."""
+        privacy = PRIVACY.read_text(encoding="utf-8").replace("*.jsonl", "")
+        report = REPO / "scripts" / "friction-report.py"
+        self.assertIn(
+            "*.jsonl",
+            undisclosed_globs(
+                report.read_text(encoding="utf-8"),
+                privacy_section(privacy, "scripts/friction-report.py")))
+
+
 if __name__ == "__main__":
     unittest.main()

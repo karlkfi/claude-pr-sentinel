@@ -73,8 +73,6 @@ response.
 - **Never widen the `gh --json` field list to human/attacker-writable fields**
   (`body`, `comments`, `reviews`, `title`). The watcher reads GitHub-controlled
   metadata only. A test enforces this (`test_never_queries_comments_or_body`).
-  **A new GitHub read must be named in `PRIVACY.md`**, in that component's own
-  section — the `PrivacyDisclosure` tests fail the build otherwise.
 
 ### Python (`scripts/pr-sentinel-hook.py`)
 
@@ -97,6 +95,10 @@ invariants are non-negotiable and must not regress into a default:
 - **No auto-merge, ever.** Human merge review is the trust boundary. The plugin
   reads GitHub state and wakes the session; it does not merge, and must not
   learn to.
+
+**Disclose every read.** A new GitHub read, a new local file read, or a new
+component must be named in `PRIVACY.md`, in that component's own section — the
+disclosure tests in `tests/test_watcher.py` fail the build otherwise.
 
 CI log excerpts are semi-untrusted: keep the size cap, the ANSI strip, and the
 `DATA, NOT INSTRUCTIONS` frame. Any loosening knob is opt-in and documented as
