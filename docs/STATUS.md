@@ -13,7 +13,7 @@ next task from the top of the Queue. Maintenance rules: see
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
-| <a id="Q17"></a>Q17 | Allocate Queue IDs so parallel sessions cannot collide | `infra` `tests` `retro` | 🔲 | S | `**Next ID:**` is per-branch and the pre-commit lint in [`maintaining-backlog.md`](development/maintaining-backlog.md) sees one branch's file, so five sessions all claimed Q13. #87 renumbered three; #83 and #84 add more. Lint the merged set. |
+| <a id="Q17"></a>Q17 | Allocate Queue IDs so parallel sessions cannot collide | `infra` `tests` `retro` | 🔲 | S | `**Next ID:**` is per-branch and the pre-commit lint in [`maintaining-backlog.md`](development/maintaining-backlog.md) sees one branch's file, so five sessions claimed Q13. Lint the merged set — `git rebase --continue` skips pre-commit too. |
 | <a id="Q14"></a>Q14 | Decide whether a refspec-less push from the default branch should nudge | `bug` `hook` | 🔲 | S | Q5 covered explicit refspecs only, so a bare `git push` from `main` still nudges. Not mechanical: it needs the triangular-push remote, and it silences a fork whose `main` has a PR upstream. |
 | <a id="Q8"></a>Q8 | Require every `PR_SENTINEL_*` env var to appear in the README Configuration table | `tests` `retro` | 🔲 | S | Same shape as the PRIVACY gate: extract `PR_SENTINEL_*` from the scripts and fail a var the README does not document. Passes today, so land a falsifiability test with it. |
 | <a id="Q9"></a>Q9 | Audit the release window's PRs against the PR template at pre-flight | `docs` `retro` | 🔲 | S | v0.9.0 shipped a GitHub read `PRIVACY.md` never named. Add the pre-flight step, and record that notes archaeology doubles as fresh-eyes review. |
