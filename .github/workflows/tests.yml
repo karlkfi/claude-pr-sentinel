@@ -34,8 +34,11 @@ jobs:
           fetch-depth: 0
       - name: Lint the backlog as it would land on the base branch
         run: python3 scripts/queue.py lint
+      # --strict makes an unreadable remote or merge base fatal rather than a
+      # silent skip. Safe here and only here: CI always has both, and the run
+      # on #91 confirmed the check reaches the remote instead of skipping.
       - name: Every id this branch adds holds a claim on the remote
-        run: python3 scripts/queue.py claims
+        run: python3 scripts/queue.py claims --strict
       - name: Publish the ordered backlog
         if: always()
         run: python3 scripts/queue.py render --format table --all >> "$GITHUB_STEP_SUMMARY"
