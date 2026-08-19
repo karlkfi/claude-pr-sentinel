@@ -189,6 +189,20 @@ class ClassificationUnit(unittest.TestCase):
             self.assertEqual(hook.detect_action("git push origin v9.9.9", tmp),
                              "git_push")
 
+    def test_unbalanced_quote_retries_line_by_line(self):
+        # A contraction in a heredoc PR body made shlex reject the whole
+        # string, so nothing classified and nothing nudged (#76).
+        self.assertEqual(hook.detect_action(
+            "cat > body.md <<'EOF'\nit's fine\nEOF\n"
+            "gh pr create --body-file body.md"), "pr_create")
+        self.assertEqual(hook.detect_action(
+            "cat > body.md <<'EOF'\ndoesn't work\nEOF\n"
+            "git push -u origin claude/foo"), "git_push")
+
+    def test_unbalanced_quote_on_the_gh_line_itself(self):
+        self.assertEqual(hook.detect_action('gh pr create --title "it\'s'),
+                         "pr_create")
+
     def test_ignore_unrelated(self):
         self.assertIsNone(hook.detect_action("gh pr view 12"))
         self.assertIsNone(hook.detect_action("gh pr list"))
