@@ -1480,6 +1480,24 @@ PRIVACY = REPO / "PRIVACY.md"
 # GraphQL names that traverse to a PR without naming anything read about it.
 _SCAFFOLDING = {"query", "repository", "pullRequest", "nodes"}
 
+# REST path roots that traverse to a resource without naming anything read.
+_REST_SCAFFOLDING = {"repos", "orgs", "users"}
+
+
+def privacy_section(privacy, heading):
+    """The body of the one `## ...<heading>...` section of `privacy`.
+
+    A component is checked against its own section rather than the whole file.
+    Measured on PRIVACY.md as it stands: the preamble's "runs on your local
+    machine" would hand the REST segment `runs` a pass, and the Contact URL
+    ends in `/issues`, so a whole-file search excuses a read with prose that
+    has nothing to do with it. A heading that does not match yields "", which
+    reports every name as undisclosed — loud, and in the safe direction.
+    """
+    m = re.search(r"^##[^\n]*%s[^\n]*\n(.*?)(?=^## |\Z)" % re.escape(heading),
+                  privacy, re.M | re.S)
+    return m.group(1) if m else ""
+
 
 def undisclosed_reads(script, privacy):
     """The GraphQL names in `script` that `privacy` does not mention.
@@ -1506,14 +1524,52 @@ def undisclosed_reads(script, privacy):
                   if not re.search(r"\b%s\b" % re.escape(n), privacy))
 
 
+def undisclosed_rest_reads(script, privacy):
+    """The literal REST path segments in `script` that `privacy` does not name.
+
+    The GraphQL check's counterpart for `gh api <path>`. An endpoint's literal
+    segments (`actions`, `workflows`, `runs`) name what is read the way a
+    traversed object does, and Q12's `.../actions/workflows/<id>/runs` arrived
+    with nothing but a hand edit to disclose it.
+
+    Two shapes carry a path here — the argument to `gh api`, and the `repos/`
+    literal a helper assembles for it — so both are scanned. Matching ignores
+    case, since prose capitalises ("GitHub's Actions REST API").
+
+    Deliberately narrow, like its sibling. A segment interpolated from a shell
+    variable is invisible, and so is the `-q` projection, which PRIVACY.md
+    describes in prose ("the two timestamps' difference") rather than by field
+    name.
+    """
+    code = "\n".join(line for line in script.splitlines()
+                     if not line.strip().startswith("#"))
+    paths = {m.group(1) or m.group(2) or m.group(3) for m in re.finditer(
+        r"""gh api\s+(?:\\\s*)?(?:"([^"]*)"|'([^']*)'|(\S+))""", code)}
+    paths.discard("graphql")
+    paths |= set(re.findall(r"\brepos/\S+", code))
+    names = set()
+    for path in paths:
+        for seg in path.split("?", 1)[0].split("/"):
+            if (re.fullmatch(r"[a-z][a-z0-9_-]*", seg)
+                    and seg not in _REST_SCAFFOLDING):
+                names.add(seg)
+    return sorted(n for n in names
+                  if not re.search(r"\b%s\b" % re.escape(n), privacy, re.I))
+
+
 class PrivacyDisclosure(unittest.TestCase):
+    def watcher_section(self, privacy=None):
+        privacy = privacy or PRIVACY.read_text(encoding="utf-8")
+        section = privacy_section(privacy, "The watcher")
+        self.assertTrue(section, "PRIVACY.md has no `## The watcher` section")
+        return section
+
     def test_every_graphql_read_is_named_in_privacy(self):
         """The PR template asks whether a change adds a GitHub read, and that
         box is self-attested — v0.9.0 shipped a merge-queue actor read the
         policy never listed. This is the same question, asked by CI."""
         missing = undisclosed_reads(
-            WATCHER.read_text(encoding="utf-8"),
-            PRIVACY.read_text(encoding="utf-8"))
+            WATCHER.read_text(encoding="utf-8"), self.watcher_section())
         self.assertEqual(
             missing, [],
             msg=("the watcher reads these and PRIVACY.md does not name them: "
@@ -1526,7 +1582,148 @@ class PrivacyDisclosure(unittest.TestCase):
             "REMOVED_FROM_MERGE_QUEUE_EVENT", "")
         self.assertIn(
             "REMOVED_FROM_MERGE_QUEUE_EVENT",
-            undisclosed_reads(WATCHER.read_text(encoding="utf-8"), privacy))
+            undisclosed_reads(WATCHER.read_text(encoding="utf-8"),
+                              self.watcher_section(privacy)))
+
+    def test_every_rest_read_is_named_in_privacy(self):
+        """Same question for the `gh api` surface. Q12 added a read of
+        `.../actions/workflows/<id>/runs` and the GraphQL check could not see
+        it, so the disclosure rode on someone remembering."""
+        missing = undisclosed_rest_reads(
+            WATCHER.read_text(encoding="utf-8"), self.watcher_section())
+        self.assertEqual(
+            missing, [],
+            msg=("the watcher calls these REST path segments and PRIVACY.md "
+                 "does not name them: " + ", ".join(missing)))
+
+    def test_the_rest_check_can_fail(self):
+        """Prove the segment extraction finds a needle before trusting its
+        absence — `workflows` is the segment Q12's read introduced."""
+        privacy = PRIVACY.read_text(encoding="utf-8").replace("workflows", "")
+        self.assertIn(
+            "workflows",
+            undisclosed_rest_reads(WATCHER.read_text(encoding="utf-8"),
+                                   self.watcher_section(privacy)))
+
+
+# --- PRIVACY.md must name every component and the files it opens -----------
+
+HOOKS_MANIFEST = REPO / "hooks" / "hooks.json"
+COMMANDS = REPO / "commands"
+
+# A shipped script, spelled the way the manifests and the scripts spell it.
+_SCRIPT_REF = re.compile(r"scripts/[\w.-]+\.(?:py|sh)")
+
+
+def plugin_components():
+    """Every script the plugin runs in its own right.
+
+    Seeded from what the manifests declare — the hooks in `hooks/hooks.json`,
+    and the script each command invokes — then closed over the references
+    those scripts make. The closure is how the watcher is reached: no manifest
+    declares it, the hooks name its path when they nudge.
+
+    A module a component merely *imports* is deliberately not a component.
+    Its reads surface through whichever entry point imports it, and the policy
+    describes what a user runs rather than the file layout behind it.
+    """
+    frontier = set(_SCRIPT_REF.findall(
+        HOOKS_MANIFEST.read_text(encoding="utf-8")))
+    for command in sorted(COMMANDS.glob("*.md")):
+        frontier |= set(_SCRIPT_REF.findall(
+            command.read_text(encoding="utf-8")))
+    seen = set()
+    while frontier:
+        name = frontier.pop()
+        seen.add(name)
+        script = REPO / name
+        if script.exists():
+            frontier |= {ref for ref in _SCRIPT_REF.findall(
+                script.read_text(encoding="utf-8", errors="replace"))
+                if ref not in seen}
+    return sorted(seen)
+
+
+def undisclosed_components(privacy):
+    """The components `privacy` gives no section of its own.
+
+    The miss this catches is not a missing bullet, it is a missing section.
+    Replayed against v0.8.0, v0.8.1 and v0.9.0 this reports `guard.py` and
+    `stop-hook.py`: three releases shipped a registered hook the policy never
+    mentioned, and the release pre-flight walk is a human reading a diff.
+    """
+    return [c for c in plugin_components() if not privacy_section(privacy, c)]
+
+
+def undisclosed_globs(script, privacy):
+    """The glob patterns `script` reads by that `privacy` does not name.
+
+    A section that says which files a component opens should say it in the
+    unit the code uses — `local_*.json`, `*.jsonl` — since that is what a new
+    read changes. `**` is a recursion marker, not a file kind, so it is
+    dropped.
+
+    Scoped to lines that call a glob, which keeps a regex holding a `*` out of
+    the result. A pattern assembled across lines is invisible, the same
+    narrowness its GraphQL and REST siblings declare.
+    """
+    patterns = set()
+    for line in script.splitlines():
+        if line.strip().startswith("#") or not re.search(r"\b[ir]?glob\b",
+                                                         line):
+            continue
+        patterns |= {lit for lit in re.findall(r"""['"]([^'"\n]+)['"]""", line)
+                     if "*" in lit and lit != "**"}
+    return sorted(p for p in patterns if p not in privacy)
+
+
+class PrivacyComponents(unittest.TestCase):
+    def test_every_component_has_a_privacy_section(self):
+        """Every script the plugin runs gets its own section. v0.9.0 registered
+        three hooks and the policy described one of them, which no test asked
+        about — only the pre-flight walk, and it did not."""
+        missing = undisclosed_components(PRIVACY.read_text(encoding="utf-8"))
+        self.assertEqual(
+            missing, [],
+            msg="PRIVACY.md has no section for: " + ", ".join(missing))
+
+    def test_the_component_check_can_fail(self):
+        """A clean report and a broken closure look identical, so prove the
+        needle is found before trusting its absence."""
+        privacy = PRIVACY.read_text(encoding="utf-8").replace(
+            "## The Stop hook (`scripts/pr-sentinel-stop-hook.py`)",
+            "## The Stop hook")
+        self.assertIn("scripts/pr-sentinel-stop-hook.py",
+                      undisclosed_components(privacy))
+
+    def test_every_read_pattern_is_named_in_privacy(self):
+        """The local-file counterpart of the GitHub read gates: a component
+        that opens a new kind of file has to say so where it says the rest."""
+        privacy = PRIVACY.read_text(encoding="utf-8")
+        missing = {}
+        for component in plugin_components():
+            script = REPO / component
+            if not script.exists():
+                continue
+            gaps = undisclosed_globs(
+                script.read_text(encoding="utf-8", errors="replace"),
+                privacy_section(privacy, component))
+            if gaps:
+                missing[component] = gaps
+        self.assertEqual(
+            missing, {},
+            msg=("these components read by patterns their own PRIVACY.md "
+                 "section does not name: %r" % missing))
+
+    def test_the_read_pattern_check_can_fail(self):
+        """`*.jsonl` is every session transcript the activity report opens."""
+        privacy = PRIVACY.read_text(encoding="utf-8").replace("*.jsonl", "")
+        report = REPO / "scripts" / "friction-report.py"
+        self.assertIn(
+            "*.jsonl",
+            undisclosed_globs(
+                report.read_text(encoding="utf-8"),
+                privacy_section(privacy, "scripts/friction-report.py")))
 
 
 if __name__ == "__main__":
