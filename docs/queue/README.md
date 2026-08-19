@@ -21,6 +21,18 @@ exists to remove. `tests/test_queue_store.py` fails if one reappears.
 
 ## Filing an item
 
+**Check the item against current `origin/main` first.** A branch cut before a
+fix merged still shows the defect, and `gh pr list` sees only the fix that is
+still open:
+
+```bash
+git fetch origin main
+git log --oneline HEAD..origin/main    # any output: re-read the code on main
+```
+
+Q11 was filed 34 minutes after #73 merged the fix for it, from a branch cut
+before that merge, and was closed as already-fixed the same evening.
+
 ```bash
 ./scripts/alloc-queue-id.sh 'The item title'      # claims the id on the remote
 python3 scripts/queue.py rank --head              # or --tail, --after, --before
