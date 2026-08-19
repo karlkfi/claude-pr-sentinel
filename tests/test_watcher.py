@@ -1480,6 +1480,24 @@ PRIVACY = REPO / "PRIVACY.md"
 # GraphQL names that traverse to a PR without naming anything read about it.
 _SCAFFOLDING = {"query", "repository", "pullRequest", "nodes"}
 
+# REST path roots that traverse to a resource without naming anything read.
+_REST_SCAFFOLDING = {"repos", "orgs", "users"}
+
+
+def privacy_section(privacy, heading):
+    """The body of the one `## ...<heading>...` section of `privacy`.
+
+    A component is checked against its own section rather than the whole file.
+    Measured on PRIVACY.md as it stands: the preamble's "runs on your local
+    machine" would hand the REST segment `runs` a pass, and the Contact URL
+    ends in `/issues`, so a whole-file search excuses a read with prose that
+    has nothing to do with it. A heading that does not match yields "", which
+    reports every name as undisclosed — loud, and in the safe direction.
+    """
+    m = re.search(r"^##[^\n]*%s[^\n]*\n(.*?)(?=^## |\Z)" % re.escape(heading),
+                  privacy, re.M | re.S)
+    return m.group(1) if m else ""
+
 
 def undisclosed_reads(script, privacy):
     """The GraphQL names in `script` that `privacy` does not mention.
@@ -1506,14 +1524,52 @@ def undisclosed_reads(script, privacy):
                   if not re.search(r"\b%s\b" % re.escape(n), privacy))
 
 
+def undisclosed_rest_reads(script, privacy):
+    """The literal REST path segments in `script` that `privacy` does not name.
+
+    The GraphQL check's counterpart for `gh api <path>`. An endpoint's literal
+    segments (`actions`, `workflows`, `runs`) name what is read the way a
+    traversed object does, and Q12's `.../actions/workflows/<id>/runs` arrived
+    with nothing but a hand edit to disclose it.
+
+    Two shapes carry a path here — the argument to `gh api`, and the `repos/`
+    literal a helper assembles for it — so both are scanned. Matching ignores
+    case, since prose capitalises ("GitHub's Actions REST API").
+
+    Deliberately narrow, like its sibling. A segment interpolated from a shell
+    variable is invisible, and so is the `-q` projection, which PRIVACY.md
+    describes in prose ("the two timestamps' difference") rather than by field
+    name.
+    """
+    code = "\n".join(line for line in script.splitlines()
+                     if not line.strip().startswith("#"))
+    paths = {m.group(1) or m.group(2) or m.group(3) for m in re.finditer(
+        r"""gh api\s+(?:\\\s*)?(?:"([^"]*)"|'([^']*)'|(\S+))""", code)}
+    paths.discard("graphql")
+    paths |= set(re.findall(r"\brepos/\S+", code))
+    names = set()
+    for path in paths:
+        for seg in path.split("?", 1)[0].split("/"):
+            if (re.fullmatch(r"[a-z][a-z0-9_-]*", seg)
+                    and seg not in _REST_SCAFFOLDING):
+                names.add(seg)
+    return sorted(n for n in names
+                  if not re.search(r"\b%s\b" % re.escape(n), privacy, re.I))
+
+
 class PrivacyDisclosure(unittest.TestCase):
+    def watcher_section(self, privacy=None):
+        privacy = privacy or PRIVACY.read_text(encoding="utf-8")
+        section = privacy_section(privacy, "The watcher")
+        self.assertTrue(section, "PRIVACY.md has no `## The watcher` section")
+        return section
+
     def test_every_graphql_read_is_named_in_privacy(self):
         """The PR template asks whether a change adds a GitHub read, and that
         box is self-attested — v0.9.0 shipped a merge-queue actor read the
         policy never listed. This is the same question, asked by CI."""
         missing = undisclosed_reads(
-            WATCHER.read_text(encoding="utf-8"),
-            PRIVACY.read_text(encoding="utf-8"))
+            WATCHER.read_text(encoding="utf-8"), self.watcher_section())
         self.assertEqual(
             missing, [],
             msg=("the watcher reads these and PRIVACY.md does not name them: "
@@ -1526,7 +1582,28 @@ class PrivacyDisclosure(unittest.TestCase):
             "REMOVED_FROM_MERGE_QUEUE_EVENT", "")
         self.assertIn(
             "REMOVED_FROM_MERGE_QUEUE_EVENT",
-            undisclosed_reads(WATCHER.read_text(encoding="utf-8"), privacy))
+            undisclosed_reads(WATCHER.read_text(encoding="utf-8"),
+                              self.watcher_section(privacy)))
+
+    def test_every_rest_read_is_named_in_privacy(self):
+        """Same question for the `gh api` surface. Q12 added a read of
+        `.../actions/workflows/<id>/runs` and the GraphQL check could not see
+        it, so the disclosure rode on someone remembering."""
+        missing = undisclosed_rest_reads(
+            WATCHER.read_text(encoding="utf-8"), self.watcher_section())
+        self.assertEqual(
+            missing, [],
+            msg=("the watcher calls these REST path segments and PRIVACY.md "
+                 "does not name them: " + ", ".join(missing)))
+
+    def test_the_rest_check_can_fail(self):
+        """Prove the segment extraction finds a needle before trusting its
+        absence — `workflows` is the segment Q12's read introduced."""
+        privacy = PRIVACY.read_text(encoding="utf-8").replace("workflows", "")
+        self.assertIn(
+            "workflows",
+            undisclosed_rest_reads(WATCHER.read_text(encoding="utf-8"),
+                                   self.watcher_section(privacy)))
 
 
 if __name__ == "__main__":

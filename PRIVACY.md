@@ -1,6 +1,6 @@
 # Privacy Policy — pr-sentinel
 
-_Last updated: 2026-08-18_
+_Last updated: 2026-08-19_
 
 pr-sentinel is a Claude Code plugin that runs on your local machine. Its
 components have different data profiles, described honestly below: two hooks,
@@ -92,6 +92,10 @@ three hooks, the migration helper, and the activity report).
     taken once per run of pending checks rather than per poll. Set
     `PR_SENTINEL_POLL_CLAMP=0` to switch this read off;
   - a failing run's step log (`gh run view --log-failed`), only on a failure.
+- The two workflow-run reads above go to GitHub's Actions REST API under your
+  own repository, and nowhere else: `actions/runs/{id}` for a single run, and
+  `actions/workflows/{id}/runs` for that workflow's latest run on the base
+  branch.
 - It **never** requests or parses the PR body, PR review comments, or issue
   comments. It reads GitHub-controlled check metadata and merge state only.
 - All network traffic is between your machine and GitHub, via `gh`, under your

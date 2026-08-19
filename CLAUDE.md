@@ -73,8 +73,8 @@ response.
 - **Never widen the `gh --json` field list to human/attacker-writable fields**
   (`body`, `comments`, `reviews`, `title`). The watcher reads GitHub-controlled
   metadata only. A test enforces this (`test_never_queries_comments_or_body`).
-  **A new GitHub read must be named in `PRIVACY.md`** —
-  `test_every_graphql_read_is_named_in_privacy` fails the build otherwise.
+  **A new GitHub read must be named in `PRIVACY.md`**, in that component's own
+  section — the `PrivacyDisclosure` tests fail the build otherwise.
 
 ### Python (`scripts/pr-sentinel-hook.py`)
 
