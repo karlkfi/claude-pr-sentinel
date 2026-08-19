@@ -1,9 +1,9 @@
 # Roadmap
 
-The MVP is the **watcher** + the **PostToolUse nudge**. The items below are
-designed and scoped but deliberately **not yet implemented**, so the initial
-plugin stays small and reviewable. Each is tracked as a Queue row in
-[`STATUS.md`](STATUS.md); this doc holds the design intent.
+The MVP is the **watcher** + the **PostToolUse nudge**. The items below were
+designed and scoped separately from it, so the initial plugin stayed small and
+reviewable; all four have since shipped. This doc holds the design intent —
+open work is tracked as a Queue row in [`STATUS.md`](STATUS.md).
 
 ## R1 — Stop-hook backstop ✅ shipped
 
@@ -85,14 +85,39 @@ no `jq` dependency and fits the existing test harness. The optional GitHub-side
 conversation lock (issue #3) was deliberately left out — a separate concern
 with a public-repo community cost.
 
-## R3 — Friction / activity report (later)
+## R3 — Friction / activity report ✅ shipped
 
-A read-only analyzer over local session transcripts (the pattern from
-workspace-guard / prod-guard `friction-report`) that ranks: how often the nudge
-fired, how often a watcher was actually launched, and which watcher events
-dominated (check_failure vs conflict vs ready). This closes the loop on whether
-the advisory nudge is being followed and where CI time is spent. It adds no
-telemetry — it re-reads what Claude Code already recorded.
+Implemented as [`scripts/friction-report.py`](../scripts/friction-report.py)
+plus the [`/pr-sentinel-friction-report`](../commands/pr-sentinel-friction-report.md)
+slash command, following the workspace-guard / prod-guard `friction-report`
+pattern. It ranks how often the nudge fired, how often a watcher was actually
+launched, and which watcher events dominated. It adds no telemetry — it re-reads
+what Claude Code already recorded, and makes no network call.
+
+**What the transcripts actually hold**, measured over the local corpus while
+building it — each of these changed the implementation:
+
+- **A backgrounded watcher's report does not come back through its launch's own
+  `tool_result`.** The harness hands it over as a task-output file the session
+  then reads (`Read`, `cat`, `TaskOutput`), so the obvious `tool_use_id` join
+  from launch to report finds almost nothing: 7 of 2054 reports joined, 2047 did
+  not. Reports are matched wherever they surface instead.
+- **A `Read` of that file arrives line-numbered.** Anchoring the report header at
+  the very start of the text drops most real events; the prefix has to be
+  stripped first.
+- **Matching the watcher's filename counts mentions as launches.** Every
+  `grep`, `cat`, `find`, `shellcheck` and heredoc naming the script is counted:
+  2558 launches where 2372 happened, and 207 foreground launches where 22
+  happened. Detection is anchored on the `bash …` invocation.
+- **The same output file gets read more than once**, so reports are deduplicated
+  per session on (event, PR, report body) — 352 of 2054 raw matches, 17%.
+
+All four were measured over the same 875 local transcripts. The plugin's own
+repository is the largest single source of text mentioning these markers, all
+of it source, tests and prose rather than usage.
+Every detector is anchored so that development noise is not reported as
+activity, and `tests/test_friction_report.py` fixes each anchor with a fixture
+built from the real signature.
 
 ## Non-roadmap (explicit non-goals)
 

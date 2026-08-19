@@ -3,16 +3,16 @@
 _Last updated: 2026-08-18_
 
 pr-sentinel is a Claude Code plugin that runs on your local machine. Its
-components have different data profiles, described honestly below: two hooks
-and a migration helper that never leave your machine, one watcher that talks to
-GitHub, and one hook that asks GitHub a single narrow question before you open
-a pull request.
+components have different data profiles, described honestly below: two hooks,
+a migration helper and an activity report that never leave your machine, one
+watcher that talks to GitHub, and one hook that asks GitHub a single narrow
+question before you open a pull request.
 
 ## Data we collect
 
 None. The plugin has no analytics, no telemetry, and no data collection of any
 kind. It ships as one bash watcher and a few stdlib-only Python scripts (the
-three hooks and the migration helper).
+three hooks, the migration helper, and the activity report).
 
 ## The PostToolUse hook (`scripts/pr-sentinel-hook.py`)
 
@@ -124,6 +124,25 @@ three hooks and the migration helper).
   up each targeted file under `.autofix-backup-<timestamp>/` before setting
   `autoFixEnabled` to `false`. This is local file editing under your own
   account; nothing leaves the machine.
+
+## The activity report (`scripts/friction-report.py`)
+
+- Runs **entirely locally with no network access.** You invoke it manually (or
+  via the `/pr-sentinel-friction-report` command) — it is not a hook and does
+  not run on its own.
+- Reads your Claude Code **session transcripts** under `~/.claude/projects`
+  (override with `--transcripts`) — the records Claude Code already writes for
+  every session. From them it extracts only: the plugin's own nudges, the
+  watcher launch commands, the watcher's own event reports, the Stop hook's
+  block message, each record's timestamp, and the working directory, which it
+  reduces to a directory name for the per-repository ranking.
+- It does **not** read PR bodies, PR review comments, or issue comments, and it
+  parses nothing else out of your transcripts — not your prompts, not the
+  model's replies, not other tools' output.
+- **Writes nothing to disk** and sends nothing anywhere. It prints a summary to
+  standard output, which stays in your terminal or your session.
+- It adds **no telemetry**. It collects nothing new; it re-reads what Claude
+  Code already recorded locally.
 
 ## Third parties
 
