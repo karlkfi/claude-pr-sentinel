@@ -101,7 +101,7 @@ Otherwise emit nothing (allow the stop).
   script.
 - **Docs** — `README.md` (Stop-hook row in the decision tables, move it out of
   Limitations/Roadmap "not yet built"), `docs/DESIGN.md` (mechanism note if
-  changed), `docs/STATUS.md` (remove Q1 — isolated commit).
+  changed), `docs/queue/Q1.md` (delete the item).
 
 ## Test scenarios
 

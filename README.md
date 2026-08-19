@@ -462,7 +462,7 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_BACKOFF_NUM` / `_DEN` | `3` / `2` | backoff multiplier once checks have settled (interval × num ÷ den each poll) |
 | `PR_SENTINEL_AUTOALLOW` | (on) | auto-approve the plugin's own watcher launch so it isn't prompted by the base Bash permission; `0`/`false`/empty keeps the prompt (see below) |
 | `PR_SENTINEL_OVERLAP_ENABLED` | (on) | deny a `gh pr create` whose branch edits lines an open PR already changes; `false`/`0`/empty turns the check off, and with it the only GitHub query any hook makes (see [Overlapping pull requests](#overlapping-pull-requests)) |
-| `PR_SENTINEL_OVERLAP_IGNORE` | (unset) | colon-separated glob patterns the overlap check discounts — for the file every branch edits by construction, e.g. `docs/STATUS.md:CHANGELOG.md` |
+| `PR_SENTINEL_OVERLAP_IGNORE` | (unset) | colon-separated glob patterns the overlap check discounts — for a file every branch edits by construction, e.g. `CHANGELOG.md` |
 | `PR_SENTINEL_BASE_REF` | (`origin/HEAD`, else `origin/main`) | the ref the overlap check forks this branch from when computing its changed lines |
 | `PR_SENTINEL_DISABLE` | (unset) | `1` disables the PostToolUse nudge, the Stop backstop, and the watcher-launch auto-allow |
 | `PR_SENTINEL_SESSIONS_ROOT` | (platform default) | overrides the session-store path the [migration helper](#migrating-from-desktop-auto-fix) scans (same as its `--root`) |
@@ -933,7 +933,7 @@ no network call. See [`PRIVACY.md`](PRIVACY.md) for the full policy.
 
 Bugs, ideas, and questions go in
 [GitHub Issues](https://github.com/karlkfi/claude-pr-sentinel/issues). For the
-development backlog, see [`docs/STATUS.md`](docs/STATUS.md).
+development backlog, see [`docs/queue/`](docs/queue/README.md).
 
 ## License
 

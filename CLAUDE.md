@@ -20,8 +20,8 @@ one sentence and the approach in two or three. If the goal is unclear, ask one
 focused question rather than guessing.
 
 Make the smallest change that achieves the goal. If you notice problems outside
-the current task's scope, flag them on the Queue in `docs/STATUS.md` rather than
-fixing them inline.
+the current task's scope, file them in the backlog under `docs/queue/` rather
+than fixing them inline.
 
 Capture knowledge durably, don't leave it in chat. Standing preferences and
 decisions go in the repo (this file, `docs/`, or memory), not just this turn's
@@ -51,10 +51,11 @@ response.
    - **Changed hook detection** → the PostToolUse table in `README.md`.
    - **New configuration or env var** → the Configuration table in `README.md`
      and `.claude-plugin/plugin.json` keywords/description.
-   - Update `docs/STATUS.md`: remove the completed Queue row.
-5. **Commit when done** — small, focused, Conventional Commits. Commit
-   `docs/STATUS.md` changes in their own isolated commit; a pre-commit gate
-   lints them (one-time `git config core.hooksPath .githooks` per clone).
+   - Delete the completed item: `git rm docs/queue/QN.md`.
+5. **Commit when done** — small, focused, Conventional Commits. A pre-commit
+   gate lints the backlog store (one-time `git config core.hooksPath .githooks`
+   per clone). Backlog edits need no isolated commit: an item owns a file, so
+   there is no shared file for isolation to keep resolvable.
    Backlog format and process: `docs/development/maintaining-backlog.md`.
 
 ## Code standards

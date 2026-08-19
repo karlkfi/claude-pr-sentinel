@@ -1,6 +1,6 @@
 # Plan — Q2: PreToolUse foreground-poll deny
 
-Backlog item [Q2](../STATUS.md) / Roadmap [R2](../ROADMAP.md).
+Backlog item Q2 (since shipped) / Roadmap [R2](../ROADMAP.md).
 
 ## Goal (one sentence)
 
@@ -72,7 +72,7 @@ fail-open says skip it.
 - `docs/DESIGN.md` — note R2 now shipped where it says "scaffolded".
 - `docs/ROADMAP.md` — mark R2 shipped / reconcile the override wording.
 - `.claude-plugin/plugin.json` — no new keyword needed (already has `security`).
-- `docs/STATUS.md` — remove the Q2 row (own isolated commit).
+- `docs/queue/Q2.md` — delete the item when it ships.
 
 ## Coordination with Q1
 

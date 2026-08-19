@@ -30,5 +30,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - name: Lint the backlog as it would land on the base branch
-        run: ./scripts/lint-backlog.sh docs/STATUS.md
+        run: python3 scripts/queue.py lint
+      - name: Every id this branch adds holds a claim on the remote
+        run: python3 scripts/queue.py claims
+      - name: Publish the ordered backlog
+        if: always()
+        run: python3 scripts/queue.py render --format table --all >> "$GITHUB_STEP_SUMMARY"
