@@ -67,6 +67,12 @@ POLL_AGE_DIVISOR="${PR_SENTINEL_POLL_AGE_DIVISOR:-10}"  # pending poll = check a
 # Zero would divide by zero and kill the watch, so anything but a positive
 # integer falls back to the default (same fail-safe stance as HEAL/WATCH_UNTIL).
 [[ "$POLL_AGE_DIVISOR" =~ ^[1-9][0-9]*$ ]] || POLL_AGE_DIVISOR=10
+# Whether to also clamp a pending poll so it never sleeps past the expected end
+# of the run (see resolve_expected_duration). Costs two `gh api` reads per
+# distinct pending workflow, once per watch. `0`, `false`, or an explicitly
+# empty value paces on check age alone.
+POLL_CLAMP=$(printf '%s' "${PR_SENTINEL_POLL_CLAMP-1}" | tr '[:upper:]' '[:lower:]')
+case "$POLL_CLAMP" in ''|0|false|no|off) POLL_CLAMP=0 ;; *) POLL_CLAMP=1 ;; esac
 TIMEOUT="${PR_SENTINEL_TIMEOUT:-3600}"           # overall watch budget, seconds
 LOG_MAX_BYTES="${PR_SENTINEL_LOG_MAX_BYTES:-8192}"  # CI log excerpt cap, bytes
 # Transient-failure retry horizon: a `gh` query that keeps failing without
@@ -128,6 +134,14 @@ GREEN_SEEN=0
 # saw nothing pending. This is what paces a pending poll; clearing it on a poll
 # with no pending checks is what makes a push restart the clock.
 PENDING_SINCE=0
+
+# How long the current run of pending checks is expected to take, in seconds (0
+# = unknown), and the set of run paths that estimate was measured for. The set
+# is the cache key: an unchanged one costs nothing after the first pending poll,
+# a workflow registering late re-measures, and an estimate that would not
+# resolve is not retried on every poll.
+EXPECTED_DURATION=0
+EXPECTED_FOR=""
 
 # Set to 1 once a poll has seen the PR hold a merge-queue entry. From then on
 # the queue owns the PR: branch-state events are suspended (their remedies all
@@ -405,6 +419,58 @@ base_run_failure() {
 		*) return 1 ;;
 	esac
 	printf '%s (run %s, %s, %s)' "${file##*/}" "$run_id" "${sha:0:7}" "$conclusion"
+}
+
+# The base branch's latest SUCCESSFUL run of one workflow, as a duration in
+# seconds. Returns 1 when the base has no green run of that workflow, or the
+# response is unreadable — the caller then paces on check age alone.
+#
+# Scoped to the WORKFLOW for the reason base_run_failure is, and to `success`
+# because a cancelled or failed run stopped early: its wall time says nothing
+# about how long a passing run takes. jq subtracts the two timestamps inside the
+# projection, so no date(1) dialect is involved and no timestamp reaches the
+# watcher — only the difference.
+base_run_duration() {
+	local repo="$1" wf="$2" out
+	out=$(gh api \
+		"${repo}/actions/workflows/${wf}/runs?branch=${BASE}&status=success&per_page=1" \
+		-q '.workflow_runs[] | ((.updated_at | fromdateiso8601) - (.run_started_at | fromdateiso8601))' \
+		2>/dev/null || true)
+	[[ "$out" =~ ^[1-9][0-9]*$ ]] || return 1
+	printf '%s' "$out"
+}
+
+# Measure how long this run of pending checks should take, into
+# EXPECTED_DURATION — the LONGEST of the base branch's last green runs of the
+# workflows behind them, since the PR is not done until its slowest workflow is.
+# 0 when none resolved, which leaves the clamp inert.
+#
+# Two `gh api` calls per distinct pending run, and only when the run set differs
+# from the one already measured, so a steady set costs them once per watch. A
+# set that resolves to nothing is cached too: an unreadable run and a workflow
+# the base has never run are both permanent for this watch, and retrying them
+# every poll would spend two calls a poll to learn the same thing.
+resolve_expected_duration() {
+	local links="$1" link path wf_id d seen="" paths="" longest=0
+	(( POLL_CLAMP == 1 )) || return 0
+	while IFS= read -r link; do
+		[[ -z "$link" ]] && continue
+		path=$(run_api_path_from_link "$link")
+		[[ -z "$path" ]] && continue
+		case " $seen " in *" $path "*) continue ;; esac
+		seen="$seen $path"
+		paths="${paths}${path}"$'\n'
+	done <<<"$links"
+	[[ "$paths" == "$EXPECTED_FOR" ]] && return 0
+	EXPECTED_FOR="$paths"
+	while IFS= read -r path; do
+		[[ -z "$path" ]] && continue
+		wf_id=$(gh api "$path" -q '.workflow_id' 2>/dev/null || true)
+		[[ "$wf_id" =~ ^[0-9]+$ ]] || continue
+		d=$(base_run_duration "${path%/actions/runs/*}" "$wf_id") || continue
+		(( d > longest )) && longest="$d"
+	done <<<"$paths"
+	EXPECTED_DURATION="$longest"
 }
 
 # Whether EVERY surviving failing check belongs to a workflow that is ALSO
@@ -874,7 +940,7 @@ main() {
 
 			# --- fetch check buckets (gh exits non-zero when failing/pending) ---
 			local checks fail_count=0 pending_count=0 pass_count=0
-			local failed_names="" failed_links=""
+			local failed_names="" failed_links="" pending_links=""
 			checks=$(gh_pr_checks 2>/dev/null || true)
 			if [[ -n "$checks" ]]; then
 				local bucket name link
@@ -887,7 +953,9 @@ main() {
 							failed_links="${failed_links}${link}"$'\n'
 							;;
 						pending)
-							pending_count=$((pending_count + 1)) ;;
+							pending_count=$((pending_count + 1))
+							pending_links="${pending_links}${link}"$'\n'
+							;;
 						pass|skipping)
 							pass_count=$((pass_count + 1)) ;;
 					esac
@@ -899,6 +967,7 @@ main() {
 			# before the absorption below, which cannot change pending_count.
 			if (( pending_count > 0 )); then
 				(( PENDING_SINCE == 0 )) && PENDING_SINCE=$(now)
+				resolve_expected_duration "$pending_links"
 			else
 				PENDING_SINCE=0
 			fi
@@ -1022,7 +1091,18 @@ main() {
 		# backoff below still owns a settled PR: past green, what the watch
 		# waits for is a sibling merge or a close, which no age predicts.
 		if (( PENDING_SINCE > 0 )); then
-			sleep_for=$(( ( $(now) - PENDING_SINCE ) / POLL_AGE_DIVISOR ))
+			local age=$(( $(now) - PENDING_SINCE ))
+			sleep_for=$(( age / POLL_AGE_DIVISOR ))
+			# That widening is at its loosest exactly when a long build is about
+			# to finish, so hold the poll inside the expected end of the run.
+			# Only while the estimate still stands: a run that has already passed
+			# it has outlasted the base's last green one, so the estimate is
+			# spent and the age rule owns the pacing again rather than pinning
+			# every overrun to the floor.
+			if (( EXPECTED_DURATION > age )); then
+				local to_finish=$(( EXPECTED_DURATION - age ))
+				(( sleep_for > to_finish )) && sleep_for="$to_finish"
+			fi
 			(( sleep_for < INTERVAL )) && sleep_for="$INTERVAL"
 			(( sleep_for > MAX_INTERVAL )) && sleep_for="$MAX_INTERVAL"
 		fi

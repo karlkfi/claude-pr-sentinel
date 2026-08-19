@@ -85,6 +85,12 @@ three hooks and the migration helper).
   - a failing check's workflow run — its conclusion, and its workflow id and
     that workflow's latest completed run on the **base branch**, to tell a
     failure the PR caused from one it inherited — only on a failure;
+  - a *pending* check's workflow run — its workflow id, and how long that
+    workflow's latest **successful** run on the base branch took, so a poll
+    never sleeps past the expected end of the run. Only the two timestamps'
+    difference is read, never the timestamps themselves, and the measurement is
+    taken once per run of pending checks rather than per poll. Set
+    `PR_SENTINEL_POLL_CLAMP=0` to switch this read off;
   - a failing run's step log (`gh run view --log-failed`), only on a failure.
 - It **never** requests or parses the PR body, PR review comments, or issue
   comments. It reads GitHub-controlled check metadata and merge state only.

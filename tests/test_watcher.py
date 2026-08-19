@@ -22,6 +22,9 @@ scenario is a directory of small fixture files:
   base_run.<wf> -> "conclusion\\trun-id\\thead-sha\\tworkflow-path" for the base
                  branch's latest completed run of workflow <wf> (absent = the
                  base has no run of that workflow at all)
+  base_duration.<wf> -> seconds the base branch's latest SUCCESSFUL run of
+                 workflow <wf> took, for the poll clamp's projection (absent =
+                 the base has no green run of it, so the clamp stays inert)
   queue_entry  -> "true"/"false" for the `gh api graphql` merge-queue query
                  (absent = the query fails, e.g. a token that cannot run
                  GraphQL — the watcher must treat membership as unknown)
@@ -75,11 +78,16 @@ GH_STUB = textwrap.dedent(
     # dispatches below instead.)
     if [[ "${1:-}" == "api" && "${2:-}" != "graphql" ]]; then
       case "$2" in
-        # repos/<o>/<r>/actions/workflows/<wf>/runs?branch=... -> base_run.<wf>.
-        # No fixture means the base has no run of that workflow at all.
+        # repos/<o>/<r>/actions/workflows/<wf>/runs?branch=... -> base_run.<wf>,
+        # or base_duration.<wf> for the poll clamp, whose query shares that path
+        # and differs only by projection. No fixture means the base has no such
+        # run of that workflow at all.
         */actions/workflows/*)
           wf="${2#*/actions/workflows/}"; wf="${wf%%/*}"
-          emit "base_run.$wf" || true
+          case "${4:-}" in
+            *fromdateiso8601*) emit "base_duration.$wf" || true ;;
+            *)                 emit "base_run.$wf" || true ;;
+          esac
           exit 0 ;;
       esac
       # repos/<o>/<r>/actions/runs/<id> -> run_workflow.<id> for the
@@ -1304,6 +1312,101 @@ class WatcherCase(unittest.TestCase):
                  "PR_SENTINEL_POLL_AGE_DIVISOR": "0"})
         self.assertIn("PR-SENTINEL EVENT: closed", out)
         self.assertEqual(slept, [2, 2])
+
+    # -- the poll clamp ------------------------------------------------------
+
+    # A pending run whose link resolves to a workflow the base branch has a
+    # green run of, so the clamp has an expected duration to work from. The
+    # bare "link" the tests above use resolves to nothing, which is what leaves
+    # the clamp inert for them.
+    CLAMP_FILES = {
+        "pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
+        "pr_view.10": "MERGED\tUNKNOWN\tmain\tabc1234def\n",
+        "pr_checks": "pending\tbuild\thttps://github.com/o/r/actions/runs/22/job/2\n",
+        "run_workflow.22": "77\n",
+        "base_duration.77": "30\n",
+    }
+    CLAMP_ENV = {"PR_SENTINEL_INTERVAL": "2", "PR_SENTINEL_MAX_INTERVAL": "60",
+                 "PR_SENTINEL_POLL_AGE_DIVISOR": "2",
+                 "PR_SENTINEL_TIMEOUT": "100000"}
+
+    def _clamped(self, env=None, files=None):
+        run_env = dict(self.CLAMP_ENV)
+        run_env.update(env or {})
+        run_files = dict(self.CLAMP_FILES)
+        run_files.update(files or {})
+        rc, _, err = self.run_watcher(run_files, env=run_env, virtual_clock=True)
+        self.assertEqual(rc, 0, msg=err)
+        return sleeps(err)
+
+    def test_pending_poll_never_sleeps_past_the_expected_finish(self):
+        """Age-proportional pacing is loosest right when a long build is about
+        to end: at 28s into a 30s run it would sleep 14 more, so a failure at
+        29s waits 13s for a watcher that could have asked at 30. The clamp
+        gives that poll back, then releases once the run outlasts the estimate
+        — a workflow that got slower must not be pinned to the floor for the
+        whole overrun."""
+        self.assertEqual(self._clamped(), [2, 2, 2, 3, 4, 6, 9, 2, 15])
+
+    def test_the_longest_pending_workflow_sets_the_estimate(self):
+        """The PR is not done until its slowest workflow is, so a fast one
+        pending beside a slow one must not pull the estimate down. Same pacing
+        as the 30s run above; taking the last workflow measured, or the
+        shortest, would give a different list."""
+        files = {
+            "pr_checks": ("pending\tbuild\thttps://github.com/o/r/actions/runs/22/job/2\n"
+                          "pending\tlint\thttps://github.com/o/r/actions/runs/23/job/3\n"),
+            "run_workflow.23": "88\n",
+            "base_duration.88": "10\n",
+        }
+        self.assertEqual(self._clamped(files=files), [2, 2, 2, 3, 4, 6, 9, 2, 15])
+
+    def test_the_clamp_can_be_switched_off(self):
+        """Falsifiability partner: same fixtures, clamp disabled. The two polls
+        that differ are the whole of what the clamp does, so a clamp that never
+        fired would make the test above pass by accident."""
+        self.assertEqual(self._clamped(env={"PR_SENTINEL_POLL_CLAMP": "0"}),
+                         [2, 2, 2, 3, 4, 6, 9, 14, 21])
+
+    def test_a_base_with_no_green_run_leaves_the_pacing_alone(self):
+        """Fail safe to unclamped. A brand-new workflow, or one whose paths the
+        base has never touched, has no duration to predict from — and neither
+        does an unreadable response."""
+        self.assertEqual(self._clamped(files={"base_duration.77": ""}),
+                         [2, 2, 2, 3, 4, 6, 9, 14, 21])
+
+    def test_the_expected_duration_is_measured_once_per_run(self):
+        """Two `gh api` calls per poll would trade the latency this saves for
+        API budget, so the estimate is cached against the run set it was taken
+        for. The stub records each query to a FILE, not to stderr, which
+        base_run_duration discards."""
+        log = os.path.join(tempfile.mkdtemp(prefix="pr-sentinel-test-"), "queries")
+        gh = textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -u
+            c="$GH_STUB_DIR/.c"; n=0; [[ -f "$c" ]] && n=$(cat "$c")
+            case "${1:-}:${2:-}" in
+              pr:view)
+                n=$((n + 1)); echo "$n" > "$c"
+                if (( n >= 6 )); then printf 'MERGED\tUNKNOWN\tmain\tabc1234def\n'
+                else printf 'OPEN\tCLEAN\tmain\tabc1234def\n'; fi
+                exit 0 ;;
+              pr:checks)
+                printf 'pending\tbuild\thttps://github.com/o/r/actions/runs/22/job/2\n'
+                exit 0 ;;
+              api:*/actions/workflows/*) echo query >> "$DURATION_LOG"; echo 30; exit 0 ;;
+              api:*/actions/runs/*)      echo 77; exit 0 ;;
+            esac
+            exit 0
+            """
+        )
+        rc, out, err = self._run_with_gh(gh, env={"DURATION_LOG": log})
+        self.assertEqual(rc, 0, msg=err)
+        # Five pending polls before the PR merges, one measurement.
+        self.assertIn("PR-SENTINEL EVENT: closed", out)
+        with open(log, encoding="utf-8") as f:
+            self.assertEqual(len(f.readlines()), 1)
 
     # -- input validation ----------------------------------------------------
 
