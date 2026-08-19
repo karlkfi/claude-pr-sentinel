@@ -57,6 +57,7 @@ nudge to (re)launch the watcher after a PR-opening or branch-push command:
 | `gh pr create` · `git push` you cancelled mid-run (`interrupted`) | silent (the command never finished) |
 | `git push origin --delete claude/foo` | silent (branch deletion) |
 | `git push --tags` · `git push origin refs/tags/v1.2.3` · `git push origin v1.2.3` (a local tag) | silent (release cut, not a PR shape) |
+| `git push origin main v1.2.3` · `git push origin HEAD:main` (`main` being the default branch) | silent (release cut — the default branch never has a PR of its own) |
 | `gh pr view 12` · `gh pr list` · `git status` | silent (not a push/create) |
 | any command with `PR_SENTINEL_DISABLE=1` set | silent |
 

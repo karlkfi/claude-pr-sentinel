@@ -14,9 +14,9 @@ docs/ROADMAP.md).
 
 The hook is PURELY LOCAL: it inspects the just-run command string and its
 output text, reads the session transcript for the watchers this session
-launched, and at most asks the local repo whether a pushed ref is a tag. It
-never makes a network call. It never reads the PR body or any comment stream —
-the only PR text it ever touches is a URL it echoes back.
+launched, and at most asks the local repo whether a pushed ref is a tag or the
+default branch. It never makes a network call. It never reads the PR body or
+any comment stream — the only PR text it ever touches is a URL it echoes back.
 
 Fail modes: defers silently (emits nothing) on any uncertainty — non-Bash
 tool, unparseable command, unrecognised command, cancelled command, disabled
@@ -93,6 +93,49 @@ def _strip_env_prefix(argv):
     return argv[i:]
 
 
+def _git_out(args, cwd):
+    """Stdout of a local `git` read, stripped, or None when it could not be
+    taken (git missing, not a repo, non-zero exit)."""
+    try:
+        run = subprocess.run(
+            ['git'] + args, cwd=cwd or None,
+            capture_output=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if run.returncode != 0:
+        return None
+    return run.stdout.decode('utf-8', 'replace').strip()
+
+
+def _default_branch(remote, cwd):
+    """The remote's default branch name, read from the local
+    `refs/remotes/<remote>/HEAD` symref — no network. None when the repo cannot
+    answer (no such symref, a URL in place of a remote name, not a repo)."""
+    head = _git_out(['symbolic-ref', '--short', 'refs/remotes/' + remote + '/HEAD'],
+                    cwd)
+    prefix = remote + '/'
+    if not head or not head.startswith(prefix):
+        return None
+    return head[len(prefix):]
+
+
+def _is_default_branch_ref(ref, default, cwd):
+    """True if a push refspec lands on `default`, the remote's default branch.
+    That branch never has a pull request of its own, so a push at it is a
+    release cut rather than PR work. A None `default` means the repo could not
+    answer: treat it as a branch and nudge, as before."""
+    if not default:
+        return False
+    src, sep, dst = ref.lstrip('+').partition(':')
+    target = dst if sep else src
+    if target == 'HEAD':
+        target = _git_out(['symbolic-ref', '--short', '--quiet', 'HEAD'], cwd)
+    if not target:
+        return False
+    return target in (default, 'refs/heads/' + default)
+
+
 def _is_tag_ref(ref, cwd):
     """True if a push refspec names a tag. `refs/tags/…` settles it outright; a
     bare name is resolved against the local repo."""
@@ -130,11 +173,15 @@ def classify_command(argv, cwd=None):
             # Skip tag/branch deletions — not PR-babysitting shapes.
             if '--delete' in rest or '-d' in rest or '--tags' in rest:
                 return None
-            # A push whose every refspec is a tag is a release cut, not PR work.
+            # A push whose every refspec is a tag or the default branch is a
+            # release cut, not PR work — neither ever has a PR of its own.
             # non_flags[1] is the remote, so refspecs start at [2].
             refspecs = non_flags[2:]
-            if refspecs and all(_is_tag_ref(r, cwd) for r in refspecs):
-                return None
+            if refspecs:
+                default = _default_branch(non_flags[1], cwd)
+                if all(_is_tag_ref(r, cwd) or _is_default_branch_ref(r, default, cwd)
+                       for r in refspecs):
+                    return None
             return 'git_push'
     return None
 
