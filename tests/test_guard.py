@@ -187,6 +187,19 @@ class NewlineSeparatorUnit(unittest.TestCase):
             "EOF\n"
             "git status"))
 
+    def test_a_prose_mention_in_a_heredoc_is_not_a_command(self):
+        """The other side of that imprecision, and the bound on it: only a line
+        whose leading tokens are the command matches. A prose mention, a
+        markdown bullet and a `$`-prefixed transcript line do not, so the
+        exposure is a body quoting the bare command in a code block."""
+        for body in ("The gh pr create call was allowed.",
+                     "- the gh pr create guard missed it",
+                     "$ gh pr create --fill",
+                     "Run `gh pr create` to open it."):
+            self.assertFalse(
+                guard.is_pr_create("cat > /tmp/b.md <<'EOF'\n"
+                                   + body + "\nEOF\ngit status"), body)
+
     def test_poll_after_a_newline_is_classified(self):
         self.assertEqual(guard.classify_poll("echo starting\ngh run watch 5"),
                          "gh_run_watch")
