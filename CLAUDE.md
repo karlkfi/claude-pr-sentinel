@@ -50,6 +50,7 @@ response.
      `README.md`, and `docs/DESIGN.md` if the mechanism changed.
    - **Changed hook detection** → the PostToolUse table in `README.md`.
    - **New configuration or env var** → the Configuration table in `README.md`
+     (`test_every_env_var_is_in_the_configuration_table` fails otherwise)
      and `.claude-plugin/plugin.json` keywords/description.
    - Delete the completed item: `git rm docs/queue/QN.md`.
 5. **Commit when done** — small, focused, Conventional Commits. A pre-commit
@@ -121,7 +122,8 @@ Four suites:
   session store (fixture `local_*.json`) and asserts the scope rules, backup,
   app-running refusal, and schema no-op.
 - `tests/test_wiring.py` — the manifests/hook registration are valid and agree
-  on version, and the scripts exist and are executable.
+  on version, the scripts exist and are executable, and every
+  `PR_SENTINEL_*` var the scripts read has a README Configuration row.
 
 **Never use real PR URLs, hostnames, or credential paths in fixtures.**
 Synthetic `owner/repo`, run ids, and PR numbers exercise identical code paths.

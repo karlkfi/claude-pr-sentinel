@@ -6,6 +6,7 @@ Run with: python3 -m unittest discover tests
 """
 import json
 import os
+import re
 import unittest
 from pathlib import Path
 
@@ -16,9 +17,47 @@ REPO = Path(__file__).resolve().parent.parent
 # them under a 15s subprocess timeout. 60 is the ceiling a wedged one waits.
 MAX_HOOK_TIMEOUT_SECONDS = 60
 
+README = REPO / "README.md"
+
+# How each language reads a knob: `${VAR:-default}` in the watcher,
+# `os.environ` / `os.getenv` in the hooks. Narrow on purpose — a name that
+# only appears in a denial message or a `--help` string is not a read, and
+# shouldn't oblige a table row. The check runs one way for the same reason:
+# a read this misses would otherwise report its documented row as stale.
+ENV_READ = re.compile(
+    r"\$\{(PR_SENTINEL_\w+)"
+    r"|environ(?:\.get)?[\[(]\s*[\"'](PR_SENTINEL_\w+)[\"']"
+    r"|getenv\(\s*[\"'](PR_SENTINEL_\w+)[\"']")
+
 
 def load(rel):
     return json.loads((REPO / rel).read_text(encoding="utf-8"))
+
+
+def env_vars_read():
+    """Every `PR_SENTINEL_*` variable the shipped scripts actually read."""
+    names = set()
+    for path in sorted((REPO / "scripts").iterdir()):
+        if path.suffix in (".sh", ".py"):
+            for m in ENV_READ.finditer(path.read_text(encoding="utf-8")):
+                names.add(next(g for g in m.groups() if g))
+    return names
+
+
+def undocumented_env_vars(readme):
+    """The variables the scripts read that README's Configuration table omits.
+
+    Scoped to that table rather than the whole README: a var explained in prose
+    is still missing its default and its one-line effect, which is what someone
+    reaching for a knob is looking for. Only the first column counts, so a row
+    referring to a *sibling* var in its Effect cell doesn't document it.
+    """
+    section = readme.split("\n## Configuration\n")[1].split("\n## ")[0]
+    documented = set()
+    for line in section.splitlines():
+        if line.startswith("|"):
+            documented |= set(re.findall(r"PR_SENTINEL_\w+", line.split("|")[1]))
+    return sorted(env_vars_read() - documented)
 
 
 class Wiring(unittest.TestCase):
@@ -122,6 +161,25 @@ class Wiring(unittest.TestCase):
         agents = REPO / "AGENTS.md"
         self.assertTrue(agents.is_symlink(), "AGENTS.md should symlink to CLAUDE.md")
         self.assertEqual(os.readlink(agents), "CLAUDE.md")
+
+
+class Configuration(unittest.TestCase):
+    def test_every_env_var_is_in_the_configuration_table(self):
+        """A knob nobody can find is a knob that doesn't exist, and every var
+        here arrived with its documentation self-attested. Same question as the
+        PRIVACY gate asks of GitHub reads, asked by CI instead of a checkbox."""
+        missing = undocumented_env_vars(README.read_text(encoding="utf-8"))
+        self.assertEqual(
+            missing, [],
+            msg=("the scripts read these and README's Configuration table does "
+                 "not list them: " + ", ".join(missing)))
+
+    def test_the_check_can_fail(self):
+        """A clean report and a broken extraction look identical, so prove the
+        needle is found before trusting its absence."""
+        readme = README.read_text(encoding="utf-8").replace(
+            "`PR_SENTINEL_INTERVAL` | `30`", "")
+        self.assertIn("PR_SENTINEL_INTERVAL", undocumented_env_vars(readme))
 
 
 if __name__ == "__main__":
