@@ -22,11 +22,11 @@ three hooks and the migration helper).
   `PR_SENTINEL_*` configuration values (via environment).
 - Processes these **in memory** to decide whether to emit an advisory nudge,
   then writes that nudge (or nothing) to standard output.
-- Writes nothing to disk. On a `git push` naming a bare ref it runs
-  `git rev-parse` in your working directory to tell a tag from a branch — a
-  read of your local repo's refs, nothing else. The only PR data it handles is
-  a PR URL that the command itself already printed, which it echoes back in the
-  nudge.
+- Writes nothing to disk. On a `git push` it may run `git rev-parse` and
+  `git symbolic-ref` in your working directory, to tell a tag from a branch and
+  to learn which branch the remote calls its default — reads of your local
+  repo's refs, nothing else. The only PR data it handles is a PR URL that the
+  command itself already printed, which it echoes back in the nudge.
 - Reads your Claude Code **session transcript** (the harness supplies the path)
   for one thing only: the watchers this session launched and which of them have
   reported completion, so it does not ask for a second watcher on a pull

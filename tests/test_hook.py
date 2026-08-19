@@ -92,6 +92,20 @@ def make_repo(path):
     subprocess.run(git + ["tag", "v9.9.9"], cwd=path, check=True)
 
 
+def make_repo_with_default(path, default):
+    """A repo checked out on `work`, holding the tag `v0.9.0` and a remote HEAD
+    naming `default` — the shape the default-branch probe reads. The checked-out
+    branch is deliberately neither, so `HEAD` and the default branch can't be
+    confused for each other."""
+    git = ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t"]
+    subprocess.run(["git", "init", "-q", "-b", "work", path], check=True)
+    subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "init"],
+                   cwd=path, check=True)
+    subprocess.run(git + ["tag", "v0.9.0"], cwd=path, check=True)
+    subprocess.run(git + ["symbolic-ref", "refs/remotes/origin/HEAD",
+                          "refs/remotes/origin/" + default], cwd=path, check=True)
+
+
 class ClassificationUnit(unittest.TestCase):
     def test_detect_pr_create(self):
         self.assertEqual(hook.detect_action("gh pr create --fill"), "pr_create")
@@ -123,7 +137,7 @@ class ClassificationUnit(unittest.TestCase):
 
     def test_push_with_a_branch_among_the_refspecs_still_nudges(self):
         self.assertEqual(
-            hook.detect_action("git push origin main refs/tags/v1.0"),
+            hook.detect_action("git push origin claude/foo refs/tags/v1.0"),
             "git_push")
         self.assertEqual(hook.detect_action("git push origin refs/heads/claude/foo"),
                          "git_push")
@@ -135,6 +149,38 @@ class ClassificationUnit(unittest.TestCase):
             self.assertEqual(hook.detect_action("git push origin claude/foo", tmp),
                              "git_push")
             self.assertEqual(hook.detect_action("git push origin HEAD", tmp),
+                             "git_push")
+
+    def test_ignore_default_branch_push(self):
+        # A release cut pushes the default branch and a tag together — neither
+        # ever has a PR of its own (Q5).
+        with tempfile.TemporaryDirectory() as tmp:
+            make_repo_with_default(tmp, "main")
+            for cmd in ("git push origin HEAD:main v0.9.0",
+                        "git push origin main",
+                        "git push origin refs/heads/main",
+                        "git push origin +main:main"):
+                self.assertIsNone(hook.detect_action(cmd, tmp), cmd)
+            # A branch that isn't the default still nudges, including the
+            # checked-out one reached as `HEAD`.
+            for cmd in ("git push origin claude/foo",
+                        "git push origin HEAD",
+                        "git push origin HEAD:main claude/foo"):
+                self.assertEqual(hook.detect_action(cmd, tmp), "git_push", cmd)
+
+    def test_default_branch_is_read_not_assumed(self):
+        # `main` is not privileged: the probe reads the remote's own HEAD.
+        with tempfile.TemporaryDirectory() as tmp:
+            make_repo_with_default(tmp, "trunk")
+            self.assertIsNone(hook.detect_action("git push origin trunk", tmp))
+            self.assertEqual(hook.detect_action("git push origin main", tmp),
+                             "git_push")
+
+    def test_default_branch_push_without_a_remote_head_still_nudges(self):
+        # No symref to read: fail toward the old behaviour.
+        with tempfile.TemporaryDirectory() as tmp:
+            make_repo(tmp)
+            self.assertEqual(hook.detect_action("git push origin main", tmp),
                              "git_push")
 
     def test_bare_ref_without_a_repo_still_nudges(self):
@@ -212,6 +258,16 @@ class HookEndToEnd(unittest.TestCase):
             out, _ = run_hook(bash_payload(
                 "git push origin v9.9.9",
                 "To github.com:o/r.git\n * [new tag]  v9.9.9 -> v9.9.9\n",
+                cwd=tmp))
+        self.assertEqual(out.strip(), "")
+
+    def test_silent_on_release_push_with_cwd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            make_repo_with_default(tmp, "main")
+            out, _ = run_hook(bash_payload(
+                "git push origin main v0.9.0",
+                "To github.com:o/r.git\n   abc1234..def5678  main -> main\n"
+                " * [new tag]  v0.9.0 -> v0.9.0\n",
                 cwd=tmp))
         self.assertEqual(out.strip(), "")
 
