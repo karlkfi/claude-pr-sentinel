@@ -25,3 +25,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python3 -m unittest discover tests
+
+  backlog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Lint the backlog as it would land on the base branch
+        run: ./scripts/lint-backlog.sh docs/STATUS.md
