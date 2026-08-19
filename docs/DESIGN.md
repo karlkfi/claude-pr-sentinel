@@ -413,7 +413,7 @@ rejected for that reason:
 - **Read the branch's required-check list and count a required-but-absent check
   as pending.** Correct in general, but it costs an extra API call per poll and
   a token scope that can read branch protection. Tracked as Q4 in
-  `docs/STATUS.md`, deliberately not the fix here.
+  `docs/queue/`, deliberately not the fix here.
 
 Instead the two causes are separated by **persistence**, which needs no new data
 source. A check that is merely slow to register turns up as `pending` inside a

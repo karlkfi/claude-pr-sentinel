@@ -54,7 +54,7 @@ appears as `pending` within a poll or two; a review gate persists.
 Deliberately **not** doing the issue's fix direction 2 (read the branch's
 required-check list and count a required-but-absent check as pending). It needs
 an extra API call and a token scope that can read branch protection. That is
-already tracked as Q4 in `docs/STATUS.md`.
+already tracked as Q4 in `docs/queue/`.
 
 ## Why `blocked` is a handoff
 

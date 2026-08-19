@@ -3,7 +3,7 @@
 The MVP is the **watcher** + the **PostToolUse nudge**. The items below were
 designed and scoped separately from it, so the initial plugin stayed small and
 reviewable; all four have since shipped. This doc holds the design intent —
-open work is tracked as a Queue row in [`STATUS.md`](STATUS.md).
+open work is tracked as an item in [`queue/`](queue/README.md).
 
 ## R1 — Stop-hook backstop ✅ shipped
 

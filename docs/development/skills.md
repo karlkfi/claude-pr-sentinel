@@ -26,12 +26,12 @@ first row, so link this page instead of the source.
 
 ### session-backlog
 
-Maintains a priority-ordered Queue in `docs/STATUS.md` with stable Q-IDs, and
+Maintains a priority-ordered backlog under `docs/queue/` with stable Q-IDs, and
 owns the process for adding items, picking the next one, completing, deferring,
 and grooming.
 
-It applies to any change to `docs/STATUS.md`. This repo's rules for that file,
-including the isolated-commit rule and the pre-commit lint, are in
+It applies to any change under `docs/queue/`. This repo's rules for the store,
+including id allocation and the pre-commit lint, are in
 [maintaining-backlog.md](maintaining-backlog.md).
 [`scripts/lint-backlog.sh`](../../scripts/lint-backlog.sh) is vendored from the
 skill.
