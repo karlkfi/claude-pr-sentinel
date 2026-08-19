@@ -153,6 +153,58 @@ class ClassifyPollUnit(unittest.TestCase):
         self.assertIsNone(guard.classify_poll(""))
 
 
+class NewlineSeparatorUnit(unittest.TestCase):
+    r"""A bare newline separates two simple commands.
+
+    Listing `\n` in `punctuation_chars` is not on its own enough: shlex's
+    default `whitespace` holds `\n` too and eats it first, gluing the two
+    commands into one so neither `is_pr_create` nor the poll classifier ever
+    sees the second one's leading word. Every assertion here fails without the
+    `lex.whitespace` line in `simple_commands`.
+    """
+
+    def test_newline_splits_simple_commands(self):
+        self.assertEqual(
+            guard.simple_commands("echo hi\ngh pr create --fill"),
+            [["echo", "hi"], ["gh", "pr", "create", "--fill"]])
+
+    def test_pr_create_after_a_heredoc_is_seen(self):
+        """How an agent actually composes a PR: write the body to a file, then
+        open the PR on the next line."""
+        self.assertTrue(guard.is_pr_create(
+            "cat > /tmp/body.md <<'EOF'\n"
+            "Fixes the thing.\n"
+            "EOF\n"
+            "gh pr create --title t --body-file /tmp/body.md"))
+
+    def test_a_heredoc_body_line_also_reads_as_a_command(self):
+        """The documented imprecision: shlex does not track heredocs, so a body
+        line leading with `gh pr create` matches too. Fail-closed — an extra
+        overlap deny, never a missed one."""
+        self.assertTrue(guard.is_pr_create(
+            "cat > /tmp/b.md <<'EOF'\n"
+            "gh pr create is what an agent runs here\n"
+            "EOF\n"
+            "git status"))
+
+    def test_a_prose_mention_in_a_heredoc_is_not_a_command(self):
+        """The other side of that imprecision, and the bound on it: only a line
+        whose leading tokens are the command matches. A prose mention, a
+        markdown bullet and a `$`-prefixed transcript line do not, so the
+        exposure is a body quoting the bare command in a code block."""
+        for body in ("The gh pr create call was allowed.",
+                     "- the gh pr create guard missed it",
+                     "$ gh pr create --fill",
+                     "Run `gh pr create` to open it."):
+            self.assertFalse(
+                guard.is_pr_create("cat > /tmp/b.md <<'EOF'\n"
+                                   + body + "\nEOF\ngit status"), body)
+
+    def test_poll_after_a_newline_is_classified(self):
+        self.assertEqual(guard.classify_poll("echo starting\ngh run watch 5"),
+                         "gh_run_watch")
+
+
 class InlineOverrideUnit(unittest.TestCase):
     """The inline `PR_SENTINEL_OVERRIDE=<reason>` prefix — the only form of the
     escape hatch a session can reach from inside a Bash call."""
@@ -254,6 +306,15 @@ class GuardEndToEnd(unittest.TestCase):
 
     def test_deny_gh_run_watch(self):
         out, _, _ = run_guard(bash_payload("gh run watch 5"))
+        self._assert_deny(out, "gh run watch")
+
+    def test_deny_poll_after_a_newline(self):
+        """A newline separates the poll from whatever preceded it. Without the
+        split the guard reads one command whose leading word is `echo` and
+        falls open on the poll behind it."""
+        out, _, _ = run_guard(bash_payload("echo starting\ngh run watch 5"))
+        self.assertNotEqual(out.strip(), "",
+                            "guard fell silent on a poll behind a newline")
         self._assert_deny(out, "gh run watch")
 
     def test_deny_sleep_loop(self):

@@ -171,6 +171,12 @@ def simple_commands(command):
     """
     try:
         lex = shlex.shlex(command, posix=True, punctuation_chars=';()<>|&\n')
+        # `\n` in punctuation_chars is not enough on its own: shlex's default
+        # `whitespace` also holds `\n` and consumes it before the punctuation
+        # rule is consulted, so the separator vanishes and two simple commands
+        # are handed back glued into one. Dropping it from `whitespace` is what
+        # makes the newline in punctuation_chars actually separate.
+        lex.whitespace = lex.whitespace.replace('\n', '')
         lex.whitespace_split = True
         tokens = list(lex)
     except ValueError:
@@ -274,8 +280,9 @@ def _is_gh_pr_create(group):
 
 def is_pr_create(command):
     """Whether `command` opens a pull request. Matched on a simple command's
-    own leading word, so a `gh pr create` inside a commit message or a heredoc
-    is not one."""
+    own leading word, so a `gh pr create` inside a quoted commit message is not
+    one. A heredoc body is not tracked, so a line inside one that leads with
+    `gh pr create` does read as a simple command — that errs toward denying."""
     return any(_is_gh_pr_create(group) for group in simple_commands(command))
 
 
