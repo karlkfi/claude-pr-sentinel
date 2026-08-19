@@ -27,7 +27,7 @@ process table, writes nothing, and never touches the PR body or comment stream
     surfaces — a `gh pr view`/`gh pr comment` on someone else's PR produces the
     same record as a create — and it re-emits an already-linked PR after
     unrelated commands, so a stale one can land in a failed create's window.
-    Reading "referenced" as "opened" caused false-positive blocks (#34); these
+    Reading "referenced" as "opened" caused false-positive blocks (PR #22); these
     two conditions keep the fallback clear of that while giving the backstop a
     resolution path the PostToolUse nudge does not share (#60). Best-effort: the
     harness emits these records for the session's own repo, so a create run
