@@ -158,14 +158,15 @@ switching the whole check off. `PR_SENTINEL_OVERRIDE=<reason>` allows one
 create whose overlap you already know about.
 
 **The Stop hook** is the backstop that makes the advisory nudge reliable. When
-the session tries to end its turn, it **blocks the stop at most once per
-stop-chain** if the turn is ending with an unwatched open PR — nudging the
-session to launch the watcher before stopping:
+the session tries to end its turn with an unwatched open PR, it **blocks the
+stop once per pull request** — and never twice inside one stop-chain — nudging
+the session to launch the watcher before stopping:
 
 | Session state at end of turn (Stop) | Hook action |
 | --- | --- |
 | opened a PR this session (or watched one), **no** live watcher, PR not handed off | **block once** — launch the watcher for `#N` |
 | the watcher has reported the **same** terminal event twice (`check_failure`, `conflict`, `behind`, or `dequeued` at the same head commit) | **allow + warn** — nothing has been pushed, so stop nagging; a non-blocking notice naming the event keeps the PR visible |
+| the hook already blocked over this PR once and **no watcher has been launched since** | **allow + warn** — the ask was made and not acted on; repeating it cannot help a session that has no move here |
 | a launched watcher hasn't reported completion yet (still running) | silent (already covered) |
 | PR handed off (watcher **terminal** `ready`/`closed`/`blocked`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
 | the watcher's output ends on a `base_failure`, `ready_watching`, or `blocked_watching` **notice** (a watch that exited without a terminal event) | **block once** — a notice isn't a handoff; the PR is still open and unwatched |
@@ -174,13 +175,26 @@ session to launch the watcher before stopping:
 | unreadable transcript / any uncertainty | silent (fail-open) |
 | `PR_SENTINEL_DISABLE=1` set | silent (disabled) |
 
-The dampening row is what stops a livelock when the reported state is not
-moving. Every event it covers asks the session to change the PR and push, so a
-second report at the *same head commit* proves nothing was pushed in between.
-The session gets one block to act; after that the hook allows the stop with a
-warning rather than re-blocking forever. It never *silently* walks away.
+The two dampening rows are what stop a livelock when nothing is moving. The
+first covers a watcher that keeps reporting the same thing: every event it
+covers asks the session to change the PR and push, so a second report at the
+*same head commit* proves nothing was pushed in between. The second covers the
+case with no watcher report at all — the hook asked for a watcher, none was
+launched, and the turn is ending again. Either way the session gets one block to
+act; after that the hook allows the stop with a warning rather than re-blocking
+forever. It never *silently* walks away.
 
-The two shapes that reach it differ, and the notice says which one it is:
+The second of those matters most where the merge signal is unavailable by
+design. A
+session working under a dispatch protocol never merges its own PR — another
+session does — so `gh pr merge` cannot appear in its transcript, leaving the
+watcher's terminal report as its only route to a quiet turn end. When the
+watcher never arms, that route is gone too, and without dampening the hook would
+block every turn end for the rest of the session. The *first* block still fires
+there, because launching the watcher is still the right ask: on a PR that has
+already merged it answers `closed` on the first poll.
+
+The shapes that reach it differ, and the notice says which one it is:
 
 - **`check_failure`** — a check this session *cannot* fix: inherited from the
   base branch, out-of-scope, external, or misconfigured.
@@ -188,6 +202,9 @@ The two shapes that reach it differ, and the notice says which one it is:
   already healed the branch and committed it, and is waiting on the project's
   local gate before pushing, so the remote head *cannot* have moved yet. A
   relaunch here has no move available at all.
+- **no watcher launched since the ask** — either the PR is still open and yours
+  and the watcher is the move, or another session has already concluded it and
+  there is nothing to do.
 
 Everything it decides comes from local files — the session's own transcript,
 each watcher's own output file (its path is in the completion notification), and
