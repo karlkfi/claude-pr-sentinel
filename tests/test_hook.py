@@ -203,6 +203,31 @@ class ClassificationUnit(unittest.TestCase):
         self.assertEqual(hook.detect_action('gh pr create --title "it\'s'),
                          "pr_create")
 
+    def test_newline_separates_simple_commands(self):
+        # shlex counted the newline as whitespace and ate it before the
+        # punctuation rule could split on it, folding the create into the
+        # preceding argv, so nothing nudged — issue #76.
+        self.assertEqual(
+            hook.simple_commands("echo hi\ngh pr create --title t"),
+            [["echo", "hi"], ["gh", "pr", "create", "--title", "t"]])
+        self.assertEqual(
+            hook.detect_action("echo hi\ngh pr create --title t"), "pr_create")
+        self.assertEqual(
+            hook.detect_action("git status\ngit push -u origin claude/foo"),
+            "git_push")
+
+    def test_pr_create_after_a_heredoc(self):
+        # The ordinary shape for a body longer than a line, and the one a
+        # session reverts to even after applying the workaround (#76).
+        self.assertEqual(hook.detect_action(
+            "cat > body.md <<'EOF'\nmulti\nline body\nEOF\n"
+            "gh pr create --body-file body.md"), "pr_create")
+
+    def test_newline_inside_quotes_is_not_a_separator(self):
+        self.assertEqual(
+            hook.simple_commands('gh pr create -t "a\nb"'),
+            [["gh", "pr", "create", "-t", "a\nb"]])
+
     def test_ignore_unrelated(self):
         self.assertIsNone(hook.detect_action("gh pr view 12"))
         self.assertIsNone(hook.detect_action("gh pr list"))
