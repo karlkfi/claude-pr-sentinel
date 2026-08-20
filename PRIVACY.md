@@ -151,9 +151,15 @@ three hooks, the migration helper, and the activity report).
   depth under `~/.claude/projects`, or under whatever `--transcripts` names —
   the records Claude Code already writes for every session. From them it
   extracts only: the plugin's own nudges, the watcher launch commands, the
-  watcher's own event reports, the Stop hook's block message, each record's
-  timestamp, and the working directory, which it reduces to a directory name
-  for the per-repository ranking.
+  watcher's own event reports, the Stop hook's block message, the PreToolUse
+  guard's own decisions, each record's timestamp, and the working directory,
+  which it reduces to a directory name for the per-repository ranking.
+- To count uses of the `PR_SENTINEL_OVERRIDE` escape hatch it also reads the
+  **`Bash` commands** in the transcript, because a downgraded decision leaves no
+  other trace. Only a command carrying that prefix is printed back, ranked and
+  clipped, and the value of every other leading `NAME=VALUE` assignment on it is
+  masked first — so a credential a session inlined is not echoed into the
+  report.
 - It does **not** read PR bodies, PR review comments, or issue comments, and it
   parses nothing else out of your transcripts — not your prompts, not the
   model's replies, not other tools' output.
