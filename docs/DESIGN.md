@@ -769,6 +769,42 @@ still gets reported — it just has to prove itself by failing for the whole
 horizon rather than for one instant, and the give-up report names auth when the
 probe was failing alongside the query.
 
+### Why every message names the plugin
+
+Every string this plugin hands back to a session opens with `pr-sentinel: ` —
+all three deny reasons, the auto-allow, both PostToolUse nudges, the Stop block
+and its non-blocking notice.
+
+Claude Code names the plugin in neither the permission prompt nor the deny text,
+so a message that does not identify itself is attributable to nothing: a session
+with several hooks installed cannot tell which one refused its command, and
+neither can a human reading the transcript afterwards. A deny is the sharp case,
+because it leaves no record anywhere else. The transcript persists hook stdout
+for a call that goes on to run, so an auto-allow lands in the attachment stream
+and a deny does not — the error handed back to the blocked call is the only
+trace it leaves. Measured over one local corpus (893 transcripts, 2026-08-19):
+2234 allow attachments, 52 denies recovered from tool results, and not one deny
+in the attachment stream.
+
+So the opener is the key the [activity report](../README.md#activity-report)
+recovers a deny by, and
+[foreground-guard](https://github.com/karlkfi/claude-foreground-guard)'s
+cross-plugin report parses the same one. That makes it an interface rather than
+a house habit — a branch that reworded past it would go uncounted rather than
+miscounted. This repo states only its own side of it. foreground-guard owns the
+cross-plugin definition, in
+[`cross-guard-deny-convention.md`](https://github.com/karlkfi/claude-foreground-guard/blob/main/docs/development/cross-guard-deny-convention.md);
+restating it here is what would drift.
+
+The matcher is anchored at the start of the string (`\A`), not the start of a
+line. Nothing this plugin emits carries a preamble, so today the two agree; a
+per-line anchor would start accepting an opener buried under one, which is not
+what the report is recovering.
+
+The watcher's report sits outside the convention on purpose. It is a background
+task's stdout, which reaches the transcript whole, so it identifies itself with
+a `PR-SENTINEL EVENT:` header and needs no recovery key.
+
 ## Design rationale in the issue tracker
 
 pr-sentinel is the local, CI-only interim answer to two open feature requests,

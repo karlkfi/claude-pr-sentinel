@@ -102,6 +102,34 @@ def _signatures():
 
 NUDGE_CREATE, NUDGE_PUSH, NUDGE_PUSH_UNRESOLVED, STOP_REASON = _signatures()
 
+# Every remaining string a hook hands the model or the human, beside the guard's
+# four reasons above: both PostToolUse nudges, the Stop block, and the Stop
+# hook's non-blocking notice. Keyed by module, so the two `build_reason`s stay
+# apart. Each entry yields every text its builder can produce.
+HOOK_MESSAGES = {
+    "hook.build_context": lambda: (NUDGE_CREATE, NUDGE_PUSH,
+                                   NUDGE_PUSH_UNRESOLVED),
+    "hook.build_live_context": lambda: (
+        hook.build_live_context("41", ["task-1"]),),
+    "stop_hook.build_reason": lambda: (STOP_REASON,),
+    "stop_hook.build_warning": lambda: (
+        stop_hook.build_warning({"41": "check_failure"}),),
+}
+
+
+def hook_message_builders():
+    """Every builder feeding an agent-facing field in the two non-guard hooks.
+
+    The Stop hook names its builder at the assignment. The PostToolUse hook
+    picks one into `context` a few lines above its single emission site, so the
+    branch is read off that assignment rather than off the `print`.
+    """
+    nudges = re.findall(r"\bcontext = (\w+)\(", HOOK.read_text(encoding="utf-8"))
+    stop = re.findall(r"out\['(?:reason|systemMessage)'\] = (\w+)\(",
+                      STOP_HOOK.read_text(encoding="utf-8"))
+    return {"hook." + n for n in nudges} | {"stop_hook." + n for n in stop}
+
+
 WATCHER_PATH = os.path.join(PLUGIN_ROOT, "scripts", "pr-sentinel-watch.sh")
 
 
@@ -475,31 +503,51 @@ class TestGuardContract(unittest.TestCase):
                              fr.guard_category(GUARD_BUILDERS[name]()),
                              "%s no longer classifies as %s" % (name, expected))
 
-    def test_every_reason_opens_with_the_plugin_name(self):
-        """A deny leaves no record in the decision stream, so the text handed
-        back to the agent is its only trace and `pr-sentinel: ` is the key both
-        this report and foreground-guard's cross-plugin one recover it by. A
-        branch that reworded past the opener would go uncounted rather than
-        miscounted. Completeness rides on the test above, which pins
-        GUARD_BUILDERS to the guard's own call sites; the allow is in here
-        because the opener is one convention, not a deny-only one."""
-        for name, build in sorted(GUARD_BUILDERS.items()):
-            with self.subTest(builder=name):
-                self.assertRegex(
-                    build(), fr.DENY_TEXT,
-                    "%s no longer opens with the plugin name" % name)
-
-    def test_the_opener_check_can_fail(self):
-        """An anchored match and a regex that matches anything look identical
-        from a green test, so prove it rejects a reason without the opener."""
-        self.assertNotRegex("refusing to foreground-poll CI", fr.DENY_TEXT)
-
     def test_every_category_has_a_hint(self):
         self.assertEqual(set(fr.GUARD_CATEGORY) | {"other"}, set(fr.GUARD_HINT))
 
     def test_an_unknown_reason_is_other(self):
         self.assertEqual("other", fr.guard_category("pr-sentinel: something "
                                                     "this report has not met"))
+
+
+class TestOpenerConvention(unittest.TestCase):
+    """`pr-sentinel: ` opens every string this plugin hands back, not just the
+    guard's reasons — the rule `docs/DESIGN.md` states and this report's
+    `DENY_TEXT` reads. A deny leaves no other trace, so a branch that reworded
+    past the opener would go uncounted rather than miscounted, here and in
+    foreground-guard's cross-plugin report."""
+
+    def test_every_message_opens_with_the_plugin_name(self):
+        messages = {name: (build(),) for name, build in GUARD_BUILDERS.items()}
+        messages.update((name, build()) for name, build in HOOK_MESSAGES.items())
+        for name, texts in sorted(messages.items()):
+            for n, text in enumerate(texts):
+                with self.subTest(builder=name, variant=n):
+                    self.assertRegex(
+                        text, fr.DENY_TEXT,
+                        "%s no longer opens with the plugin name" % name)
+
+    def test_every_hook_message_is_exercised(self):
+        """The guard half rides on test_guard_categories_cover_every_branch,
+        which pins GUARD_BUILDERS to the guard's own call sites. This is the
+        same coverage for the other half: a new nudge or Stop-hook branch must
+        land in HOOK_MESSAGES, or the opener stops being asserted for the
+        channel it added — which is how a documented rule goes stale quietly."""
+        named = hook_message_builders()
+        self.assertTrue(named, "no agent-facing builders found — the signature "
+                               "regexes have drifted from the hooks")
+        self.assertEqual(named, set(HOOK_MESSAGES),
+                         "the hooks feed these builders to an agent-facing "
+                         "field and this test does not exercise them all")
+
+    def test_the_opener_check_can_fail(self):
+        """An anchored match and a regex that matches anything look identical
+        from a green test, so prove it rejects a message without the opener.
+        The second case pins the `\\A` anchor: a per-line one would accept an
+        opener buried under a preamble, which is not what the report recovers."""
+        self.assertNotRegex("refusing to foreground-poll CI", fr.DENY_TEXT)
+        self.assertNotRegex("preamble\npr-sentinel: buried", fr.DENY_TEXT)
 
 
 class TestGuardDecisions(TranscriptCase):
