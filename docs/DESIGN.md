@@ -84,7 +84,7 @@ task's stdout to the session as the wake payload.
    so the watch continues past green — see [Why `ready` ends the watch by
    default](#why-ready-ends-the-watch-by-default-and-what-closed-mode-changes).
 
-2. **PostToolUse hook on `Bash`** — `scripts/pr-sentinel-hook.py`. After a
+2. **PostToolUse hook on `Bash`** — `scripts/pr_sentinel_hook.py`. After a
    `gh pr create` that printed a PR URL, or a branch `git push` that looks
    successful, it injects `additionalContext` telling the session to start (or
    restart) the watcher for the detected PR. It is **advisory**: a hook cannot
@@ -93,7 +93,7 @@ task's stdout to the session as the wake payload.
 3. **Plugin manifest + tests + docs.**
 
 Two fast-follow hooks have since shipped on top of that MVP. The **PreToolUse
-foreground-poll deny** ([`scripts/pr-sentinel-guard.py`](../scripts/pr-sentinel-guard.py))
+foreground-poll deny** ([`scripts/pr_sentinel_guard.py`](../scripts/pr_sentinel_guard.py))
 enforces the other side of the nudge: it *denies* a Bash command that would
 foreground-poll CI (`gh pr checks --watch`, `gh run watch`, a `while/until …
 sleep` loop that runs `gh`) and points the fix-it at the watcher, with
@@ -149,7 +149,7 @@ missed catch rather than a create nobody can make. `PR_SENTINEL_OVERLAP_ENABLED`
 turns it off, and with it the queries.
 
 The **Stop-hook backstop**
-([`scripts/pr-sentinel-stop-hook.py`](../scripts/pr-sentinel-stop-hook.py))
+([`scripts/pr_sentinel_stop_hook.py`](../scripts/pr_sentinel_stop_hook.py))
 turns the advisory nudge into a reliable one — see [Why the nudge is
 advisory](#why-the-nudge-is-advisory). Both stayed out of the initial MVP so it
 was small and reviewable.
@@ -556,7 +556,7 @@ so the worst case is a create that proceeds unchecked.
 Hooks can inject context but cannot force the model to call a tool. Rather than
 pretend otherwise, the PostToolUse nudge is explicitly advisory: it describes
 the exact background-task command to run and lets the session decide. The
-**Stop-hook backstop** (`scripts/pr-sentinel-stop-hook.py`) is what turns
+**Stop-hook backstop** (`scripts/pr_sentinel_stop_hook.py`) is what turns
 "advisory" into "reliable": if the session ends its turn with an open PR it
 opened, no live watcher, and no local evidence the PR is handed off, the Stop
 hook blocks the stop **once** with an instruction to launch the watcher.
@@ -804,6 +804,37 @@ what the report is recovering.
 The watcher's report sits outside the convention on purpose. It is a background
 task's stdout, which reaches the transcript whole, so it identifies itself with
 a `PR-SENTINEL EVENT:` header and needs no recovery key.
+
+### Why all three hooks are one script
+
+The opener above is half of attribution. The other half is the hook `command`
+Claude Code records with each decision, which a reader reduces to a plugin label
+by taking its first `*.py` basename and dropping a leading `bash-`. That is a
+second declaration of the plugin's name, and no opener can repair it.
+
+Through v0.9.0 this plugin wired a script per event, so it reduced to
+`pr-sentinel-guard`, `pr-sentinel-hook` and `pr-sentinel-stop-hook` — three
+labels beside the fourth its reasons announced, with no `--plugin` value
+returning all of it and the missing part depending on which reader you asked.
+
+Renaming was not available: the reduction takes a *basename*, so three files in
+one directory cannot all be `pr-sentinel.py`. So `scripts/pr-sentinel.py` is
+wired to all three events and dispatches on the payload's `hook_event_name` to
+one handler module per event. The handlers keep a file each, because their
+reads differ and [`PRIVACY.md`](../PRIVACY.md) describes them one at a time;
+what they no longer have is a name a decision record can carry.
+
+The entry point owns what all three used to duplicate — the stdin parse, the
+fail-open wrapper, the `PR_SENTINEL_DEBUG=1` re-raise — and imports its handler
+lazily, so a Bash call loads one rather than three. An unrecognised event is
+silence, which is the defer every handler already falls back to.
+
+This costs one static signal. A checker reading only the wired script now finds
+no `pr-sentinel: ` literal in it, because every literal moved a file away. The
+opener is asserted here instead, by `test_every_message_opens_with_the_plugin_name`
+over builders discovered from the handlers themselves — a stronger check than
+the one that went quiet, since a new builder that skips the opener fails the
+build rather than lowering a count nobody reads.
 
 ## Design rationale in the issue tracker
 

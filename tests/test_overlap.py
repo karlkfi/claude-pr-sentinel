@@ -30,7 +30,7 @@ from importlib import util
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-GUARD = REPO / "scripts" / "pr-sentinel-guard.py"
+GUARD = REPO / "scripts" / "pr-sentinel.py"
 MODULE = REPO / "scripts" / "pr_sentinel_overlap.py"
 PRIVACY = REPO / "PRIVACY.md"
 
@@ -154,8 +154,8 @@ class Scenario:
         tool_input = {"command": command}
         if background:
             tool_input["run_in_background"] = True
-        payload = {"tool_name": "Bash", "tool_input": tool_input,
-                   "cwd": str(self.root)}
+        payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                   "tool_input": tool_input, "cwd": str(self.root)}
         proc = subprocess.run(
             ["python3", str(GUARD)], input=json.dumps(payload),
             capture_output=True, text=True, env=self.env(extra_env),

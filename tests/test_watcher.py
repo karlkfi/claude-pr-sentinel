@@ -1620,12 +1620,16 @@ def plugin_components():
 
     Seeded from what the manifests declare — the hooks in `hooks/hooks.json`,
     and the script each command invokes — then closed over the references
-    those scripts make. The closure is how the watcher is reached: no manifest
-    declares it, the hooks name its path when they nudge.
+    those scripts make. The closure is what reaches the parts no manifest
+    declares: the watcher, whose path the hooks name when they nudge, and the
+    three hook handlers, whose paths the entry point names.
 
-    A module a component merely *imports* is deliberately not a component.
-    Its reads surface through whichever entry point imports it, and the policy
-    describes what a user runs rather than the file layout behind it.
+    A module reached only by an `import` statement is deliberately not a
+    component. Its reads surface through whatever names it by path, and the
+    policy describes what a user runs rather than the file layout behind it.
+    That is the line between a handler and a helper: `pr_sentinel_guard.py`
+    holds a whole hook event's behaviour and is named as a path, while
+    `pr_sentinel_watchers.py` is a shared read three of them make.
     """
     frontier = set(_SCRIPT_REF.findall(
         HOOKS_MANIFEST.read_text(encoding="utf-8")))
@@ -1691,9 +1695,9 @@ class PrivacyComponents(unittest.TestCase):
         """A clean report and a broken closure look identical, so prove the
         needle is found before trusting its absence."""
         privacy = PRIVACY.read_text(encoding="utf-8").replace(
-            "## The Stop hook (`scripts/pr-sentinel-stop-hook.py`)",
-            "## The Stop hook")
-        self.assertIn("scripts/pr-sentinel-stop-hook.py",
+            "## The Stop handler (`scripts/pr_sentinel_stop_hook.py`)",
+            "## The Stop handler")
+        self.assertIn("scripts/pr_sentinel_stop_hook.py",
                       undisclosed_components(privacy))
 
     def test_every_read_pattern_is_named_in_privacy(self):

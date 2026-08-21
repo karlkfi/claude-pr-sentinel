@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Tests for scripts/pr-sentinel-hook.py (the PostToolUse nudge).
+"""Tests for scripts/pr_sentinel_hook.py (the PostToolUse nudge).
 
 Run with: python3 -m unittest discover tests
 
 Two layers:
   * Unit tests import the module and exercise command classification and the
     failure heuristic.
-  * End-to-end tests invoke the script as a subprocess, feed it the hook stdin
-    JSON, and assert the emitted additionalContext (or silence).
+  * End-to-end tests invoke the plugin's entry point as a subprocess, feed it
+    the hook stdin JSON, and assert the emitted additionalContext (or silence).
+    The entry point dispatches on `hook_event_name`, so every payload here
+    carries the one a real PostToolUse call carries.
 """
 import json
 import os
@@ -18,9 +20,10 @@ from importlib import util
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPT = REPO / "scripts" / "pr-sentinel-hook.py"
+SCRIPT = REPO / "scripts" / "pr-sentinel.py"
+MODULE = REPO / "scripts" / "pr_sentinel_hook.py"
 
-_spec = util.spec_from_file_location("pr_sentinel_hook", SCRIPT)
+_spec = util.spec_from_file_location("pr_sentinel_hook", MODULE)
 hook = util.module_from_spec(_spec)
 _spec.loader.exec_module(hook)
 
@@ -41,6 +44,7 @@ def run_hook(payload, env=None):
 
 def bash_payload(command, response="", cwd=None, transcript=None):
     payload = {
+        "hook_event_name": "PostToolUse",
         "tool_name": "Bash",
         "tool_input": {"command": command},
         "tool_response": response,
@@ -355,6 +359,7 @@ class HookEndToEnd(unittest.TestCase):
             ("git push -u origin claude/x", ""),
         ):
             out, _ = run_hook({
+                "hook_event_name": "PostToolUse",
                 "tool_name": "Bash",
                 "tool_input": {"command": command},
                 "tool_response": {"stdout": stdout, "stderr": "",
@@ -364,6 +369,7 @@ class HookEndToEnd(unittest.TestCase):
 
     def test_nudge_when_interrupted_is_false(self):
         out, _ = run_hook({
+            "hook_event_name": "PostToolUse",
             "tool_name": "Bash",
             "tool_input": {"command": "gh pr create --fill"},
             "tool_response": {"stdout": "https://github.com/o/r/pull/7\n",
@@ -376,7 +382,8 @@ class HookEndToEnd(unittest.TestCase):
         self.assertEqual(out.strip(), "")
 
     def test_silent_on_non_bash_tool(self):
-        out, _ = run_hook({"tool_name": "Read",
+        out, _ = run_hook({"hook_event_name": "PostToolUse",
+                           "tool_name": "Read",
                            "tool_input": {"file_path": "/x"},
                            "tool_response": "gh pr create"})
         self.assertEqual(out.strip(), "")
@@ -399,6 +406,7 @@ class HookEndToEnd(unittest.TestCase):
 
     def test_response_as_dict(self):
         out, _ = run_hook({
+            "hook_event_name": "PostToolUse",
             "tool_name": "Bash",
             "tool_input": {"command": "gh pr create --fill"},
             "tool_response": {"stdout": "https://github.com/o/r/pull/7\n",

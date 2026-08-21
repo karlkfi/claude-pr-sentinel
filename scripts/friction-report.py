@@ -96,7 +96,7 @@ KIND_HINT = {
     'notice':   'reported without exiting; the watch continued',
 }
 
-# The nudge's two openings, from build_context() in pr-sentinel-hook.py.
+# The nudge's two openings, from build_context() in pr_sentinel_hook.py.
 NUDGE_PREFIX = 'pr-sentinel:'
 NUDGE_CREATE = re.compile(r'^pr-sentinel: You just opened pull request #(\d+)')
 # Every nudge spells the launch out as `bash "<watcher>" <target>`; the target is
@@ -151,7 +151,12 @@ REPORT_LINES = 40
 # attachments, all ``hook_success``; 52 denies recovered from tool results (34
 # ``sleep_loop``, 18 ``gh run watch``); 19 inline overrides. Not one deny in the
 # attachment stream, and not one defer anywhere.
-GUARD_SCRIPT = re.compile(r'pr-sentinel-guard\.py')
+# The hook command recorded with each decision, which is what tells our
+# PreToolUse verdict from a sibling guard's. Both spellings, because the report
+# reads transcripts older than the change. Releases through 0.9.0 wired a script
+# per event (`pr-sentinel-guard.py`); the single entry point wires one script to
+# all three, and the `PreToolUse:Bash` hookName above is what separates them.
+GUARD_SCRIPT = re.compile(r'pr-sentinel(?:-guard)?\.py')
 # Only this attachment type carries a verdict. Any other means the hook crashed
 # or was cancelled, so the call ran unguarded — counted as `error`, never folded
 # into the allows.
@@ -162,7 +167,7 @@ HOOK_OK = 'hook_success'
 # matcher in tests/test_friction_report.py.
 DENY_TEXT = re.compile(r'\A(?:Error:\s*)?pr-sentinel:\s')
 
-# One category per decision branch in pr-sentinel-guard.py, keyed on a stable
+# One category per decision branch in pr_sentinel_guard.py, keyed on a stable
 # substring of that branch's own reason builder. The mapping is this report's
 # contract with the guard, and test_guard_categories_cover_every_branch fails
 # the build when the guard grows a branch this file does not classify.
