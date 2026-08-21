@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Tests for scripts/pr-sentinel-guard.py (the PreToolUse foreground-poll deny).
+"""Tests for scripts/pr_sentinel_guard.py (the PreToolUse foreground-poll deny).
 
 Run with: python3 -m unittest discover tests
 
 Two layers:
   * Unit tests import the module and exercise the poll-shape classifier.
-  * End-to-end tests invoke the script as a subprocess, feed it the hook stdin
-    JSON, and assert the emitted deny decision (or silence / override).
+  * End-to-end tests invoke the plugin's entry point as a subprocess, feed it
+    the hook stdin JSON, and assert the emitted deny decision (or silence /
+    override). The entry point dispatches on `hook_event_name`, so every
+    payload here carries the one a real PreToolUse call carries.
 """
 import json
 import os
@@ -17,10 +19,11 @@ from importlib import util
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPT = REPO / "scripts" / "pr-sentinel-guard.py"
+SCRIPT = REPO / "scripts" / "pr-sentinel.py"
+MODULE = REPO / "scripts" / "pr_sentinel_guard.py"
 WATCHER = str((REPO / "scripts" / "pr-sentinel-watch.sh").resolve())
 
-_spec = util.spec_from_file_location("pr_sentinel_guard", SCRIPT)
+_spec = util.spec_from_file_location("pr_sentinel_guard", MODULE)
 guard = util.module_from_spec(_spec)
 _spec.loader.exec_module(guard)
 
@@ -45,7 +48,8 @@ def bash_payload(command, background=False, transcript=None):
     tool_input = {"command": command}
     if background:
         tool_input["run_in_background"] = True
-    payload = {"tool_name": "Bash", "tool_input": tool_input}
+    payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+               "tool_input": tool_input}
     if transcript:
         payload["transcript_path"] = transcript
     return payload
@@ -277,7 +281,7 @@ class WatcherLaunchUnit(unittest.TestCase):
             f"bash {WATCHER} `echo 6`",            # backtick substitution
             f"bash {WATCHER} 6 &",                 # background operator
             f"sh {WATCHER} 6",                     # not bash
-            f"bash {REPO}/scripts/pr-sentinel-hook.py 6",   # different script
+            f"bash {REPO}/scripts/pr_sentinel_hook.py 6",   # different script
             f"bash {WATCHER}-evil 6",              # look-alike path
             "bash /opt/other/pr-sentinel-watch.sh 6",       # unrelated path
             f"bash {WATCHER}* 6",                  # glob
@@ -370,7 +374,8 @@ class GuardEndToEnd(unittest.TestCase):
         self.assertEqual(out.strip(), "")
 
     def test_silent_on_non_bash_tool(self):
-        out, _, _ = run_guard({"tool_name": "Read",
+        out, _, _ = run_guard({"hook_event_name": "PreToolUse",
+                               "tool_name": "Read",
                                "tool_input": {"file_path": "/x"}})
         self.assertEqual(out.strip(), "")
 
@@ -393,7 +398,8 @@ class GuardEndToEnd(unittest.TestCase):
         run_env["PR_SENTINEL_DEBUG"] = "1"
         proc = subprocess.run(
             ["python3", str(SCRIPT)],
-            input=json.dumps({"tool_name": "Bash", "tool_input": "oops"}),
+            input=json.dumps({"hook_event_name": "PreToolUse",
+                              "tool_name": "Bash", "tool_input": "oops"}),
             capture_output=True, text=True, env=run_env, timeout=15, check=False,
         )
         self.assertNotEqual(proc.returncode, 0)
@@ -421,7 +427,7 @@ class BackgroundedCallsEndToEnd(unittest.TestCase):
                          ["permissionDecision"], "deny")
 
     def test_falsey_background_flag_still_denies(self):
-        payload = {"tool_name": "Bash",
+        payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
                    "tool_input": {"command": "gh run watch 5",
                                   "run_in_background": False}}
         out, _, _ = run_guard(payload)
@@ -482,7 +488,7 @@ class AutoAllowEndToEnd(unittest.TestCase):
             f"bash {WATCHER} notanumber",
             f"bash {WATCHER} 6; rm -rf /",
             f"bash {WATCHER} 6 > /tmp/x",
-            f"bash {REPO}/scripts/pr-sentinel-hook.py 6",
+            f"bash {REPO}/scripts/pr_sentinel_hook.py 6",
             f"sh {WATCHER} 6",
             f"bash {WATCHER} $(echo 6)",
         ):

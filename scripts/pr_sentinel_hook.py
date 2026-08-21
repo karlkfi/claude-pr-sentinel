@@ -9,7 +9,7 @@ already has a live watcher on that PR, in which case it says so and names the
 `TaskStop` call, because a running watcher re-reads the PR head on every poll
 and a second one only doubles the wake-ups. It is ADVISORY — a hook
 cannot force the model to call a tool, so this asks; it does not compel. The
-Stop-hook backstop (`scripts/pr-sentinel-stop-hook.py`) is what makes the
+Stop-hook backstop (`scripts/pr_sentinel_stop_hook.py`) is what makes the
 launch reliable, and recovers a nudge this hook never emitted.
 
 The hook is PURELY LOCAL: it inspects the just-run command string and its
@@ -22,7 +22,8 @@ Fail modes: defers silently (emits nothing) on any uncertainty — non-Bash
 tool, unrecognised command, cancelled command, disabled flag. It can never
 break a session.
 
-Reads the hook JSON on stdin, emits a PostToolUse decision on stdout.
+Reached from `scripts/pr-sentinel.py`, which reads the hook JSON on stdin and
+calls `run()` with it; this module emits a PostToolUse decision on stdout.
 """
 import json
 import os
@@ -298,11 +299,11 @@ def build_context(action, pr_num, live=None):
     )
 
 
-def main():
-    try:
-        data = json.load(sys.stdin)
-    except ValueError:
-        return  # unparseable input: defer
+def run(data):
+    """Emit the PostToolUse nudge for `data`, if the command earns one.
+
+    Called by the `pr-sentinel.py` entry point, which owns the stdin parse and
+    the fail-open wrapper."""
     if data.get('tool_name') != 'Bash':
         return
     if os.environ.get('PR_SENTINEL_DISABLE') == '1':
@@ -342,11 +343,3 @@ def main():
         'hookEventName': 'PostToolUse',
         'additionalContext': context}}))
 
-
-if __name__ == '__main__':
-    try:
-        main()
-    except Exception:  # noqa: BLE001 — fail-open on any infrastructure error
-        if os.environ.get('PR_SENTINEL_DEBUG') == '1':
-            raise
-        sys.exit(0)

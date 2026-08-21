@@ -19,6 +19,9 @@ MAX_HOOK_TIMEOUT_SECONDS = 60
 
 README = REPO / "README.md"
 
+# The one script every hook event runs. See test_every_event_runs_the_same_script.
+ENTRY_POINT = REPO / "scripts" / "pr-sentinel.py"
+
 # How each language reads a knob: `${VAR:-default}` in the watcher,
 # `os.environ` / `os.getenv` in the hooks. Narrow on purpose — a name that
 # only appears in a denial message or a `--help` string is not a read, and
@@ -81,34 +84,52 @@ class Wiring(unittest.TestCase):
         entries = hooks["hooks"]["PostToolUse"]
         self.assertTrue(entries)
         self.assertEqual(entries[0]["matcher"], "Bash")
-        cmd = entries[0]["hooks"][0]["command"]
-        self.assertIn("pr-sentinel-hook.py", cmd)
-        self.assertTrue((REPO / "scripts" / "pr-sentinel-hook.py").is_file())
+        self.assertIn(ENTRY_POINT.name, entries[0]["hooks"][0]["command"])
 
     def test_pretooluse_guard_registered(self):
         hooks = load("hooks/hooks.json")
         entries = hooks["hooks"]["PreToolUse"]
         self.assertTrue(entries)
         self.assertEqual(entries[0]["matcher"], "Bash")
-        cmd = entries[0]["hooks"][0]["command"]
-        self.assertIn("pr-sentinel-guard.py", cmd)
-        guard = REPO / "scripts" / "pr-sentinel-guard.py"
-        self.assertTrue(guard.is_file())
-        self.assertTrue(os.access(guard, os.X_OK),
-                        "guard script must be executable")
+        self.assertIn(ENTRY_POINT.name, entries[0]["hooks"][0]["command"])
 
-    def test_stop_hook_registered_and_points_at_real_script(self):
+    def test_stop_hook_registered(self):
         hooks = load("hooks/hooks.json")
         entries = hooks["hooks"]["Stop"]
         self.assertTrue(entries)
         # Stop hooks take no matcher (there is no tool to match on).
         self.assertNotIn("matcher", entries[0])
-        cmd = entries[0]["hooks"][0]["command"]
-        self.assertIn("pr-sentinel-stop-hook.py", cmd)
-        script = REPO / "scripts" / "pr-sentinel-stop-hook.py"
-        self.assertTrue(script.is_file())
-        self.assertTrue(os.access(script, os.X_OK),
-                        "stop hook script must be executable")
+        self.assertIn(ENTRY_POINT.name, entries[0]["hooks"][0]["command"])
+
+    def test_entry_point_exists_and_is_executable(self):
+        self.assertTrue(ENTRY_POINT.is_file())
+        self.assertTrue(os.access(ENTRY_POINT, os.X_OK),
+                        "the hook entry point must be executable")
+
+    def test_every_event_runs_the_same_script(self):
+        """One script on every event, which is what makes the plugin reduce to
+        a single label. A reader recovers the emitting plugin from the recorded
+        hook command by taking its first `*.py` basename, so a script per event
+        splits one plugin across three labels and no `--plugin` filter returns
+        all of it. The basename is what is read, so three files in one
+        directory cannot all carry the plugin's name."""
+        hooks = load("hooks/hooks.json")
+        commands = {hook["command"]
+                    for entries in hooks["hooks"].values()
+                    for entry in entries for hook in entry["hooks"]}
+        self.assertEqual(len(commands), 1, "each event runs a different "
+                         "script: " + ", ".join(sorted(commands)))
+        basename = re.search(r"([\w.-]+\.py)", commands.pop()).group(1)
+        self.assertEqual(basename, "pr-sentinel.py")
+
+    def test_every_handler_module_exists(self):
+        """The entry point dispatches to one module per event. It imports them
+        lazily, so a missing one is an exception at decision time rather than
+        at load — which fails open and is therefore silent."""
+        for module in ("pr_sentinel_guard", "pr_sentinel_hook",
+                       "pr_sentinel_stop_hook"):
+            with self.subTest(module=module):
+                self.assertTrue((REPO / "scripts" / (module + ".py")).is_file())
 
     def test_hook_timeouts_are_bounded(self):
         """Every registered hook declares a timeout, in seconds. A value meant as

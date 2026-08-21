@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for scripts/pr-sentinel-stop-hook.py (the Stop backstop).
+"""Tests for scripts/pr_sentinel_stop_hook.py (the Stop backstop).
 
 Run with: python3 -m unittest discover tests
 
@@ -25,9 +25,10 @@ from importlib import util
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPT = REPO / "scripts" / "pr-sentinel-stop-hook.py"
+SCRIPT = REPO / "scripts" / "pr-sentinel.py"
+MODULE = REPO / "scripts" / "pr_sentinel_stop_hook.py"
 
-_spec = util.spec_from_file_location("pr_sentinel_stop_hook", SCRIPT)
+_spec = util.spec_from_file_location("pr_sentinel_stop_hook", MODULE)
 hook = util.module_from_spec(_spec)
 _spec.loader.exec_module(hook)
 

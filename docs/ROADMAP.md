@@ -7,8 +7,8 @@ open work is tracked as an item in [`queue/`](queue/README.md).
 
 ## R1 — Stop-hook backstop ✅ shipped
 
-Implemented as `scripts/pr-sentinel-stop-hook.py` (registered under `Stop` in
-`hooks/hooks.json`). A `Stop` hook that blocks the stop **once** — respecting
+Implemented as `scripts/pr_sentinel_stop_hook.py`, reached through the
+`Stop` entry in `hooks/hooks.json`. A `Stop` hook that blocks the stop **once** — respecting
 `stop_hook_active` so it never loops — when the session ends a turn with an open
 PR it opened, no live watcher, and no local evidence the PR was handed off. This
 is what turns "advisory" into "reliable."
@@ -36,7 +36,7 @@ launch the watcher, which then authoritatively determines check state. See
 blocking foreground poll, the exact anti-pattern this plugin replaces.
 
 **Design.** A `PreToolUse` hook on `Bash`
-([`scripts/pr-sentinel-guard.py`](../scripts/pr-sentinel-guard.py)) that
+([`scripts/pr_sentinel_guard.py`](../scripts/pr_sentinel_guard.py)) that
 **denies** blocking-poll command shapes with a fix-it message pointing at the
 watcher:
 

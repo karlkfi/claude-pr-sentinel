@@ -86,12 +86,14 @@ all once the watcher fails to arm (#77). The first block still fires, because
 launching the watcher is the right ask even there — on an already-merged PR it
 answers `closed` on the first poll.
 
-Fail-open on ANY uncertainty: unparseable stdin, unreadable transcript, no
+Fail-open on ANY uncertainty: unparseable input, unreadable transcript, no
 opened PR, a concluded PR, or a live watcher -> emit nothing (allow the stop). It
 must never break a session. PR_SENTINEL_DEBUG=1 re-raises. PR_SENTINEL_DISABLE=1
 disables it (parity with the PostToolUse nudge).
 
-Reads the Stop hook JSON on stdin, emits a block decision on stdout (or nothing).
+Reached from `scripts/pr-sentinel.py`, which reads the Stop hook JSON on stdin
+and calls `run()` with it; this module emits a block decision on stdout (or
+nothing).
 """
 import calendar
 import json
@@ -689,14 +691,12 @@ def build_warning(dampened):
     )
 
 
-def main():
+def run(data):
+    """Decide whether to block this stop, and print the decision if so.
+
+    Called by the `pr-sentinel.py` entry point, which owns the stdin parse and
+    the fail-open wrapper. Emitting nothing allows the stop."""
     if os.environ.get('PR_SENTINEL_DISABLE') == '1':
-        return
-    try:
-        data = json.load(sys.stdin)
-    except ValueError:
-        return  # unparseable input: allow the stop
-    if not isinstance(data, dict):
         return
     # Never block a stop that is itself a continuation of a prior stop-hook
     # block — this is the no-loop guarantee.
@@ -719,11 +719,3 @@ def main():
         out['systemMessage'] = build_warning(dampened)
     print(json.dumps(out))
 
-
-if __name__ == '__main__':
-    try:
-        main()
-    except Exception:  # noqa: BLE001 — fail-open on any infrastructure error
-        if os.environ.get('PR_SENTINEL_DEBUG') == '1':
-            raise
-        sys.exit(0)

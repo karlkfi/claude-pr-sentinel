@@ -380,7 +380,8 @@ comment-channel exposure.
 ## How it works
 
 1. **Hook nudge.** A `PostToolUse` hook on `Bash`
-   ([`scripts/pr-sentinel-hook.py`](scripts/pr-sentinel-hook.py)) parses the
+   ([`scripts/pr-sentinel.py`](scripts/pr-sentinel.py), dispatching to
+   [`pr_sentinel_hook.py`](scripts/pr_sentinel_hook.py)) parses the
    just-run command. On a `gh pr create` that printed a PR URL, or a branch
    `git push` that didn't obviously fail, it emits `additionalContext` telling
    the session to launch the watcher as a background task. It is **purely

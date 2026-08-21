@@ -1,6 +1,6 @@
 # Privacy Policy — pr-sentinel
 
-_Last updated: 2026-08-19_
+_Last updated: 2026-08-21_
 
 pr-sentinel is a Claude Code plugin that runs on your local machine. Its
 components have different data profiles, described honestly below: two hooks,
@@ -8,13 +8,27 @@ a migration helper and an activity report that never leave your machine, one
 watcher that talks to GitHub, and one hook that asks GitHub a single narrow
 question before you open a pull request.
 
+All three hooks are one script — Claude Code runs `scripts/pr-sentinel.py`
+whichever event fires, and it hands the payload to the handler for that event.
+Each handler has its own section below, because each reads different things.
+
 ## Data we collect
 
 None. The plugin has no analytics, no telemetry, and no data collection of any
 kind. It ships as one bash watcher and a few stdlib-only Python scripts (the
-three hooks, the migration helper, and the activity report).
+hook entry point and its three handlers, the migration helper, and the activity
+report).
 
-## The PostToolUse hook (`scripts/pr-sentinel-hook.py`)
+## The hook entry point (`scripts/pr-sentinel.py`)
+
+- Runs **entirely locally with no network access.** It is the script Claude
+  Code invokes for all three hook events.
+- Receives the hook payload via standard input, reads the `hook_event_name`
+  field to decide which handler runs, and passes the payload straight through.
+  It inspects nothing else and writes nothing to disk.
+- An event it does not recognise produces no output at all.
+
+## The PostToolUse handler (`scripts/pr_sentinel_hook.py`)
 
 - Runs **entirely locally with no network access.**
 - Receives, via standard input, the Bash command Claude Code just ran and that
@@ -33,7 +47,7 @@ three hooks, the migration helper, and the activity report).
   request one is already watching. It extracts the PR number, the background
   task id, and nothing else.
 
-## The PreToolUse hook (`scripts/pr-sentinel-guard.py`)
+## The PreToolUse handler (`scripts/pr_sentinel_guard.py`)
 
 - Denies a Bash command that would foreground-poll continuous integration (CI),
   auto-approves the plugin's own watcher launch, and denies a `gh pr create`
@@ -105,7 +119,7 @@ three hooks, the migration helper, and the activity report).
   (ANSI-stripped, size-capped) and printed to the background task's standard
   output, which the Claude Code harness delivers to your session.
 
-## The Stop hook (`scripts/pr-sentinel-stop-hook.py`)
+## The Stop handler (`scripts/pr_sentinel_stop_hook.py`)
 
 - Runs **entirely locally with no network access.** It blocks the end of a turn
   once when the session has an open PR that nothing is watching.

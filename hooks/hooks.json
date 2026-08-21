@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pr-sentinel-guard.py\"",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pr-sentinel.py\"",
             "timeout": 60
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pr-sentinel-hook.py\"",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pr-sentinel.py\"",
             "timeout": 60
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pr-sentinel-stop-hook.py\"",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pr-sentinel.py\"",
             "timeout": 60
           }
         ]

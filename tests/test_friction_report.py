@@ -30,9 +30,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "friction-report.py"
-HOOK = REPO / "scripts" / "pr-sentinel-hook.py"
-STOP_HOOK = REPO / "scripts" / "pr-sentinel-stop-hook.py"
-GUARD = REPO / "scripts" / "pr-sentinel-guard.py"
+HOOK = REPO / "scripts" / "pr_sentinel_hook.py"
+STOP_HOOK = REPO / "scripts" / "pr_sentinel_stop_hook.py"
+GUARD = REPO / "scripts" / "pr_sentinel_guard.py"
 WATCHER = REPO / "scripts" / "pr-sentinel-watch.sh"
 
 # A synthetic plugin root, so the generated nudge names a watcher path with the

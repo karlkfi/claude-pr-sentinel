@@ -68,7 +68,8 @@ unparseable command/input, a shape it doesn't recognise. It NEVER denies a
 command it isn't sure about, and it can never break a session.
 `PR_SENTINEL_DEBUG=1` re-raises for debugging.
 
-Reads the hook JSON on stdin, emits a PreToolUse decision on stdout.
+Reached from `scripts/pr-sentinel.py`, which reads the hook JSON on stdin and
+calls `run()` with it; this module emits a PreToolUse decision on stdout.
 """
 import json
 import os
@@ -112,7 +113,7 @@ def _autoallow_enabled():
 
 def _expected_watcher_path():
     """The realpath of THIS plugin's own watcher script, derived from the hook's
-    own location (`<root>/scripts/pr-sentinel-guard.py`) or `CLAUDE_PLUGIN_ROOT`.
+    own location (`<root>/scripts/pr_sentinel_guard.py`) or `CLAUDE_PLUGIN_ROOT`.
     No version to hardcode -> upgrade-proof. None on any resolution failure."""
     root = os.environ.get('CLAUDE_PLUGIN_ROOT')
     if root and root.strip():
@@ -389,11 +390,11 @@ def build_allow_reason():
     )
 
 
-def main():
-    try:
-        data = json.load(sys.stdin)
-    except ValueError:
-        return  # unparseable input: defer
+def run(data):
+    """Decide the PreToolUse verdict for `data`, and print it if there is one.
+
+    Called by the `pr-sentinel.py` entry point, which owns the stdin parse and
+    the fail-open wrapper. Emitting nothing is the defer."""
     if data.get('tool_name') != 'Bash':
         return
     tool_input = data.get('tool_input') or {}
@@ -465,11 +466,3 @@ def main():
         'permissionDecision': 'deny',
         'permissionDecisionReason': build_reason(shape)}}))
 
-
-if __name__ == '__main__':
-    try:
-        main()
-    except Exception:  # noqa: BLE001 — fail-open on any infrastructure error
-        if os.environ.get('PR_SENTINEL_DEBUG') == '1':
-            raise
-        sys.exit(0)

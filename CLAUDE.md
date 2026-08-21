@@ -10,8 +10,13 @@ Two load-bearing pieces:
   as a Claude Code background task, that polls `gh` and exits (waking the
   session) when a check fails, a conflict appears, the PR goes green, or the PR
   closes. `set -euo pipefail`, shellcheck-clean.
-- `scripts/pr-sentinel-hook.py` — a stdlib-only `PostToolUse` hook that nudges
-  the session to launch the watcher after `gh pr create` / `git push`.
+- `scripts/pr-sentinel.py` — the single stdlib-only hook entry point. Claude
+  Code runs it for every event; it dispatches on `hook_event_name` to a handler
+  per event (`pr_sentinel_hook.py` nudges after `gh pr create` / `git push`,
+  `pr_sentinel_guard.py` denies a foreground poll, `pr_sentinel_stop_hook.py`
+  is the Stop backstop). **One script on every event, on purpose**: a reader
+  attributes a decision by taking the first `*.py` basename out of the recorded
+  hook command, so a script per event splits the plugin across three labels.
 
 ## Development philosophy
 
@@ -74,7 +79,7 @@ response.
   (`body`, `comments`, `reviews`, `title`). The watcher reads GitHub-controlled
   metadata only. A test enforces this (`test_never_queries_comments_or_body`).
 
-### Python (`scripts/pr-sentinel-hook.py`)
+### Python (`scripts/pr-sentinel.py` and its handlers)
 
 - Stdlib only — no third-party deps. Runs on whatever `python3` is on PATH.
 - **Fail open**: on any parsing uncertainty the hook emits nothing (defers).
