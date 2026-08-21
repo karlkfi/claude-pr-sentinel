@@ -475,6 +475,25 @@ class TestGuardContract(unittest.TestCase):
                              fr.guard_category(GUARD_BUILDERS[name]()),
                              "%s no longer classifies as %s" % (name, expected))
 
+    def test_every_reason_opens_with_the_plugin_name(self):
+        """A deny leaves no record in the decision stream, so the text handed
+        back to the agent is its only trace and `pr-sentinel: ` is the key both
+        this report and foreground-guard's cross-plugin one recover it by. A
+        branch that reworded past the opener would go uncounted rather than
+        miscounted. Completeness rides on the test above, which pins
+        GUARD_BUILDERS to the guard's own call sites; the allow is in here
+        because the opener is one convention, not a deny-only one."""
+        for name, build in sorted(GUARD_BUILDERS.items()):
+            with self.subTest(builder=name):
+                self.assertRegex(
+                    build(), fr.DENY_TEXT,
+                    "%s no longer opens with the plugin name" % name)
+
+    def test_the_opener_check_can_fail(self):
+        """An anchored match and a regex that matches anything look identical
+        from a green test, so prove it rejects a reason without the opener."""
+        self.assertNotRegex("refusing to foreground-poll CI", fr.DENY_TEXT)
+
     def test_every_category_has_a_hint(self):
         self.assertEqual(set(fr.GUARD_CATEGORY) | {"other"}, set(fr.GUARD_HINT))
 
