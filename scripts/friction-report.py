@@ -157,7 +157,9 @@ GUARD_SCRIPT = re.compile(r'pr-sentinel-guard\.py')
 # into the allows.
 HOOK_OK = 'hook_success'
 # Every reason the guard denies with opens `pr-sentinel: `; the harness may
-# prefix the tool result with `Error: `.
+# prefix the tool result with `Error: `. So does every other message this plugin
+# emits (docs/DESIGN.md), which is what lets this double as the convention's
+# matcher in tests/test_friction_report.py.
 DENY_TEXT = re.compile(r'\A(?:Error:\s*)?pr-sentinel:\s')
 
 # One category per decision branch in pr-sentinel-guard.py, keyed on a stable

@@ -803,6 +803,17 @@ Nudges that name no PR number (a branch push where the hook could not resolve
 one) are counted separately and left out of the follow-through rate, rather than
 scored as unanswered.
 
+Both the follow-through and guard-decision readings rest on one convention:
+**every string this plugin hands back to a session opens with `pr-sentinel: `**
+— the three deny reasons, the auto-allow, both PostToolUse nudges, the Stop
+block and its non-blocking notice. A deny leaves no other trace, so that opener
+is the key this report recovers it by, and foreground-guard's cross-plugin
+report parses the same one. Adding a decision branch means opening its message
+the same way; `tests/test_friction_report.py` fails the build otherwise. The
+watcher's report is deliberately outside the set — it reaches the transcript
+whole and identifies itself with a `PR-SENTINEL EVENT:` header instead.
+[Why the messages carry it](docs/DESIGN.md#why-every-message-names-the-plugin).
+
 ## Agent guidance
 
 Paste this into your project's `CLAUDE.md` (or `AGENTS.md`) so the agent uses
