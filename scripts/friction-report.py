@@ -100,8 +100,14 @@ KIND_HINT = {
 NUDGE_PREFIX = 'pr-sentinel:'
 NUDGE_CREATE = re.compile(r'^pr-sentinel: You just opened pull request #(\d+)')
 # Every nudge spells the launch out as `bash "<watcher>" <target>`; the target is
-# a bare PR number, or a placeholder when the push path could not resolve one.
+# a PR URL, a bare PR number, or a placeholder when the push path could not
+# resolve one.
 NUDGE_TARGET = re.compile(r'bash "[^"]*pr-sentinel-watch\.sh" (\S+)')
+
+# A github.com PR URL, the form the create-path nudge and its launch use — the
+# repo-qualified identifier, since a bare number resolves against whichever
+# directory the watcher is launched from. Anchored: this reads a whole target.
+PR_URL = re.compile(r'\Ahttps://github\.com/[^/\s]+/[^/\s]+/pull/([1-9][0-9]*)/?\Z')
 
 # The Stop hook's backstop block — the authoritative record of a nudge that was
 # NOT followed, since it fires only on an open PR with no live watcher. R3
@@ -113,6 +119,18 @@ STOP_BLOCK = re.compile(r'^pr-sentinel: you are ending your turn')
 # or heredoc naming the script is not counted as a launch.
 LAUNCH = re.compile(
     r'(?:^|[\s;&|(])bash\s+"?([^"\s]*pr-sentinel-watch\.sh)"?\s+(\S+)')
+
+
+def target_pr(target):
+    """The PR number a nudge or launch target names, or None for the push-path
+    placeholder. Both identifier forms normalise to the number, so a nudge
+    naming a URL and a launch typed as a bare number join as one PR."""
+    target = target.strip('"\'')
+    if target.isdigit():
+        return target
+    m = PR_URL.match(target)
+    return m.group(1) if m else None
+
 
 # A `Read` renders the task-output file with `<lineno>\t` prefixes; a `cat`
 # does not. Strip either shape before matching a report line.
@@ -460,7 +478,7 @@ def scan(path):
                 target = m.group(1) if m else ''
                 out['nudges'].append({
                     'kind': 'create' if NUDGE_CREATE.match(ctx) else 'push',
-                    'pr': target if target.isdigit() else None,
+                    'pr': target_pr(target),
                     'ts': ts, 'cwd': cwd,
                 })
             elif rtype == 'assistant':
@@ -480,7 +498,7 @@ def scan(path):
                         continue
                     target = m.group(2).strip('"')
                     out['launches'].append({
-                        'pr': target if target.isdigit() else None,
+                        'pr': target_pr(target),
                         'background': bool(inp.get('run_in_background')),
                         'ts': ts, 'cwd': cwd,
                     })

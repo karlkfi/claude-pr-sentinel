@@ -48,7 +48,7 @@ A **hook-nudged background watcher** with zero idle token cost.
    PostToolUse hook  ──► additionalContext: "launch the sentinel watcher for PR #N"
           │                         (advisory — hooks cannot force a tool call)
           ▼
-   session launches  scripts/pr-sentinel-watch.sh N  as a background task
+   session launches  scripts/pr-sentinel-watch.sh <PR URL>  as a background task
           │                         (run_in_background)
           ▼
    watcher polls gh (checks + mergeStateStatus + queue membership), sleeps, backs off
@@ -89,6 +89,16 @@ task's stdout to the session as the wake payload.
    successful, it injects `additionalContext` telling the session to start (or
    restart) the watcher for the detected PR. It is **advisory**: a hook cannot
    force the model to call a tool, so the nudge asks, it doesn't compel.
+
+   The launch command it writes names the **whole PR URL**, not the number the
+   prose uses. `gh pr view <number>` resolves the repo from the launching
+   directory, so a bare number sends the watcher to whichever PR holds that
+   number in the repo the session happens to be sitting in — and a session
+   working two at once is routine under parallel dispatch. Nothing errors: PR
+   numbers are dense and shared with issues, so the wrong PR almost always
+   exists and answers just as confidently, including `closed`/`MERGED`, which
+   also tells the session to stop watching. The URL is the half that
+   disambiguates and the create already printed it.
 
 3. **Plugin manifest + tests + docs.**
 
@@ -597,10 +607,17 @@ PR body or comments**:
   string (model-authored — never tool output, never CI-log text) and only when
   it needs no expansion; the read is byte-capped; and a file whose mtime
   predates the create is ignored, because log paths get reused and a failed
-  create must not inherit the previous run's URL. Because this route recovers
-  the whole URL rather than a number, the block names the URL — which is how a
-  PR in another repository gets a watcher pointed at the right repo, the case
-  the `pr-link` route cannot reach.
+  create must not inherit the previous run's URL. It is the only route that
+  reaches a redirected create run against another repository, which the
+  `pr-link` route cannot.
+
+  **Every route keeps the whole URL, not just this one.** The block's relaunch
+  command names it wherever one was resolved — from the create's own output,
+  from the `pr-link`'s `prUrl`, from the redirected file, or from the argument
+  an earlier watcher in this session was launched with. A bare number is the
+  fallback when no route resolved a URL, and it is a fallback rather than a
+  default because `gh pr view <number>` resolves against whatever directory the
+  relaunch runs in.
 - **Detect a live watcher** from the same transcript: a `run_in_background`
   launch of `pr-sentinel-watch.sh <PR>` records a `tool_use` id, and when that
   background task exits the harness records a `<task-notification>` carrying the
