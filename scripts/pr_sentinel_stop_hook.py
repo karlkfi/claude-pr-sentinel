@@ -475,6 +475,9 @@ def _analyze(path):
                     num = str(obj.get('prNumber') or '').strip()
                     if in_create and num.isdigit() and num not in seen_prs:
                         created.add(num)
+                        lm = PR_URL_RE.search(str(obj.get('prUrl') or ''))
+                        if lm and lm.group(1) == num:
+                            url_by_pr.setdefault(num, lm.group(0))
                     seen_prs |= line_prs | {num}
                     continue
                 seen_prs |= line_prs
@@ -509,9 +512,17 @@ def _analyze(path):
                             cmd = inp.get('command') or ''
                             if inp.get('run_in_background'):
                                 for wm in WATCH_ARG_RE.finditer(cmd):
-                                    num = pr_number(wm.group(1))
-                                    if num:
-                                        launched_since_ask.add(num)
+                                    arg = wm.group(1)
+                                    num = pr_number(arg)
+                                    if not num:
+                                        continue
+                                    launched_since_ask.add(num)
+                                    # A URL argument names the repo too, which
+                                    # is what a relaunch needs; store the match
+                                    # rather than the raw token.
+                                    am = PR_URL_RE.search(arg)
+                                    if am:
+                                        url_by_pr.setdefault(num, am.group(0))
                             if _is_pr_create(cmd):
                                 create_ids.append(b.get('id'))
                                 in_create = True
@@ -537,6 +548,7 @@ def _analyze(path):
     for tid in create_ids:
         for m in PR_URL_RE.finditer(result_text.get(tid, '')):
             created.add(m.group(1))
+            url_by_pr.setdefault(m.group(1), m.group(0))
 
     # The same output, when the create redirected it to a file: the URL is on
     # disk rather than in the transcript. This resolves the cross-repo create

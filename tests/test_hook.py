@@ -269,13 +269,36 @@ class HookEndToEnd(unittest.TestCase):
         self.assertEqual(obj["hookSpecificOutput"]["hookEventName"], "PostToolUse")
         self.assertIn("#42", ctx)  # prose may reference the PR as #42
         self.assertIn("pr-sentinel-watch.sh", ctx)
-        # The Command line must interpolate the BARE number — the watcher
-        # rejects `#N`, so a `#`-prefixed arg would make a verbatim copy fail.
-        self.assertIn('pr-sentinel-watch.sh" 42', ctx)
+        # The Command line must interpolate the WHOLE URL, never a bare number:
+        # `gh pr view 42` resolves against the launching directory, so a bare
+        # number sends the watcher to whichever repo the session is sitting in.
+        # Not `#N` either — the watcher rejects that outright.
+        self.assertIn('pr-sentinel-watch.sh" https://github.com/o/r/pull/42', ctx)
+        self.assertNotIn('pr-sentinel-watch.sh" 42', ctx)
         self.assertNotIn('pr-sentinel-watch.sh" #42', ctx)
         self.assertIn("/opt/plugins/pr-sentinel", ctx)  # CLAUDE_PLUGIN_ROOT
         self.assertIn("background", ctx.lower())
         self.assertIn("Never auto-merge", ctx)
+
+    def test_create_in_another_repo_keeps_that_repo_in_the_command(self):
+        """The launch command must carry the create's own owner/repo.
+
+        A session working two repos at once (routine under parallel dispatch, or
+        when a task in one repo files a row in another) can open a PR outside the
+        directory it is sitting in. `gh pr view <number>` resolves against that
+        directory, and PR numbers are dense and shared with issues, so the same
+        number almost always exists in both — the watcher then reports a
+        confident verdict about the wrong PR and exits 0. Measured against 0.9.0:
+        a watcher launched on `15` from a sibling checkout reported `closed` /
+        `MERGED` for an unrelated PR while the intended one stayed open."""
+        out, _ = run_hook(bash_payload(
+            "gh pr create --fill",
+            "https://github.com/other-owner/other-repo/pull/15\n"))
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(
+            'pr-sentinel-watch.sh" https://github.com/other-owner/other-repo/pull/15',
+            ctx)
+        self.assertNotIn('pr-sentinel-watch.sh" 15', ctx)
 
     def test_nudge_on_git_push_without_url(self):
         out, _ = run_hook(bash_payload(
@@ -284,9 +307,12 @@ class HookEndToEnd(unittest.TestCase):
         obj = json.loads(out)
         ctx = obj["hookSpecificOutput"]["additionalContext"]
         self.assertIn("pr-sentinel-watch.sh", ctx)
-        # No PR number known -> a placeholder pointing the session to resolve it,
-        # and leave to drop the nudge if the branch has no PR at all (#34).
-        self.assertIn("PR number", ctx)
+        # No PR known -> a placeholder pointing the session to resolve it, and
+        # leave to drop the nudge if the branch has no PR at all (#34). It asks
+        # for the URL, not the number: resolved here it is resolved against the
+        # repo just pushed to, and it pins the watcher for the whole watch.
+        self.assertIn("PR URL", ctx)
+        self.assertNotIn("PR number for this branch", ctx)
         self.assertIn("no open PR, ignore this", ctx)
 
     def test_silent_on_tag_push(self):

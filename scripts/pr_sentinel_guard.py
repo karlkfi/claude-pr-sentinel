@@ -18,7 +18,9 @@ Fires on a `Bash` command the session is *about to run*. Four branches:
   session isn't prompted by the base Bash permission on every (re)launch. The
   match is airtight and fail-safe: a single simple command, no operators /
   redirects / substitutions / globs, `argv[1]` resolving (via realpath) to this
-  plugin's own `pr-sentinel-watch.sh`, and `argv[2]` a bare positive integer.
+  plugin's own `pr-sentinel-watch.sh`, and `argv[2]` a bare positive integer or
+  a `https://github.com/<owner>/<repo>/pull/<n>` URL — the two forms the watcher
+  itself accepts.
   ANY doubt -> defer (emit nothing), never allow. Gated by
   `PR_SENTINEL_AUTOALLOW` (default on; `0`/`false`/empty disables) and off when
   `PR_SENTINEL_DISABLE=1`.
@@ -98,6 +100,12 @@ _LEADING_KEYWORDS = ('do', 'then', 'else', '{', '(', '!')
 # the nudge's `bash "<path>" N` form matches.
 _AUTOALLOW_FORBIDDEN = set(';|&<>$`()*?[]{}\\\n\r')
 
+# The other identifier the watcher accepts: a github.com PR URL. Anchored, so
+# it validates a whole argument rather than finding one inside a longer string
+# — this is an allow decision, so the match has to be exact.
+_WATCHER_PR_URL_RE = re.compile(
+    r'\Ahttps://github\.com/[^/\s]+/[^/\s]+/pull/([1-9][0-9]*)/?\Z')
+
 
 def _autoallow_enabled():
     """Whether the watcher-launch auto-allow is active. On by default; off when
@@ -133,7 +141,10 @@ def watcher_launch_pr(command):
       * no shell operator / redirect / substitution / glob (`_AUTOALLOW_FORBIDDEN`)
       * exactly three tokens, `argv[0]` basename `bash`
       * `argv[1]` realpath-equals this plugin's own watcher script
-      * `argv[2]` a bare positive integer (the PR number)
+      * `argv[2]` a bare positive integer, or a github.com PR URL
+
+    Both identifier forms normalise to the number, so a URL launch and a bare
+    number for the same PR are one PR to the duplicate check.
 
     Any doubt returns None so the caller defers rather than allowing — or, for
     the duplicate check, rather than denying."""
@@ -147,8 +158,13 @@ def watcher_launch_pr(command):
         return None
     if os.path.basename(argv[0]) != 'bash':
         return None
-    if not re.match(r'\A[1-9][0-9]*\Z', argv[2]):
-        return None
+    if re.match(r'\A[1-9][0-9]*\Z', argv[2]):
+        pr = argv[2]
+    else:
+        m = _WATCHER_PR_URL_RE.match(argv[2])
+        if m is None:
+            return None
+        pr = m.group(1)
     expected = _expected_watcher_path()
     if expected is None:
         return None
@@ -157,7 +173,7 @@ def watcher_launch_pr(command):
             return None
     except OSError:
         return None
-    return argv[2]
+    return pr
 
 
 def is_watcher_launch(command):

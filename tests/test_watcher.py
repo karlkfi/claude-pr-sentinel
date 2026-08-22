@@ -12,6 +12,11 @@ scenario is a directory of small fixture files:
   pr_view      -> tab-separated "state\\tmerge\\tbase\\thead-sha\\turl" for
                   `gh pr view` (trailing fields may be omitted; an absent url
                   disables merge-queue tracking, the pre-queue behaviour)
+  pr_view@<owner>_<repo>, pr_checks@<owner>_<repo> -> the same, for one repo
+                 only. The stub resolves the watcher's PR argument the way real
+                 gh does — a URL names its own repo, a bare number resolves
+                 against the calling directory (run_watcher's `cwd_repo`) — so
+                 one scenario can hold the same PR number in two repos.
   pr_checks    -> lines "bucket\\tname\\tlink" for `gh pr checks`
   run_log      -> raw --log-failed output for `gh run view`
   run_conclusion.<id> -> conclusion of run <id> for `gh api repos/.../runs/<id>`
@@ -100,6 +105,20 @@ GH_STUB = textwrap.dedent(
       esac
       exit 0
     fi
+    # Which repo a PR identifier addresses, exactly as real gh resolves it: a
+    # URL names its own owner/repo, a bare number resolves against the calling
+    # directory ($GH_STUB_CWD_REPO here). Empty unless the scenario sets one.
+    resolved_repo() {
+      case "${1:-}" in
+        https://github.com/*/pull/*)
+          local rest owner name
+          rest="${1#https://github.com/}"
+          owner="${rest%%/*}"; rest="${rest#*/}"; name="${rest%%/*}"
+          echo "${owner}_${name}" ;;
+        *) echo "${GH_STUB_CWD_REPO:-}" ;;
+      esac
+    }
+
     key=""
     case "${1:-}:${2:-}" in
       pr:view)     key="pr_view" ;;
@@ -113,6 +132,10 @@ GH_STUB = textwrap.dedent(
         esac ;;
       *) exit 0 ;;
     esac
+    if [[ "$key" == "pr_view" || "$key" == "pr_checks" ]]; then
+      repo="$(resolved_repo "${3:-}")"
+      [[ -n "$repo" && -f "$dir/${key}@${repo}" ]] && key="${key}@${repo}"
+    fi
     if ! emit "$key"; then
       [[ "$key" == "queue_entry" || "$key" == "dequeue_actor" ]] && exit 1
     fi
@@ -158,11 +181,14 @@ def sleeps(stderr):
 
 class WatcherCase(unittest.TestCase):
     def run_watcher(self, files, pr="123", env=None, timeout=20,
-                    virtual_clock=False):
+                    virtual_clock=False, cwd_repo=None):
         """Set up a stub-gh scenario dir, run the watcher, return (rc, stdout).
 
         virtual_clock also stubs `sleep` and `date`, so the watch costs no wall
         time and every sleep it asks for is reported on stderr — see sleeps().
+
+        cwd_repo names the `<owner>_<repo>` a BARE PR number resolves against,
+        standing in for the directory gh would resolve it in.
         """
         scen = tempfile.mkdtemp(prefix="pr-sentinel-test-")
         bindir = os.path.join(scen, "bin")
@@ -183,6 +209,8 @@ class WatcherCase(unittest.TestCase):
         run_env = dict(os.environ)
         run_env["PATH"] = bindir + os.pathsep + run_env["PATH"]
         run_env["GH_STUB_DIR"] = scen
+        if cwd_repo:
+            run_env["GH_STUB_CWD_REPO"] = cwd_repo
         # Fast, deterministic defaults; individual tests can override.
         run_env.setdefault("PR_SENTINEL_INTERVAL", "1")
         run_env.setdefault("PR_SENTINEL_MAX_INTERVAL", "1")
@@ -204,6 +232,34 @@ class WatcherCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("PR-SENTINEL EVENT: closed", out)
         self.assertIn("State: MERGED", out)
+
+    def test_url_argument_targets_its_own_repo_not_the_calling_directory(self):
+        """A bare number is resolved by gh against the calling directory, so it
+        addresses whichever PR holds that number there. The identifier is passed
+        through untouched, which is what lets a URL override that.
+
+        This is the failure the create-path nudge now avoids by launching with
+        the whole URL: numbers are dense and shared with issues, so a session
+        working two repos gets a confident verdict about the wrong PR at exit 0.
+        Both halves are asserted — a watcher that stripped a URL down to its
+        number would still pass the first."""
+        files = {
+            # The colliding PR in the directory the session is sitting in.
+            "pr_view@cwd-owner_cwd-repo": "MERGED\tUNKNOWN\tmain\n",
+            # The PR actually meant, open and conflicting.
+            "pr_view@pr-owner_pr-repo": "OPEN\tDIRTY\tmain\n",
+        }
+        rc, out, _ = self.run_watcher(files, pr="15",
+                                      cwd_repo="cwd-owner_cwd-repo")
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: closed", out)
+
+        rc, out, _ = self.run_watcher(
+            files, pr="https://github.com/pr-owner/pr-repo/pull/15",
+            cwd_repo="cwd-owner_cwd-repo")
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: conflict", out)
+        self.assertNotIn("EVENT: closed", out)
 
     def test_conflict_event(self):
         """Default heal mode is rebase: recommend rebase onto base + force-with-lease."""

@@ -259,17 +259,22 @@ def build_live_context(pr_num, task_ids):
         + watchers.stop_hint(pr_num, task_ids))
 
 
-def build_context(action, pr_num, live=None):
+def build_context(action, pr_num, live=None, pr_url=None):
     """The advisory nudge injected as additionalContext. `pr_num` is the bare
     PR number (no `#`), or None — only reachable on the push path, since a
-    create without a number never gets this far. `live` maps PR number to the
-    background task ids of watchers still running in this session."""
+    create without a number never gets this far. `pr_url` is the whole PR URL
+    the number came from, so it is set exactly when `pr_num` is. `live` maps PR
+    number to the background task ids of watchers still running in this
+    session."""
     plugin_root = os.environ.get('CLAUDE_PLUGIN_ROOT', '')
     watcher = os.path.join(plugin_root, 'scripts', 'pr-sentinel-watch.sh') \
         if plugin_root else 'scripts/pr-sentinel-watch.sh'
-    # The watcher accepts a bare number or a github.com PR URL, NOT `#N` — so
-    # the Command line interpolates the bare number, never a `#`-prefixed ref.
-    target = pr_num if pr_num else '<the PR number for this branch>'
+    # The watcher accepts a bare number or a github.com PR URL, NOT `#N`. Pass
+    # the URL: `gh pr view <number>` resolves against the launching directory,
+    # so a session working two repos watches whichever PR holds that number in
+    # the one it happens to be sitting in — silently, since PR numbers are
+    # dense and the wrong PR answers just as confidently as the right one.
+    target = pr_url if pr_url else '<the PR URL for this branch>'
     if action == 'pr_create':
         lead = f'You just opened pull request #{pr_num}.'
     else:
@@ -278,7 +283,7 @@ def build_context(action, pr_num, live=None):
         # We could not resolve a number, so the session may be on a branch with
         # no PR at all. Let it drop the nudge instead of hunting for one (#34).
         lead += (' If this branch has no open PR, ignore this — a successful '
-                 '`gh pr create` nudges again with the number.')
+                 '`gh pr create` nudges again with the URL.')
     # With no number resolved we cannot tell whether this push was to a PR the
     # session is already watching, so name those PRs and let it decide. A
     # resolved-and-live number never reaches here — it took build_live_context.
@@ -326,6 +331,7 @@ def run(data):
 
     m = PR_URL_RE.search(text)
     pr_num = m.group(1) if m else None
+    pr_url = m.group(0) if m else None
     if action == 'pr_create' and pr_num is None:
         # A create that opened a PR prints its URL, so require one rather than
         # nudging unless we can prove failure (#57). Covers `--help`, `--web`,
@@ -338,7 +344,7 @@ def run(data):
     if pr_num and pr_num in live:
         context = build_live_context(pr_num, live[pr_num])
     else:
-        context = build_context(action, pr_num, live)
+        context = build_context(action, pr_num, live, pr_url)
     print(json.dumps({'hookSpecificOutput': {
         'hookEventName': 'PostToolUse',
         'additionalContext': context}}))

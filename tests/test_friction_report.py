@@ -89,8 +89,9 @@ def _signatures():
     saved = os.environ.get("CLAUDE_PLUGIN_ROOT")
     os.environ["CLAUDE_PLUGIN_ROOT"] = PLUGIN_ROOT
     try:
-        return (hook.build_context("pr_create", "41"),
-                hook.build_context("push", "41"),
+        url = "https://github.com/o/r/pull/41"
+        return (hook.build_context("pr_create", "41", None, url),
+                hook.build_context("push", "41", None, url),
                 hook.build_context("push", None),
                 stop_hook.build_reason(["41"]))
     finally:
@@ -447,10 +448,26 @@ class TestEvents(TranscriptCase):
 class TestFollowThrough(TranscriptCase):
 
     def test_nudge_answered_by_a_launch(self):
+        # The nudge names the PR URL and this launch a bare number, so the pair
+        # only joins because both normalise to the number.
         self.write([rec_nudge(NUDGE_CREATE), rec_launch("41")])
         r = self.report()
+        self.assertEqual(0, r["nudges_unresolved"])
         self.assertEqual(1, r["answered"])
         self.assertEqual(0, r["unanswered"])
+        self.assertEqual(100.0, r["follow_through"])
+
+    def test_a_url_launch_answers_a_url_nudge(self):
+        """The create-path nudge names the whole PR URL — that is what sends the
+        watcher to the right repo — so both sides of the pair can carry the URL
+        form. It has to normalise to the number, or every create nudge lands in
+        `named no PR number` and the follow-through rate scores nothing at all.
+        The mixed pair (URL nudge, bare-number launch) is the sibling test."""
+        self.write([rec_nudge(NUDGE_CREATE),
+                    rec_launch("https://github.com/o/r/pull/41")])
+        r = self.report()
+        self.assertEqual(0, r["nudges_unresolved"])
+        self.assertEqual(1, r["answered"])
         self.assertEqual(100.0, r["follow_through"])
 
     def test_nudge_with_no_launch_is_unanswered(self):

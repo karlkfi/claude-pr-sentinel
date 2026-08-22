@@ -47,7 +47,7 @@ nudge to (re)launch the watcher after a PR-opening or branch-push command:
 
 | Command (PostToolUse) | Hook action |
 | --- | --- |
-| `gh pr create --fill` (output has a PR URL) | **nudge** — launch watcher for `#N` |
+| `gh pr create --fill` (output has a PR URL) | **nudge** — launch watcher for that whole URL, repo and all (a bare number resolves against the session's directory) |
 | `git push -u origin claude/foo` | **nudge** — launch watcher for this branch's PR |
 | `git push origin HEAD && gh pr create` · a heredoc body, then `gh pr create --body-file` on the next line | **nudge** — PR create wins, whichever separator (`&&`, `;`, `\|`, newline) precedes it |
 | a heredoc PR body holding an apostrophe, then `gh pr create --body-file` | **nudge** — a quote shlex can't balance retries line by line rather than dropping the whole command |
@@ -228,10 +228,13 @@ Failing that, it reads the file the create redirected its own output to —
 `gh pr create … > out.log` printed the URL, just not where the transcript could
 see it. The path comes from the create's own command string, the read is
 byte-capped, and a file older than the create is ignored, since log paths get
-reused and a failed create must not inherit the previous run's URL. This is the
-route that resolves a PR in a *different* repository from the one the session is
-sitting in: it recovers the whole URL, so the launch command names the URL rather
-than a bare number, which is what sends the watcher to the right repo. It
+reused and a failed create must not inherit the previous run's URL. It is the
+last route that resolves a PR in a *different* repository from the one the
+session is sitting in, and every route keeps the **whole URL** where it has one
+— the create's output, the `pr-link`, the redirected file, and the argument an
+earlier watcher was launched with. The relaunch command then names that URL
+rather than a bare number, which is what sends the watcher to the right repo; a
+bare number is what a launch falls back to when no route resolved one. It
 treats a watcher as live when its background-task launch has no completion
 notification yet, and reads the watcher's output file directly to see whether the
 PR was handed off — so that signal holds whether the session surfaced the output
@@ -518,9 +521,10 @@ answered by backgrounding the command — no override, no session-wide env entry
 `PR_SENTINEL_AUTOALLOW` is **on by default** and removes the base Bash approval
 prompt for the one first-party, read-only command the plugin asks you to run —
 `bash …/pr-sentinel-watch.sh <PR>` — on every (re)launch. Only that exact shape
-is approved (single simple command, the script matched by resolved realpath, a
-bare PR number); anything else defers to normal permissions. Set it to `0` to
-keep the prompt if you'd rather see each launch. Disabling it does **not** widen
+is approved (single simple command, the script matched by resolved realpath, and
+a bare PR number or a `https://github.com/<owner>/<repo>/pull/<n>` URL — the two
+forms the watcher accepts); anything else defers to normal permissions. Set it
+to `0` to keep the prompt if you'd rather see each launch. Disabling it does **not** widen
 what the plugin reads or does — it only reinstates the prompt. Users who disable
 it but still want no prompt can instead add a Bash allowlist entry
 `Bash(bash */.claude/plugins/cache/pr-sentinel/pr-sentinel/*/scripts/pr-sentinel-watch.sh:*)`
@@ -829,9 +833,12 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
   `gh run watch`, or a `until …; do sleep …; done` polling loop in the
   foreground — they block the session and burn tokens.
 - **Launch the watcher as a background task** (run_in_background):
-  `bash "${CLAUDE_PLUGIN_ROOT}/scripts/pr-sentinel-watch.sh" <PR>`. It sleeps
-  and wakes you only when a check fails, a conflict appears, the PR goes green,
-  the merge stays blocked, or the PR closes.
+  `bash "${CLAUDE_PLUGIN_ROOT}/scripts/pr-sentinel-watch.sh" <PR URL>`. Give it
+  the whole `https://github.com/<owner>/<repo>/pull/<n>`, not a bare number: a
+  number is resolved against the directory you launch from, so a session working
+  two repos watches whichever PR holds that number in the one it is sitting in.
+  It sleeps and wakes you only when a check fails, a conflict appears, the PR
+  goes green, the merge stays blocked, or the PR closes.
 - **For a workflow run with no PR** — a release tag build — there's nothing for
   the watcher to attach to. Run `gh run watch <run-id> --exit-status` as a
   background task instead; backgrounded calls aren't refused.
@@ -863,10 +870,12 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
   rest on that parse alone: a correlated `pr-link`, and the create's own
   redirected output file, resolve the PR the transcript never showed — so the
   two don't fall silent together.
-- **`git push` without a PR URL** can't resolve the PR number locally (the hook
-  makes no network call), so the nudge asks the session to resolve it — and to
-  ignore the nudge if the branch has no open PR at all. A PR created earlier
-  and pushed to later still gets a (branch-scoped) nudge.
+- **`git push` without a PR URL** can't resolve the PR locally (the hook makes no
+  network call), so the nudge asks the session to resolve it — and to ignore the
+  nudge if the branch has no open PR at all. It asks for the **URL**, not the
+  number: resolved there it is resolved against the repo just pushed to, and it
+  pins the watcher to that repo for the whole watch. A PR created earlier and
+  pushed to later still gets a (branch-scoped) nudge.
 - **The watcher needs an authenticated `gh`.** It separates *permanent*
   failures (no credentials at all, an unresolvable PR) — which exit with an
   `error` event at once — from *transient* ones (a network blip, a 5xx, rate

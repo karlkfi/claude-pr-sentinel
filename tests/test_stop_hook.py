@@ -202,8 +202,9 @@ def analyze(entries):
 
 
 def analyze_urls(entries):
-    """{PR: full URL} for PRs the hook resolved from a create's redirected
-    output file."""
+    """{PR: full URL} for PRs the hook resolved a repo-qualified identifier for
+    — from a create's own output, a `pr-link`, a redirected output file, or the
+    argument an earlier watcher was launched with."""
     path = write_transcript(entries)
     try:
         return hook._analyze(path)[2]
@@ -442,6 +443,41 @@ class NeedsWatcherLogic(unittest.TestCase):
             self.assertEqual(needs(entries), {"173"})
             self.assertEqual(analyze_urls(entries), {"173": url})
             self.assertIn(url, hook.build_reason({"173"}, {"173": url}))
+
+    def test_every_resolution_path_keeps_the_repo_qualified_url(self):
+        """A bare number resolves against whatever directory the relaunch runs
+        in, so the block has to name the URL wherever it has one. The redirected
+        file was the only path that kept it; these three had the URL in hand and
+        dropped it, which put the number back into the command."""
+        url = "https://github.com/o/r/pull/42"
+
+        with self.subTest("the create's own output"):
+            self.assertEqual(analyze_urls(created_pr("42")), {"42": url})
+
+        with self.subTest("a pr-link inside the create window"):
+            self.assertEqual(analyze_urls(created_pr_redirected("42")),
+                             {"42": url})
+
+        with self.subTest("an earlier watcher's launch argument"):
+            entries = created_pr("42") + [
+                assistant_bash(f'bash pr-sentinel-watch.sh {url}',
+                               "toolu_w", background=True),
+                task_notification("toolu_w"),
+            ]
+            self.assertEqual(analyze_urls(entries).get("42"), url)
+
+        self.assertIn(url, hook.build_reason({"42"}, {"42": url}))
+
+    def test_a_bare_number_launch_leaves_no_url(self):
+        """A watcher launched with a bare number tells us nothing about which
+        repo it meant, so nothing is recorded rather than a guess — the block
+        falls back to the number, as it did before any of this."""
+        entries = [
+            assistant_bash("bash pr-sentinel-watch.sh 42", "toolu_w",
+                           background=True),
+            task_notification("toolu_w"),
+        ]
+        self.assertEqual(analyze_urls(entries), {})
 
     def test_redirected_file_without_a_url_resolves_nothing(self):
         # A create that opened nothing — `--help`, a failure, `--dry-run` — puts

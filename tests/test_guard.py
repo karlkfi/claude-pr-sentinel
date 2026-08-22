@@ -462,6 +462,28 @@ class AutoAllowEndToEnd(unittest.TestCase):
         self._assert_allow(out)
         self.assertEqual(rc, 0)
 
+    def test_url_launch_is_allowed(self):
+        """The create-path nudge launches with the whole PR URL, so a session
+        working two repos does not watch the wrong repo's PR of that number.
+        The auto-allow has to accept that form, or the fix costs a base Bash
+        prompt on every launch."""
+        out, _, rc = self._run(
+            f'bash "{WATCHER}" https://github.com/o/r/pull/42')
+        self._assert_allow(out)
+        self.assertEqual(rc, 0)
+
+    def test_url_and_number_are_the_same_pr(self):
+        """Both identifier forms normalise to the number, so the duplicate
+        check cannot be side-stepped by launching one of each."""
+        self.assertEqual(
+            guard.watcher_launch_pr(
+                f'bash "{WATCHER}" https://github.com/o/r/pull/42'),
+            "42")
+        self.assertEqual(
+            guard.watcher_launch_pr(
+                f'bash "{WATCHER}" https://github.com/o/r/pull/42/'),
+            "42")
+
     def test_backgrounded_launch_is_still_allowed(self):
         # The launch the nudge names IS backgrounded — the auto-allow runs
         # before the backgrounded-call defer, so the prompt is still skipped.
@@ -491,6 +513,14 @@ class AutoAllowEndToEnd(unittest.TestCase):
             f"bash {REPO}/scripts/pr_sentinel_hook.py 6",
             f"sh {WATCHER} 6",
             f"bash {WATCHER} $(echo 6)",
+            # URL near-misses: the match is anchored, so nothing may ride
+            # along before or after a well-formed PR URL, and only github.com
+            # over https counts.
+            f"bash {WATCHER} https://github.com/o/r/pull/6/files",
+            f"bash {WATCHER} https://evil.example/github.com/o/r/pull/6",
+            f"bash {WATCHER} http://github.com/o/r/pull/6",
+            f"bash {WATCHER} https://github.com/o/r/pull/0",
+            f"bash {WATCHER} https://github.com/o/r/issues/6",
         ):
             out, _, _ = self._run(cmd)
             self._assert_not_allow(out)
