@@ -38,6 +38,16 @@ skill.
 
 Named `backlog` until August 2026.
 
+### session-orchestrator
+
+Coordinates a batch of backlog items across parallel Claude Code sessions, one
+pull request each, and carries every one to ready without merging it. Its §7
+has the orchestrator hold its own mergeability watch on each handed-off PR.
+
+Nothing in this repo invokes it. It is named here because that watch and this
+plugin's Stop hook ask overlapping questions about the same PR, which
+[`../queue/Q40.md`](../queue/Q40.md) is about.
+
 ## Names drift, and nothing here goes red
 
 Upstream can rename or retire a skill without breaking any gate in this repo.
