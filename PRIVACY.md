@@ -1,6 +1,6 @@
 # Privacy Policy — pr-sentinel
 
-_Last updated: 2026-08-21_
+_Last updated: 2026-09-05_
 
 pr-sentinel is a Claude Code plugin that runs on your local machine. Its
 components have different data profiles, described honestly below: two hooks,
@@ -123,19 +123,24 @@ report).
 
 - Runs **entirely locally with no network access.** It blocks the end of a turn
   once when the session has an open PR that nothing is watching.
-- Reads three local files, all of them paths the session itself produced: your
+- Reads four local files, all of them paths the session itself produced: your
   Claude Code **session transcript** (the harness supplies the path), each
   **watcher's own output file** (the path is in the background task's completion
   notification), and, when a `gh pr create` sent its output to a log rather than
   to the transcript, **that log** — the path is parsed out of the create's own
   command string, the read is capped at 8 KiB, and a file older than the create
-  is ignored so a reused log path cannot donate a stale PR URL.
+  is ignored so a reused log path cannot donate a stale PR URL. The fourth is
+  the same shape one step later: when a watcher *launch* redirected the
+  watcher's output to a log, **that log** — the path comes from the launch's own
+  command string, the read is capped at 64 KiB (as the watcher output file's
+  is), and a file older than the launch is ignored for the same reason.
 - Also reads, from that same transcript, the harness's own record of an
   **earlier block by this hook**, so it asks about a PR once rather than on
   every turn end. Only the harness-written copies of its own message count —
   it extracts nothing from your prompts or the model's replies.
-- Extracts nothing from the redirected log but a `github.com` PR URL. It does
-  **not** read PR bodies or comments, and it inspects no process table.
+- Extracts nothing from a redirected log but a `github.com` PR URL (the
+  create's) or the watcher's own report header (the launch's). It does **not**
+  read PR bodies or comments, and it inspects no process table.
 - Writes nothing to disk, and emits only its block decision and an optional
   non-blocking notice to standard output.
 

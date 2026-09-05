@@ -57,7 +57,11 @@ process table, writes nothing, and never touches the PR body or comment stream
     concluded marker is trusted only in the report's header region, above
     the first embedded CI-log excerpt: a report embeds semi-untrusted CI logs, so
     a marker below that banner could be a forged log line. If the file is gone,
-    we fall back to a transcript Read of it.
+    we fall back to a transcript Read of it. A launch that redirected the
+    watcher's own output — `… pr-sentinel-watch.sh 42 > w42.log 2>&1` — leaves
+    that task output file holding only the echoed exit code, so the report is
+    read from the redirect target instead; the path comes from the launch's own
+    command string, the same model-authored source the create route reads.
 
 We cannot verify check status locally (that needs a network call), so "checks
 still pending" is approximated as "owned, not handed off, unwatched". The block
@@ -135,6 +139,12 @@ CONCLUDED_EVENT_RE = re.compile(
 # marker is only honoured in the report header region ABOVE it. The watcher
 # always writes its own header first, so the real marker always precedes this.
 LOG_EXCERPT_BANNER = '----- BEGIN CI LOG EXCERPT'
+
+# What every watcher report opens with. Used to tell a file the watcher wrote
+# from one it did not: a launch that redirected the watcher's output leaves the
+# harness's own task output file holding just the echoed exit code, which is
+# non-empty and says nothing.
+EVENT_MARKER = 'PR-SENTINEL EVENT:'
 
 # Terminal events a repeat of which means "nothing moved": every one of them
 # asks the session to change the PR and push, so a second report at the SAME head
@@ -221,18 +231,19 @@ def _unquote(token):
     return token.strip().strip('"\'')
 
 
-def _create_redirect_path(command, cwd):
-    """The absolute path a `gh pr create` in this command sent its output to, or
-    None. Only the create's own simple command is considered, so an unrelated
-    redirect elsewhere in a chain is not mistaken for it. A relative target
-    resolves against a literal `cd` earlier in the command, else the entry's
-    `cwd`; `/dev/…` and anything the hook cannot expand yield None."""
-    m = re.search(r'\bgh\b(?:\s+\S+)*?\s+pr\s+create\b', command)
-    if not m:
-        return None
-    segment = re.split(r'[;\n]|&&|\|\||(?<![0-9&])\|', command[m.end():])[0]
+def _redirect_target(command, cd_before, segment_from, cwd, appends_ok=True):
+    """The absolute path the simple command running at `segment_from` sent its
+    output to, or None. Only that command's own segment is considered, so an
+    unrelated redirect elsewhere in a chain is not mistaken for it. A relative
+    target resolves against a literal `cd` before `cd_before`, else the entry's
+    `cwd`; `/dev/…` and anything the hook cannot expand yield None. With
+    `appends_ok` false, `>>` is declined too."""
+    segment = re.split(r'[;\n]|&&|\|\||(?<![0-9&])\|',
+                       command[segment_from:])[0]
     rm = _REDIRECT_RE.search(segment)
     if not rm:
+        return None
+    if not appends_ok and '>>' in rm.group(0):
         return None
     target = _unquote(rm.group(1))
     if not target or target.startswith('/dev/'):
@@ -241,11 +252,39 @@ def _create_redirect_path(command, cwd):
         target = os.path.expanduser(target)
     if os.path.isabs(target):
         return target
-    cm = _CD_RE.search(command[:m.start()])
+    cm = _CD_RE.search(command[:cd_before])
     base = os.path.expanduser(_unquote(cm.group(1))) if cm else (cwd or '')
     if not os.path.isabs(base):
         return None
     return os.path.join(base, target)
+
+
+def _create_redirect_path(command, cwd):
+    """The absolute path a `gh pr create` in this command sent its output to, or
+    None."""
+    m = re.search(r'\bgh\b(?:\s+\S+)*?\s+pr\s+create\b', command)
+    return _redirect_target(command, m.start(), m.end(), cwd) if m else None
+
+
+def _watcher_redirect_path(command, cwd):
+    """The absolute path a watcher launch in this command sent the WATCHER's own
+    output to, or None — `bash …/pr-sentinel-watch.sh 42 > w42.log 2>&1; …`,
+    the shape a session reaches for so a backgrounded call can carry its exit
+    status out. The redirect takes the terminal report away from the harness's
+    task output file, which is where the handoff signal below is read from, so
+    the launch's own command string is what says where the report went instead.
+
+    Truncating redirects only: `>>` appends run after run, so the header region
+    — the only region a marker is trusted in — stays the FIRST run's, and a
+    later relaunch would keep reading an event it never reported."""
+    m = WATCH_ARG_RE.search(command)
+    if not m:
+        return None
+    # The segment runs from the script name, not from after the PR argument:
+    # `\S+` swallows a terminator (`… watch.sh 42; git log > x`), so starting
+    # after it would read the NEXT command's redirect as this launch's.
+    return _redirect_target(command, m.start(), m.start(), cwd,
+                            appends_ok=False)
 
 
 def _entry_epoch(timestamp):
@@ -410,19 +449,40 @@ def _read_file_path(obj):
     return None
 
 
-def _outfile_text(path, fallback_by_path):
+def _outfile_text(path, fallback_by_path, not_before=None):
     """The terminal report text of a watcher output file. Read DIRECTLY from the
     file — the hook always learns the path from the completion notification, so
     this does not depend on how (or whether) the session surfaced the output (a
     Bash `cat`/`tail` counts, not only the Read tool; issue #14). Only the header
     prefix is needed, so the read is byte-capped. If the file is gone, fall back
     to a transcript Read of that path. Empty string if neither is available;
-    fail-open on any I/O error (treated as 'no terminal report')."""
+    fail-open on any I/O error (treated as 'no terminal report').
+
+    `not_before` is the launch's own timestamp, passed for a path the session
+    chose rather than the harness: a file older than the launch is a leftover
+    from an earlier run at a reused log path, and honouring it would conclude a
+    PR on a terminal event this run never reported."""
     try:
+        if not_before is not None:
+            if os.path.getmtime(path) < not_before - _MTIME_SLACK:
+                return ''
         with open(path, encoding='utf-8', errors='replace') as fh:
             return fh.read(_OUTFILE_READ_CAP)
     except OSError:
         return fallback_by_path.get(path, '')
+
+
+def _launch_report_text(candidates, fallback_by_path):
+    """The watcher report one launch produced, from its candidate files in
+    preference order (`(path, not_before)` each). Picking on the MARKER rather
+    than on non-emptiness is what makes a redirected launch resolve: its task
+    output file exists and holds the echoed exit code, and the report is in the
+    file the launch redirected to."""
+    for path, not_before in candidates:
+        text = _outfile_text(path, fallback_by_path, not_before)
+        if EVENT_MARKER in text:
+            return text
+    return ''
 
 
 def _analyze(path):
@@ -450,6 +510,8 @@ def _analyze(path):
     seen_prs = set()           # PR numbers this transcript has mentioned so far
     in_create = False          # the most recent tool_use ran `gh pr create`
     redirects = []             # files a `gh pr create` sent its output to
+    watch_redirect = {}        # launch tool id -> (file it sent the watcher to,
+                               #                    that launch's timestamp)
     url_by_pr = {}             # PR number -> the full URL, when one was resolved
     asked = set()              # PRs a previous block by this hook already named
     launched_since_ask = set()  # ... of those, ones watched since that block
@@ -511,6 +573,10 @@ def _analyze(path):
                             inp = b.get('input') or {}
                             cmd = inp.get('command') or ''
                             if inp.get('run_in_background'):
+                                wrp = _watcher_redirect_path(cmd, obj.get('cwd'))
+                                if wrp:
+                                    watch_redirect[b.get('id')] = (
+                                        wrp, _entry_epoch(obj.get('timestamp')))
                                 for wm in WATCH_ARG_RE.finditer(cmd):
                                     arg = wm.group(1)
                                     num = pr_number(arg)
@@ -561,33 +627,50 @@ def _analyze(path):
                 created.add(num)
                 url_by_pr.setdefault(num, url)
 
-    # Map each watcher's output file to the PR it watches (path from the
-    # completion notification, PR from the launch's `pr-sentinel-watch.sh` arg).
-    outfile_pr = {scan.outfile_by_toolid[t]: scan.pr_by_toolid[t]
-                  for t in scan.outfile_by_toolid if t in scan.pr_by_toolid}
+    # Where each completed watcher's report can be: the harness's task output
+    # file (path from the completion notification), and the file the launch
+    # redirected the watcher to, which is where the report actually lands when
+    # the session redirected. Keyed by LAUNCH, not by file — that is what keeps
+    # the repeat-detection below counting RUNS, since a session that reuses one
+    # log path across relaunches overwrites it and the paths collide where the
+    # runs do not.
+    report_files = {}   # completed launch id -> [(path, not_before), ...]
+    for tid in scan.pr_by_toolid:
+        if tid not in scan.completed:
+            continue
+        candidates = []
+        outfile = scan.outfile_by_toolid.get(tid)
+        if outfile:
+            candidates.append((outfile, None))
+        if tid in watch_redirect:
+            candidates.append(watch_redirect[tid])
+        if candidates:
+            report_files[tid] = candidates
 
-    # Fallback text for each watcher output file: any Read-tool read of it. Used
-    # only if the file itself is gone; the direct read below is authoritative.
-    read_text_by_outfile = {}
+    # Fallback text for a report file: any Read-tool read of it. Used only if
+    # the file itself is gone; the direct read below is authoritative.
+    known_paths = {c[0] for cs in report_files.values() for c in cs}
+    read_text_by_path = {}
     for fp, text in reads:
-        if fp in outfile_pr:
-            read_text_by_outfile[fp] = \
-                read_text_by_outfile.get(fp, '') + '\n' + text
+        if fp in known_paths:
+            read_text_by_path[fp] = \
+                read_text_by_path.get(fp, '') + '\n' + text
 
-    # Handed off / dampening: read each completed watcher's OWN output file
+    # Handed off / dampening: read each completed watcher's OWN report file
     # DIRECTLY (issue #14 — no longer hostage to the session's read method), and
     # judge only its header region so an embedded CI-log excerpt cannot forge the
     # marker or the signature.
-    sig_outfiles = {}   # PR -> {report signature -> set of output files}
-    for outfile, pr in outfile_pr.items():
-        text = _outfile_text(outfile, read_text_by_outfile)
+    sig_launches = {}   # PR -> {report signature -> set of launch ids}
+    for tid, candidates in report_files.items():
+        pr = scan.pr_by_toolid[tid]
+        text = _launch_report_text(candidates, read_text_by_path)
         if not text:
             continue
         if CONCLUDED_EVENT_RE.search(_report_header_region(text)):
             concluded.add(pr)
         sig = _report_signature(text)
         if sig is not None:
-            sig_outfiles.setdefault(pr, {}).setdefault(sig, set()).add(outfile)
+            sig_launches.setdefault(pr, {}).setdefault(sig, set()).add(tid)
 
     # Live: a watcher launch whose task has not reported completion.
     live = set(scan.live())
@@ -601,14 +684,14 @@ def _analyze(path):
 
     block = owned - concluded - live
     # Dampen: an unresolved-and-unwatched PR whose identical terminal event was
-    # reported by two separate watcher runs (two distinct output files, same
+    # reported by two separate watcher runs (two distinct launches, same
     # event + failed-set + SHA -> nothing pushed between them).
     # A PR this hook already asked about once, with nothing launched since, is
     # dampened too: the ask cannot be satisfied by repeating it (#77).
     dampened = {}
     for pr in block:
-        repeated = next((sig[0] for sig, files in sig_outfiles.get(pr, {}).items()
-                         if len(files) >= 2), None)
+        repeated = next((sig[0] for sig, runs in sig_launches.get(pr, {}).items()
+                         if len(runs) >= 2), None)
         if repeated:
             dampened[pr] = repeated
         elif pr in asked and pr not in launched_since_ask:
@@ -648,6 +731,9 @@ def build_reason(prs, urls=None):
         f'wakes this session — do NOT foreground-poll with `gh pr checks '
         f'--watch`, `gh run watch`, or a sleep loop. Command'
         f'{"s" if len(prs) > 1 else ""}:\n{commands}\n'
+        f'Launch it as printed: a redirect (`> log 2>&1`) moves the watcher\'s '
+        f'report out of the task output this hook reads, and only a literal '
+        f'redirect path — not one built from a variable — is followed there. '
         f'When the watcher wakes you, act on the single reported event, push, '
         f'and relaunch it. If you have already handed this PR to a human for '
         f'merge review, you may stop. Never auto-merge.'
