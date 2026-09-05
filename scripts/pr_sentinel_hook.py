@@ -299,6 +299,8 @@ def build_context(action, pr_num, live=None, pr_url=None):
         f'session — do NOT foreground-poll with `gh pr checks --watch`, '
         f'`gh run watch`, or a sleep loop. Command:\n'
         f'    bash "{watcher}" {target}\n'
+        f'Launch it as printed: a redirect (`> log 2>&1`) moves the watcher\'s '
+        f'report out of the task output the Stop backstop reads. '
         f'{already}When it exits and wakes you, fix the reported CI '
         f'failure or merge conflict, push, and relaunch it. Never auto-merge.'
     )

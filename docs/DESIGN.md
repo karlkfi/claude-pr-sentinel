@@ -628,7 +628,14 @@ PR body or comments**:
   it; and the `ready`/`closed`/`blocked` "handed off" signal is read straight from that
   watcher's own output file — the hook opens the file itself (its path is in the
   completion notification), so the signal holds however the session surfaced the
-  output, whether with the `Read` tool, a Bash `cat`/`tail`, or not at all. The
+  output, whether with the `Read` tool, a Bash `cat`/`tail`, or not at all. When
+  the launch redirected the watcher's output somewhere else — the shape a
+  session reaches for so a backgrounded call can carry its exit status out — that
+  file holds only the echoed code, and the report is read from the redirect
+  target named in the launch's own command string. That read is deliberately
+  narrow: a truncating redirect to a literal path, ignored if it predates the
+  launch, since a `>>` append leaves the first run's header on top for ever and a
+  reused log path would otherwise donate an earlier run's terminal event. The
   marker is trusted only in the report's header region, above the first embedded
   CI-log excerpt, so a forged line in the semi-untrusted log can't fake it — and
   only the *terminal* markers count, never the `ready_watching` /

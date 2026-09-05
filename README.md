@@ -210,10 +210,11 @@ The shapes that reach it differ, and the notice says which one it is:
   there is nothing to do.
 
 Everything it decides comes from local files — the session's own transcript,
-each watcher's own output file (its path is in the completion notification), and
-the file a `gh pr create` redirected its output to (its path is in the create's
-own command string). It identifies the session's own PRs from the
-transcript — the session's `gh pr create` correlated with the PR URL that
+each watcher's own output file (its path is in the completion notification), the
+file a `gh pr create` redirected its output to, and the file a watcher launch
+redirected the *watcher's* output to (both paths come from the command's own
+string). It identifies the session's own PRs from the transcript — the
+session's `gh pr create` correlated with the PR URL that
 command printed, plus any PR the session launched a watcher for. When that URL
 never reached the transcript — the create sent its output to a log, or it was
 truncated — one more route resolves the number, so the backstop does not go
@@ -238,8 +239,14 @@ bare number is what a launch falls back to when no route resolved one. It
 treats a watcher as live when its background-task launch has no completion
 notification yet, and reads the watcher's output file directly to see whether the
 PR was handed off — so that signal holds whether the session surfaced the output
-with the `Read` tool or a Bash `cat`/`tail`. Throughout: **no network call, no
-process table, and never the PR body or comments** (see
+with the `Read` tool or a Bash `cat`/`tail`. A launch that redirected the
+watcher's output away from that file — `… pr-sentinel-watch.sh 42 > w42.log
+2>&1`, so a backgrounded call can carry its exit status out — leaves it holding
+only the echoed code, so the report is read from the redirect target instead.
+Truncating redirects to a literal path only: `>>` keeps the first run's header
+at the top of the file for ever, and a target built from a variable is one the
+hook cannot expand. Throughout: **no network call, no process table, and never
+the PR body or comments** (see
 [Security invariants](#security-invariants)). It respects `stop_hook_active` so it
 blocks once and then lets the stop proceed.
 
