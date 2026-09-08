@@ -653,6 +653,25 @@ class NeedsWatcherLogic(unittest.TestCase):
         self.assertEqual(
             needs([*created_pr(42), launch_watcher(42, "toolu_w")]), set())
 
+    def test_live_watcher_launched_with_exit_suffix_allows(self):
+        # The launch exit-status-guard asks for on a backgrounded call,
+        # `… watch.sh 42; exit $?`, is still a live watcher on #42.
+        self.assertEqual(needs([
+            *created_pr(42),
+            assistant_bash(
+                'bash "/opt/plugins/pr-sentinel/scripts/pr-sentinel-watch.sh"'
+                ' 42; exit $?', tool_id="toolu_w", background=True),
+        ]), set())
+
+    def test_no_watcher_launch_needs_block(self):
+        # The pair to the test above: the same PR with no launch at all, only
+        # an unrelated backgrounded command, still blocks.
+        self.assertEqual(needs([
+            *created_pr(42),
+            assistant_bash('sleep 600; exit $?', tool_id="toolu_s",
+                           background=True),
+        ]), {"42"})
+
     def test_exited_watcher_not_relaunched_needs_block(self):
         # Launched, task-notification present (exited), no relaunch -> block.
         self.assertEqual(needs([

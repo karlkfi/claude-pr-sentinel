@@ -117,6 +117,14 @@ class LiveWatchers(unittest.TestCase):
             f'bash "{WATCHER}" https://github.com/owner/repo/pull/42')
         self.assertEqual(self.live([entry, launch_result()]), {"42": ["bk1"]})
 
+    def test_launch_carrying_its_status_out_is_live(self):
+        # `… watch.sh 42; exit $?` is the shape exit-status-guard asks for on a
+        # backgrounded call, and the `;` is glued to the PR argument.
+        entry = launch("42")
+        entry["message"]["content"][0]["input"]["command"] = (
+            f'bash "{WATCHER}" 42; exit $?')
+        self.assertEqual(self.live([entry, launch_result()]), {"42": ["bk1"]})
+
     def test_a_killed_task_is_not_live(self):
         # Any status closes the launch: the process is gone either way.
         self.assertEqual(
