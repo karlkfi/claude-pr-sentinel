@@ -323,6 +323,35 @@ class WatcherCase(unittest.TestCase):
         self.assertIn("git merge origin/main", out)
         self.assertIn("NOT rebase", out)
 
+    def test_rebase_heal_names_the_stacked_pr_escape(self):
+        """A stacked branch carries a parent PR's commits as well as its own.
+        Once the parent squash-merges, its content is on the base as one new
+        commit, so `git rebase origin/<base>` replays commits whose content
+        already landed — conflicting inside code the session never wrote. The
+        watcher cannot see the stack (one PR's state, no commit list, no local
+        git), so the rebase heal must name the check and the --onto escape."""
+        for merge, event in (("DIRTY", "conflict"), ("BEHIND", "behind")):
+            rc, out, _ = self.run_watcher({"pr_view": f"OPEN\t{merge}\tmain\n"})
+            self.assertEqual(rc, 0, event)
+            self.assertIn(f"PR-SENTINEL EVENT: {event}", out)
+            self.assertIn("STACKED", out, event)
+            self.assertIn("git log --oneline origin/main..HEAD", out, event)
+            self.assertIn("git rebase --onto origin/main", out, event)
+
+    def test_merge_heal_omits_the_stacked_caveat(self):
+        """Merging the base IN leaves a parent's commits in the branch history
+        but out of the PR's diff, which is already correct — so merge mode needs
+        no escape and keeps its guidance free of any rebase command."""
+        for merge in ("DIRTY", "BEHIND"):
+            rc, out, _ = self.run_watcher(
+                {"pr_view": f"OPEN\t{merge}\tmain\n"},
+                env={"PR_SENTINEL_HEAL": "merge"},
+            )
+            self.assertEqual(rc, 0, merge)
+            self.assertNotIn("STACKED", out, merge)
+            self.assertNotIn("--onto", out, merge)
+            self.assertNotIn("git rebase", out, merge)
+
     def test_check_failure_event(self):
         files = {
             "pr_view": "OPEN\tBLOCKED\tmain\tabc1234def\n",

@@ -360,6 +360,34 @@ branch-guard governs; `--force-with-lease` is the bounded form it permits on a
 `claude/` branch. Teams that can't force-push, or want to preserve review
 anchoring, set `PR_SENTINEL_HEAL=merge`.
 
+#### The rebase heal names its own exception: a stacked pull request
+
+A **stacked** PR — one whose branch carries a parent PR's commits as well as its
+own — breaks the rebase heal. When the parent squash-merges, its content reaches
+the base as a single new commit, so the parent's individual commits are not
+ancestors of the base and never will be. `git rebase origin/<base>` therefore
+replays commits whose content already landed, and the session resolves conflicts
+inside code it never wrote, against the parent's intermediate states — where
+picking the wrong side reverts work that is already on the base.
+
+It is intermittent, which is what makes it dangerous: git drops a replayed
+commit by itself when its patch applies as a no-op (`patch contents already
+upstream`), so a stack whose parent commits each touch a distinct file rebases
+cleanly, and one whose parent edited a single file across several commits
+conflicts. A session that saw it work once has no reason to distrust it.
+
+The watcher cannot detect the stack. It reads one PR's GitHub state and neither
+the commit list — a human-writable field the metadata query deliberately
+excludes — nor local git. So the rebase heal states the precondition and leaves
+the check to the session, which is sitting in the repo:
+`git log --oneline origin/<base>..HEAD` lists commits the session did not write,
+and the escape is `git rebase --onto origin/<base> <last commit that is not
+yours> HEAD`, which drops them.
+
+`PR_SENTINEL_HEAL=merge` needs no such caveat: merging the base IN leaves the
+parent's commits in the branch's history but out of the PR's diff, which is
+already the correct result.
+
 ### Why `ready` ends the watch by default, and what `closed` mode changes
 
 The watcher exits on `ready` because green normally *is* the handoff: the PR
