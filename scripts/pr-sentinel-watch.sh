@@ -604,6 +604,34 @@ notice_base_failure() {
 	echo "check_failure."
 }
 
+# A stacked PR — a branch carrying a parent PR's commits as well as its own —
+# is not healed by the rebase above. Once the parent squash-merges, its content
+# reaches the base as ONE new commit, so the parent's own commits are not
+# ancestors of the base and never will be. Replaying them drops a session into
+# conflicts inside code it never wrote, resolved against the parent's
+# intermediate states — where picking the wrong side reverts what already
+# landed. Git sometimes drops those commits itself ("patch contents already
+# upstream"), which makes this intermittent rather than obvious: it survives
+# when each parent commit touches a distinct file, and conflicts when the
+# parent edited one file across several commits.
+#
+# Only the rebase heal needs this. Merging the base IN leaves the parent's
+# commits in the branch's history but out of the PR's diff, which is already
+# correct — so PR_SENTINEL_HEAL=merge keeps its no-rebase guidance untouched.
+#
+# The watcher cannot tell a stack apart: it reads one PR's GitHub state, never
+# the commit list (a human-writable field) nor local git. So it names the
+# precondition and leaves the check to the session, which is sat in the repo.
+stacked_caveat() {
+	echo "Before running that: check whether this branch is STACKED —"
+	echo "  git log --oneline origin/${BASE}..HEAD"
+	echo "If it lists commits you did not write, whose PR has already merged, the"
+	echo "rebase above is the wrong move. A squash merge put the parent's content on"
+	echo "${BASE} as one new commit, so replaying the parent's own commits conflicts"
+	echo "against code that already landed. Drop them instead:"
+	echo "  git rebase --onto origin/${BASE} <last commit that is not yours> HEAD"
+}
+
 emit_conflict() {
 	report_header conflict
 	echo "State: OPEN"
@@ -622,6 +650,7 @@ emit_conflict() {
 		echo "  git push --force-with-lease"
 		echo "Rebase keeps history linear (no sync-merge commits); it rewrites SHAs,"
 		echo "so the push is a force-push (--force-with-lease, not --force)."
+		stacked_caveat
 	fi
 	echo "Resolve conflicts, run the local gate, push, then relaunch this watcher."
 	exit 0
@@ -644,6 +673,7 @@ emit_behind() {
 		echo "  git push --force-with-lease"
 		echo "Rebase keeps history linear (no sync-merge commits); it rewrites SHAs,"
 		echo "so the push is a force-push (--force-with-lease, not --force)."
+		stacked_caveat
 	fi
 	echo "Run the local gate, push, then relaunch this watcher."
 	exit 0
@@ -693,6 +723,7 @@ emit_dequeued() {
 			echo "Next action: heal the branch (${MERGE}) by rebasing onto the base —"
 			echo "  git fetch origin ${BASE} && git rebase origin/${BASE}"
 			echo "  git push --force-with-lease"
+			stacked_caveat
 		fi
 		echo "Run the local gate, push, relaunch this watcher — then hand back to a"
 		echo "human for re-enqueue."
