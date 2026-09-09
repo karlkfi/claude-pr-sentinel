@@ -17,6 +17,14 @@ Two shell facts do the work here:
   it before the punctuation rule is consulted, gluing two commands into one so
   the second one's leading word never reaches a classifier.
 
+* **A heredoc body is text, not shell.** Once the newline separates, every line
+  of a body a command merely *writes* arrives in command position. A session
+  writing a test fixture, or a PR body quoting a command in a fenced block,
+  then reads as having run it: the guard denied `cat > cases.txt <<'EOF'` for
+  the `gh pr checks --watch` inside it, and the nudge announced a push that
+  never happened. `strip_heredoc_bodies` consumes each body to its delimiter so
+  a classifier only ever sees shell the session actually runs.
+
 Callers differ on one point, so it is a parameter rather than a fork: what to
 do with a string shlex will not take. The guard returns nothing and defers
 (never deny on a parse it could not make); the nudge retries a line at a time,
@@ -26,7 +34,8 @@ on the line after.
 import shlex
 
 # The operator characters that separate simple commands. shlex groups a run of
-# them into a single token, so `;\n` arrives whole.
+# them into a single token, so `;\n` arrives whole and `<<<` never looks like
+# the `<<` that opens a heredoc.
 OPERATOR_CHARS = ';()<>|&\n'
 
 
@@ -57,6 +66,50 @@ def _is_operator(token):
     return bool(token) and all(c in OPERATOR_CHARS for c in token)
 
 
+def _lines(tokens):
+    """`tokens` as [(line_tokens, separator_token_or_None)], split on the
+    operator tokens that carry a newline."""
+    out, cur = [], []
+    for token in tokens:
+        if _is_operator(token) and '\n' in token:
+            out.append((cur, token))
+            cur = []
+        else:
+            cur.append(token)
+    out.append((cur, None))
+    return out
+
+
+def strip_heredoc_bodies(tokens):
+    """`tokens` with every heredoc body dropped, keeping the separators between
+    the lines that remain.
+
+    A `<<` token opens one and the token after it names the delimiter (`<<-EOF`
+    lexes the `-` onto that name; `<<<` is a here-string and is a different
+    token entirely). Several may open on one line, and bash reads their bodies
+    in order. A delimiter that never reappears takes the rest of the string
+    with it, which leaves the caller deferring — the safe direction for a hook
+    that either denies or asserts a push happened.
+    """
+    out, pending, active = [], [], None
+    for line, separator in _lines(tokens):
+        if active is not None:
+            if line == [active]:
+                active = pending.pop(0) if pending else None
+            continue
+        for i, token in enumerate(line):
+            if token == '<<' and i + 1 < len(line):
+                delimiter = line[i + 1].lstrip('-')
+                if delimiter:
+                    pending.append(delimiter)
+        out.extend(line)
+        if pending:
+            active = pending.pop(0)
+        if separator is not None:
+            out.append(separator)
+    return out
+
+
 def simple_commands(command, lenient=False):
     """Split a bash command string into simple commands — a list of argv lists
     — on the operators that separate them (`&&`, `||`, `|`, `;`, `(`, `)`,
@@ -72,7 +125,7 @@ def simple_commands(command, lenient=False):
             return []
         tokens = lex_by_line(command)
     groups, cur = [], []
-    for token in tokens:
+    for token in strip_heredoc_bodies(tokens):
         if _is_operator(token):
             if cur:
                 groups.append(cur)

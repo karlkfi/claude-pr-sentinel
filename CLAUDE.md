@@ -142,9 +142,9 @@ Twelve suites:
   committed index, no drift back to a single table.
 - `tests/test_friction_report.py` — the friction analyzer's detection, joins
   and rankings, over synthetic transcripts.
-- `tests/test_tokenize.py` — the shared bash tokenizer, including a corpus
-  the guard and the hook must tokenize alike so the two callers cannot
-  drift apart again.
+- `tests/test_tokenize.py` — the shared bash tokenizer: heredoc bodies
+  are text rather than commands, and the guard and the hook agree on a
+  shared corpus so the two callers cannot drift apart again.
 - `tests/test_wiring.py` — the manifests/hook registration are valid and agree
   on version, the scripts exist and are executable, and every
   `PR_SENTINEL_*` var the scripts read has a README Configuration row.

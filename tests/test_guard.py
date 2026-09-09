@@ -181,21 +181,23 @@ class NewlineSeparatorUnit(unittest.TestCase):
             "EOF\n"
             "gh pr create --title t --body-file /tmp/body.md"))
 
-    def test_a_heredoc_body_line_also_reads_as_a_command(self):
-        """The documented imprecision: shlex does not track heredocs, so a body
-        line leading with `gh pr create` matches too. Fail-closed — an extra
-        overlap deny, never a missed one."""
-        self.assertTrue(guard.is_pr_create(
+    def test_a_heredoc_body_line_is_not_a_command(self):
+        """Q30: once the newline separated, every line of a body the command
+        merely writes arrived in command position, so a PR body quoting the
+        bare command in a fenced block earned an overlap deny. The tokenizer
+        consumes the body to its delimiter; `tests/test_tokenize.py` owns the
+        rest of that behaviour."""
+        self.assertFalse(guard.is_pr_create(
             "cat > /tmp/b.md <<'EOF'\n"
             "gh pr create is what an agent runs here\n"
             "EOF\n"
             "git status"))
 
     def test_a_prose_mention_in_a_heredoc_is_not_a_command(self):
-        """The other side of that imprecision, and the bound on it: only a line
-        whose leading tokens are the command matches. A prose mention, a
-        markdown bullet and a `$`-prefixed transcript line do not, so the
-        exposure is a body quoting the bare command in a code block."""
+        """These never matched, even before the body was consumed: only a line
+        whose leading tokens are the command reached a classifier. Kept as the
+        lower bound, so a future tokenizer change that over-matches fails here
+        rather than in the deny."""
         for body in ("The gh pr create call was allowed.",
                      "- the gh pr create guard missed it",
                      "$ gh pr create --fill",
