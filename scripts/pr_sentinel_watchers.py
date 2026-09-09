@@ -23,8 +23,10 @@ import re
 # A github.com PR URL, e.g. https://github.com/owner/repo/pull/123
 PR_URL_RE = re.compile(r'https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)')
 
-# A watcher launch inside a Bash command: `... pr-sentinel-watch.sh 42`.
-WATCH_ARG_RE = re.compile(r'pr-sentinel-watch\.sh["\']?\s+(\S+)')
+# A watcher launch inside a Bash command: `... pr-sentinel-watch.sh 42`. The
+# argument ends at a shell separator, not whitespace, so a launch that carries
+# its status out — `… watch.sh 42; exit $?` — still names PR 42, not `42;`.
+WATCH_ARG_RE = re.compile(r'pr-sentinel-watch\.sh["\']?\s+([^\s;&|<>()]+)')
 
 # Fields pulled out of a `<task-notification>` completion record.
 NOTIF_TOOL_ID_RE = re.compile(r'<tool-use-id>\s*(toolu_[A-Za-z0-9]+)')

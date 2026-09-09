@@ -280,9 +280,9 @@ def _watcher_redirect_path(command, cwd):
     m = WATCH_ARG_RE.search(command)
     if not m:
         return None
-    # The segment runs from the script name, not from after the PR argument:
-    # `\S+` swallows a terminator (`… watch.sh 42; git log > x`), so starting
-    # after it would read the NEXT command's redirect as this launch's.
+    # The segment runs from the script name, not from after the PR argument,
+    # so a terminator glued to it (`… watch.sh 42; git log > x`) can never put
+    # the NEXT command's redirect inside this launch's segment.
     return _redirect_target(command, m.start(), m.start(), cwd,
                             appends_ok=False)
 
