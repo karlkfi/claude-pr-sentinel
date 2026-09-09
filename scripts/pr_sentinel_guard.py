@@ -86,6 +86,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pr_sentinel_watchers as watchers   # noqa: E402
 import pr_sentinel_overlap as overlap     # noqa: E402
+import pr_sentinel_tokenize as tokenize   # noqa: E402
 
 # Shell keywords that can lead a simple-command group but aren't the command
 # word itself (e.g. `do sleep 5`). Stripped before reading the leading word.
@@ -182,33 +183,10 @@ def is_watcher_launch(command):
 
 
 def simple_commands(command):
-    """Split a bash command string into simple commands on the shell operators
-    that separate them (`&&`, `||`, `|`, `;`, `(`, `)`, newlines). Best-effort:
-    on a tokenizing failure return [] so the caller defers rather than crashes.
-    """
-    try:
-        lex = shlex.shlex(command, posix=True, punctuation_chars=';()<>|&\n')
-        # `\n` in punctuation_chars is not enough on its own: shlex's default
-        # `whitespace` also holds `\n` and consumes it before the punctuation
-        # rule is consulted, so the separator vanishes and two simple commands
-        # are handed back glued into one. Dropping it from `whitespace` is what
-        # makes the newline in punctuation_chars actually separate.
-        lex.whitespace = lex.whitespace.replace('\n', '')
-        lex.whitespace_split = True
-        tokens = list(lex)
-    except ValueError:
-        return []
-    groups, cur = [], []
-    for tok in tokens:
-        if tok and all(c in ';()<>|&\n' for c in tok):
-            if cur:
-                groups.append(cur)
-            cur = []
-        else:
-            cur.append(tok)
-    if cur:
-        groups.append(cur)
-    return groups
+    """Split a bash command string into simple commands. Strict: a string
+    shlex rejects comes back empty so the caller defers — this side denies, and
+    a deny on a parse we could not make is the wrong direction."""
+    return tokenize.simple_commands(command)
 
 
 _ASSIGNMENT_RE = re.compile(r'\A([A-Za-z_][A-Za-z0-9_]*)=(.*)\Z', re.S)

@@ -28,7 +28,6 @@ calls `run()` with it; this module emits a PostToolUse decision on stdout.
 import json
 import os
 import re
-import shlex
 import subprocess
 import sys
 
@@ -38,6 +37,7 @@ import sys
 # this file is run as a script or loaded by path (as the tests load it).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pr_sentinel_watchers as watchers   # noqa: E402
+import pr_sentinel_tokenize as tokenize   # noqa: E402
 
 # A github.com PR URL, e.g. https://github.com/owner/repo/pull/123
 PR_URL_RE = re.compile(r'https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)')
@@ -61,53 +61,11 @@ FAILURE_SIGNALS = (
 HTTP_ERROR_RE = re.compile(r'\bHTTP [45]\d\d\b')
 
 
-def _lex(text):
-    """shlex tokens for a command string. Raises ValueError on an unbalanced
-    quote."""
-    lex = shlex.shlex(text, posix=True, punctuation_chars=';()<>|&\n')
-    lex.whitespace_split = True
-    # shlex counts a newline as whitespace and eats it before the punctuation
-    # rule can split on it, folding `heredoc … <newline> gh pr create` into one
-    # argv headed by the wrong command (issue #76).
-    lex.whitespace = lex.whitespace.replace('\n', '')
-    return list(lex)
-
-
-def _lex_by_line(command):
-    """Tokens for a command shlex will not take whole. An unbalanced quote —
-    a contraction in a heredoc PR body is the ordinary source — otherwise
-    costs the whole string, so retry a line at a time and fall back to a plain
-    split for the line carrying it, rarely the line running `gh`."""
-    tokens = []
-    for line in command.splitlines():
-        try:
-            tokens.extend(_lex(line))
-        except ValueError:
-            tokens.extend(line.split())
-        tokens.append('\n')
-    return tokens
-
-
 def simple_commands(command):
-    """Split a bash command string into simple commands on the shell operators
-    that separate them (`&&`, `||`, `|`, `;`, newlines). Best-effort: a string
+    """Split a bash command string into simple commands. Lenient: a string
     shlex rejects is retried line by line rather than dropped, so a stray quote
-    never leaves the caller with nothing to match."""
-    try:
-        tokens = _lex(command)
-    except ValueError:
-        tokens = _lex_by_line(command)
-    groups, cur = [], []
-    for tok in tokens:
-        if tok and all(c in ';()<>|&\n' for c in tok):
-            if cur:
-                groups.append(cur)
-            cur = []
-        else:
-            cur.append(tok)
-    if cur:
-        groups.append(cur)
-    return groups
+    in a heredoc PR body never leaves the caller with nothing to match."""
+    return tokenize.simple_commands(command, lenient=True)
 
 
 def _strip_env_prefix(argv):
