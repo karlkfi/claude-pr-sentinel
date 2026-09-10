@@ -61,6 +61,7 @@ nudge to (re)launch the watcher after a PR-opening or branch-push command:
 | `git push origin --delete claude/foo` | silent (branch deletion) |
 | `git push --tags` · `git push origin refs/tags/v1.2.3` · `git push origin v1.2.3` (a local tag) | silent (release cut, not a PR shape) |
 | `git push origin main v1.2.3` · `git push origin HEAD:main` (`main` being the default branch) | silent (release cut — the default branch never has a PR of its own) |
+| `git push` whose remote resolves to a filesystem path — `/tmp/…/remote.git`, `file://…`, or a path given in place of a remote name | silent (a scratch or bare repo, with no forge on the other end; a remote reachable over a network still nudges, whatever the hostname, since `gh` serves GitHub Enterprise under its own) |
 | `gh pr view 12` · `gh pr list` · `git status` | silent (not a push/create) |
 | any command with `PR_SENTINEL_DISABLE=1` set | silent |
 

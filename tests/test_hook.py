@@ -110,6 +110,16 @@ def make_repo_with_default(path, default):
                           "refs/remotes/origin/" + default], cwd=path, check=True)
 
 
+def make_repo_with_remote(path, url):
+    """A repo checked out on `work` whose `origin` points at `url` — the shape
+    the push-remote probe reads."""
+    git = ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t"]
+    subprocess.run(["git", "init", "-q", "-b", "work", path], check=True)
+    subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "init"],
+                   cwd=path, check=True)
+    subprocess.run(git + ["remote", "add", "origin", url], cwd=path, check=True)
+
+
 class ClassificationUnit(unittest.TestCase):
     def test_detect_pr_create(self):
         self.assertEqual(hook.detect_action("gh pr create --fill"), "pr_create")
@@ -192,6 +202,86 @@ class ClassificationUnit(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(hook.detect_action("git push origin v9.9.9", tmp),
                              "git_push")
+
+    def test_push_to_a_filesystem_remote_is_silent(self):
+        # A scratch repo pushed to over a filesystem path has no forge on the
+        # other end, so no PR to babysit (#106).
+        with tempfile.TemporaryDirectory() as tmp:
+            work = os.path.join(tmp, "work")
+            make_repo_with_remote(work, os.path.join(tmp, "remote.git"))
+            for cmd in ("git push origin HEAD:refs/heads/main",
+                        "git push origin claude/foo",
+                        "git push -u origin claude/foo",
+                        "git push"):
+                self.assertIsNone(hook.detect_action(cmd, work), cmd)
+
+    def test_push_to_a_file_url_remote_is_silent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = os.path.join(tmp, "work")
+            make_repo_with_remote(work, "file://" + os.path.join(tmp, "r.git"))
+            self.assertIsNone(hook.detect_action("git push origin claude/foo",
+                                                 work))
+
+    def test_push_to_a_hosted_remote_still_nudges(self):
+        # No hostname allowlist: `gh` serves GitHub Enterprise under arbitrary
+        # hostnames, so anything reachable over a network stays PR work.
+        for url in ("https://github.com/owner/repo.git",
+                    "git@github.com:owner/repo.git",
+                    "ssh://git@git.example.invalid:2222/owner/repo.git",
+                    "git@git.example.invalid:owner/repo.git"):
+            with tempfile.TemporaryDirectory() as tmp:
+                work = os.path.join(tmp, "work")
+                make_repo_with_remote(work, url)
+                self.assertEqual(
+                    hook.detect_action("git push origin claude/foo", work),
+                    "git_push", url)
+
+    def test_a_path_in_place_of_a_remote_name_is_silent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = os.path.join(tmp, "work")
+            make_repo_with_remote(work, os.path.join(tmp, "remote.git"))
+            direct = os.path.join(tmp, "other.git")
+            self.assertIsNone(
+                hook.detect_action("git push " + direct + " HEAD:main", work))
+            self.assertEqual(
+                hook.detect_action(
+                    "git push git@github.com:owner/repo.git HEAD:claude/foo",
+                    work),
+                "git_push")
+
+    def test_unresolvable_remote_name_still_nudges(self):
+        # `upstream` isn't configured, so the URL can't be read. A bare word is
+        # a remote name, not a directory: fail toward the old behaviour.
+        with tempfile.TemporaryDirectory() as tmp:
+            work = os.path.join(tmp, "work")
+            make_repo_with_remote(work, os.path.join(tmp, "remote.git"))
+            self.assertEqual(
+                hook.detect_action("git push upstream claude/foo", work),
+                "git_push")
+
+    def test_bare_push_resolves_the_branch_push_remote(self):
+        # `git push` names no remote; the current branch's does.
+        with tempfile.TemporaryDirectory() as tmp:
+            work = os.path.join(tmp, "work")
+            make_repo_with_remote(work, "https://github.com/owner/repo.git")
+            subprocess.run(["git", "remote", "add", "scratch",
+                            os.path.join(tmp, "remote.git")], cwd=work,
+                           check=True)
+            self.assertEqual(hook.detect_action("git push", work), "git_push")
+            subprocess.run(["git", "config", "branch.work.pushRemote",
+                            "scratch"], cwd=work, check=True)
+            self.assertIsNone(hook.detect_action("git push", work))
+
+    def test_local_push_url_helper(self):
+        for url in ("/tmp/scratch/remote.git", "../remote.git",
+                    "~/scratch/remote.git", "file:///tmp/r.git",
+                    "/tmp/odd:name/remote.git"):
+            self.assertTrue(hook._is_local_push_url(url), url)
+        for url in ("https://github.com/owner/repo.git",
+                    "git@github.com:owner/repo.git",
+                    "ssh://git@example.invalid/owner/repo.git",
+                    "git://example.invalid/owner/repo.git", None, ""):
+            self.assertFalse(hook._is_local_push_url(url), url)
 
     def test_unbalanced_quote_retries_line_by_line(self):
         # A contraction in a heredoc PR body made shlex reject the whole
@@ -338,6 +428,19 @@ class HookEndToEnd(unittest.TestCase):
                 "To github.com:o/r.git\n   abc1234..def5678  main -> main\n"
                 " * [new tag]  v0.9.0 -> v0.9.0\n",
                 cwd=tmp))
+        self.assertEqual(out.strip(), "")
+
+    def test_silent_on_a_push_to_a_scratch_remote(self):
+        # The scratch-repo repro from #106: a bare repo on a filesystem path,
+        # pushed to successfully, and nothing to babysit.
+        with tempfile.TemporaryDirectory() as tmp:
+            work = os.path.join(tmp, "work")
+            make_repo_with_remote(work, os.path.join(tmp, "remote.git"))
+            out, _ = run_hook(bash_payload(
+                "git push origin HEAD:refs/heads/main",
+                "To " + os.path.join(tmp, "remote.git")
+                + "\n * [new branch]  HEAD -> main\n",
+                cwd=work))
         self.assertEqual(out.strip(), "")
 
     def test_silent_on_failed_push(self):
