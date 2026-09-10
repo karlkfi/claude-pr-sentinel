@@ -370,8 +370,9 @@ def build_duplicate_reason(pr, task_ids):
         f'for every event and poll GitHub twice as often. Do nothing: the '
         f'running watcher will wake you. '
         + watchers.stop_hint(pr, task_ids)
-        + ' If you genuinely need a second one, re-run with an inline '
-          'PR_SENTINEL_OVERRIDE=<reason> prefix.')
+        + ' If you need a second one — or you have checked and that task is '
+          'NOT running, so this PR would be left unwatched — re-run with an '
+          'inline PR_SENTINEL_OVERRIDE=<reason> prefix.')
 
 
 def build_allow_reason():
@@ -408,7 +409,11 @@ def run(data):
     launch_pr = watcher_launch_pr(command)
     if (launch_pr and os.environ.get('PR_SENTINEL_DISABLE') != '1'
             and not overridden):
-        live = watchers.live_watchers(data.get('transcript_path'))
+        # Exclude THIS call: the harness writes the in-flight Bash tool_use
+        # entry before running the hook, so the transcript already names the
+        # launch under decision.
+        live = watchers.live_watchers(data.get('transcript_path'),
+                                      exclude=(data.get('tool_use_id'),))
         if launch_pr in live:
             print(json.dumps({'hookSpecificOutput': {
                 'hookEventName': 'PreToolUse',

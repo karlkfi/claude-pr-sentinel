@@ -662,12 +662,21 @@ PR body or comments**:
   default because `gh pr view <number>` resolves against whatever directory the
   relaunch runs in.
 - **Detect a live watcher** from the same transcript: a `run_in_background`
-  launch of `pr-sentinel-watch.sh <PR>` records a `tool_use` id, and when that
-  background task exits the harness records a `<task-notification>` carrying the
-  same id. A watcher is *live* only while its launch has no completion
-  notification — so a watcher that already exited (delivered its event) reads as
-  *not live*, and a session that stopped mid-fix without relaunching is nudged
-  too. This is a harness-generated record, so untrusted CI-log text can't forge
+  launch of `pr-sentinel-watch.sh <PR>` records a `tool_use` id, the harness
+  answers it with a background task id, and when that task exits the harness
+  records a `<task-notification>` carrying the same `tool_use` id. A watcher is
+  *live* only while its launch has a task id and no completion notification —
+  so a watcher that already exited (delivered its event) reads as *not live*,
+  and a session that stopped mid-fix without relaunching is nudged too. The
+  task id is load-bearing rather than cosmetic: the harness writes the Bash
+  `tool_use` entry *before* running the PreToolUse hook, so a scan taken from
+  inside that hook already sees the launch it is deciding. That entry has no
+  task id, and a denied launch never gets a completion either, so counting it
+  live made the guard refuse a session's **first** watcher as a duplicate of
+  itself and left the entry poisoned — and the PR unwatched — for the rest of
+  the session. A hook deciding a launch also excludes that launch's own
+  `tool_use` id, which closes the same case without relying on the task id.
+  This is a harness-generated record, so untrusted CI-log text can't forge
   it; and the `ready`/`closed`/`blocked` "handed off" signal is read straight from that
   watcher's own output file — the hook opens the file itself (its path is in the
   completion notification), so the signal holds however the session surfaced the

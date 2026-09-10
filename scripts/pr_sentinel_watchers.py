@@ -5,8 +5,17 @@ running, and the background task id that would stop one.
 A launch is a `run_in_background` Bash call naming `pr-sentinel-watch.sh <PR>`.
 The harness answers it with a background task id, and when that task exits it
 records a `<task-notification>` carrying the launch's `tool_use` id. A watcher
-is LIVE iff its launch id has no notification yet. Both records are
-harness-generated, so untrusted CI-log text cannot forge one.
+is LIVE iff its launch got a task id and has no notification yet. Both records
+are harness-generated, so untrusted CI-log text cannot forge one.
+
+The task id is what separates a watcher that started from one that never did.
+The harness writes a Bash `tool_use` entry BEFORE running the PreToolUse hook,
+so a scan taken from inside that hook already sees the launch under decision —
+with no task id, and, if the hook then denies it, no notification ever either.
+Counting such an entry live made the guard refuse a session's first watcher as
+a duplicate of itself and left the PR unwatched for the rest of the session.
+Callers deciding a launch should also name it in `exclude`; the two rules are
+independent, and either alone closes that case.
 
 All three hooks read this. The Stop hook asks which PRs still need a watcher;
 the PostToolUse nudge and the PreToolUse guard ask the opposite question — is
@@ -121,15 +130,24 @@ class WatcherScan(object):
                         self.task_by_toolid[tid] = task
         return False
 
-    def live(self):
+    def live(self, exclude=()):
         """Live watchers as {PR number: [background task id, ...]}, launch order
-        preserved. A task id is '' when the transcript never recorded one, so a
-        caller must always be able to say something useful without it."""
+        preserved. `exclude` names launch tool_use ids to skip — a hook deciding
+        a launch passes its own, so it never reads that launch as an incumbent.
+
+        A launch with no recorded task id never started, so it is not evidence
+        of a running watcher and is skipped. Erring this way stacks a redundant
+        watcher at worst; erring the other way leaves the PR unwatched with a
+        deny telling the session not to retry."""
+        skip = {t for t in exclude if t}
         out = {}
         for tid, pr in self.pr_by_toolid.items():
-            if tid in self.completed:
+            if tid in self.completed or tid in skip:
                 continue
-            out.setdefault(pr, []).append(self.task_by_toolid.get(tid, ''))
+            task = self.task_by_toolid.get(tid, '')
+            if not task:
+                continue
+            out.setdefault(pr, []).append(task)
         return out
 
 
@@ -154,10 +172,12 @@ def _background_task_id(obj, block):
     return m.group(1) if m else ''
 
 
-def live_watchers(path):
+def live_watchers(path, exclude=()):
     """{PR number: [background task id, ...]} for every watcher this transcript
-    launched that has not reported completion. Fail-open: {} on any I/O or
-    parsing trouble, so a caller never blocks a launch it cannot reason about."""
+    launched that has started and not reported completion. `exclude` names
+    launch tool_use ids to skip — see `WatcherScan.live`. Fail-open: {} on any
+    I/O or parsing trouble, so a caller never blocks a launch it cannot reason
+    about."""
     if not path or not os.path.isfile(path):
         return {}
     scan = WatcherScan()
@@ -172,12 +192,14 @@ def live_watchers(path):
                     continue
     except OSError:
         return {}
-    return scan.live()
+    return scan.live(exclude)
 
 
 def stop_hint(pr, task_ids):
     """One sentence naming how to stop the live watcher(s) on `pr`, for a hook
-    telling a session not to launch another."""
+    telling a session not to launch another. `live()` only reports watchers it
+    has an id for, so the no-id sentence is the floor for a hand-built call
+    rather than something a hook path reaches."""
     known = [t for t in task_ids if t]
     if not known:
         return (f'To restart the watch on #{pr} instead, stop the running '
