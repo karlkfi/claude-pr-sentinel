@@ -120,6 +120,61 @@ def _is_default_branch_ref(ref, default, cwd):
     return target in (default, 'refs/heads/' + default)
 
 
+def _push_remote(non_flags, cwd):
+    """The remote a `git push` names, or the one a refspec-less push would use:
+    git's own order — `branch.<current>.pushRemote`, `remote.pushDefault`,
+    `branch.<current>.remote`, then `origin`."""
+    if len(non_flags) > 1:
+        return non_flags[1]
+    branch = _git_out(['symbolic-ref', '--short', '--quiet', 'HEAD'], cwd)
+    keys = []
+    if branch:
+        keys.append('branch.' + branch + '.pushRemote')
+    keys.append('remote.pushDefault')
+    if branch:
+        keys.append('branch.' + branch + '.remote')
+    for key in keys:
+        value = _git_out(['config', '--get', key], cwd)
+        if value:
+            return value
+    return 'origin'
+
+
+def _looks_like_location(target):
+    """True when a push's remote argument is already a URL or a path — git
+    accepts either in place of a configured remote's name. A bare word stays a
+    remote name, so an unreadable repo doesn't turn `origin` into a
+    directory."""
+    return ('://' in target
+            or target.startswith(('/', './', '../', '~'))
+            or ':' in target.partition('/')[0])
+
+
+def _push_url(non_flags, cwd):
+    """The URL a push would go to, resolved against the local repo. None when
+    the repo can't answer — no such remote, not a repo, no git."""
+    target = _push_remote(non_flags, cwd)
+    url = _git_out(['remote', 'get-url', '--push', target], cwd)
+    if url:
+        return url
+    return target if _looks_like_location(target) else None
+
+
+def _is_local_push_url(url):
+    """True if a push URL names a filesystem path — a scratch or backup repo,
+    which can never carry a pull request (#106). Anything reachable over a
+    network is not: `gh` serves GitHub Enterprise under arbitrary hostnames, so
+    a hostname allowlist would silence real PR work. A None URL is unreadable
+    rather than local: treat it as a forge and nudge, as before."""
+    if not url:
+        return False
+    if url.startswith('file://'):
+        return True
+    if '://' in url:
+        return False
+    return ':' not in url.partition('/')[0]
+
+
 def _is_tag_ref(ref, cwd):
     """True if a push refspec names a tag. `refs/tags/…` settles it outright; a
     bare name is resolved against the local repo."""
@@ -156,6 +211,10 @@ def classify_command(argv, cwd=None):
         if non_flags[:1] == ['push']:
             # Skip tag/branch deletions — not PR-babysitting shapes.
             if '--delete' in rest or '-d' in rest or '--tags' in rest:
+                return None
+            # A push to a filesystem path is a scratch or bare repo, not PR
+            # work — nothing on the other end can hold a pull request (#106).
+            if _is_local_push_url(_push_url(non_flags, cwd)):
                 return None
             # A push whose every refspec is a tag or the default branch is a
             # release cut, not PR work — neither ever has a PR of its own.
