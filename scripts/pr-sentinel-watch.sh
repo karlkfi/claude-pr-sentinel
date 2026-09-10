@@ -169,6 +169,11 @@ BASE_FAILURE_REPORTED=""
 # base_failures_only runs.
 BASE_FAIL_DETAIL=""
 
+# The counterpart for the check that did NOT match: the base run whose green
+# ended the comparison, named in the `check_failure` report so the session can
+# see how old the evidence behind "this failure is yours" actually is.
+BASE_GREEN_DETAIL=""
+
 # owner / repo / number for the GraphQL queue query, parsed once from the PR
 # URL that `gh pr view` returns (the watcher's own PR argument may be a bare
 # number, which GraphQL cannot address).
@@ -390,9 +395,22 @@ failures_absorbed() {
 	(( resolved > 0 ))
 }
 
-# The base branch's latest COMPLETED run of one workflow, when it concluded in
-# failure. Prints "<workflow-file> (run <id>, <sha>, <conclusion>)"; returns 1
-# when the base run is green, absent, or unreadable.
+# A duration in seconds as a coarse age ("47s", "12m", "4h 20m", "3d 4h"). Two
+# units at most: the question it answers is whether the evidence is minutes or
+# hours old, and a bare second count leaves that as a subtraction for the reader.
+fmt_age() {
+	local s="$1"
+	if (( s < 60 )); then printf '%ds' "$s"
+	elif (( s < 3600 )); then printf '%dm' "$(( s / 60 ))"
+	elif (( s < 86400 )); then printf '%dh %dm' "$(( s / 3600 ))" "$(( s % 3600 / 60 ))"
+	else printf '%dd %dh' "$(( s / 86400 ))" "$(( s % 86400 / 3600 ))"
+	fi
+}
+
+# The base branch's latest COMPLETED run of one workflow, as
+# "<conclusion>\t<workflow-file> (run <id>, <sha>, <conclusion>, <age> ago)".
+# Returns 1 only when the base has no readable run of that workflow: which
+# conclusions count as red is the caller's decision, not this function's.
 #
 # Scoped to the WORKFLOW, never "the base branch's newest run": a path-gated
 # workflow only runs when its paths change, so the base tip and this workflow's
@@ -403,29 +421,27 @@ failures_absorbed() {
 # Reads `.path` (the workflow file) and never `.name`/`.display_title`: a
 # `run-name:` expression can interpolate a commit message into those, which is
 # human-writable text this plugin does not surface.
-base_run_failure() {
-	local repo="$1" wf="$2" out conclusion run_id sha file
+base_run_state() {
+	local repo="$1" wf="$2" out conclusion run_id sha file age
 	out=$(gh api \
 		"${repo}/actions/workflows/${wf}/runs?branch=${BASE}&status=completed&per_page=1" \
-		-q '.workflow_runs[] | [.conclusion, (.id|tostring), .head_sha, .path] | @tsv' \
+		-q '.workflow_runs[] | [.conclusion, (.id|tostring), .head_sha, .path, ((now - (.created_at|fromdateiso8601))|floor|tostring)] | @tsv' \
 		2>/dev/null || true)
 	[[ -z "$out" ]] && return 1
-	IFS=$'\t' read -r conclusion run_id sha file <<<"$out"
-	# `cancelled` is deliberately not red: a run someone stopped by hand says
-	# nothing about the base's health, and falling through to `check_failure` is
-	# the safe direction.
-	case "$conclusion" in
-		failure|timed_out|startup_failure) ;;
-		*) return 1 ;;
-	esac
-	printf '%s (run %s, %s, %s)' "${file##*/}" "$run_id" "${sha:0:7}" "$conclusion"
+	IFS=$'\t' read -r conclusion run_id sha file age <<<"$out"
+	# The age is an ornament on a line that is useful without it, so an
+	# unparseable one is dropped rather than failing the read: a jq without
+	# `now` and a clock skewed past the run both land here.
+	[[ "$age" =~ ^[0-9]+$ ]] || age=""
+	printf '%s\t%s (run %s, %s, %s%s)' "$conclusion" "${file##*/}" "$run_id" \
+		"${sha:0:7}" "$conclusion" "${age:+, $(fmt_age "$age") ago}"
 }
 
 # The base branch's latest SUCCESSFUL run of one workflow, as a duration in
 # seconds. Returns 1 when the base has no green run of that workflow, or the
 # response is unreadable — the caller then paces on check age alone.
 #
-# Scoped to the WORKFLOW for the reason base_run_failure is, and to `success`
+# Scoped to the WORKFLOW for the reason base_run_state is, and to `success`
 # because a cancelled or failed run stopped early: its wall time says nothing
 # about how long a passing run takes. jq subtracts the two timestamps inside the
 # projection, so no date(1) dialect is involved and no timestamp reaches the
@@ -482,10 +498,11 @@ resolve_expected_duration() {
 # unreadable workflow id, and a base with no run of that workflow at all (a new
 # workflow, or one whose paths the base has never touched) all return 1, so an
 # unknown stays a wake. Two `gh api` calls per distinct run, only on a poll that
-# already found a failure. Sets BASE_FAIL_DETAIL.
+# already found a failure. Sets BASE_FAIL_DETAIL and BASE_GREEN_DETAIL.
 base_failures_only() {
-	local links="$1" link path wf_id detail seen="" resolved=0
+	local links="$1" link path wf_id state conclusion detail seen="" resolved=0
 	BASE_FAIL_DETAIL=""
+	BASE_GREEN_DETAIL=""
 	while IFS= read -r link; do
 		[[ -z "$link" ]] && continue
 		path=$(run_api_path_from_link "$link")
@@ -494,7 +511,21 @@ base_failures_only() {
 		seen="$seen $path"
 		wf_id=$(gh api "$path" -q '.workflow_id' 2>/dev/null || true)
 		[[ "$wf_id" =~ ^[0-9]+$ ]] || return 1
-		detail=$(base_run_failure "${path%/actions/runs/*}" "$wf_id") || return 1
+		state=$(base_run_state "${path%/actions/runs/*}" "$wf_id") || return 1
+		IFS=$'\t' read -r conclusion detail <<<"$state"
+		# `cancelled` is deliberately not red: a run someone stopped by hand says
+		# nothing about the base's health, and falling through to `check_failure`
+		# is the safe direction.
+		case "$conclusion" in
+			failure|timed_out|startup_failure) ;;
+			*)
+				# The run that ended the comparison. Recorded rather than
+				# discarded: it is the whole evidence for "this failure is
+				# yours", and emit_check_failure names it so a reader can weigh
+				# it instead of taking the verdict on trust.
+				BASE_GREEN_DETAIL="Last ${BASE} run: ${detail}"$'\n'
+				return 1 ;;
+		esac
 		BASE_FAIL_DETAIL="${BASE_FAIL_DETAIL}Also failing on ${BASE}: ${detail}"$'\n'
 		resolved=$(( resolved + 1 ))
 	done <<<"$links"
@@ -551,10 +582,21 @@ emit_check_failure() {
 	echo "mergeStateStatus: ${MERGE}"
 	echo "Head SHA: ${HEAD_SHA}"
 	echo "Failed checks: ${failed}"
+	printf '%s' "$BASE_GREEN_DETAIL"
 	echo
 	echo "Next action: diagnose and fix the failing check(s) below in this local"
 	echo "session, run the project's local gate (tests/lint), push, then relaunch"
 	echo "this watcher. Do NOT auto-merge."
+	if [[ -n "$BASE_GREEN_DETAIL" ]]; then
+		echo
+		echo "Before writing that fix: the only evidence this failure is yours is"
+		echo "the ${BASE} run named above. A check that reads state from outside the"
+		echo "repository — a vulnerability database, a remote allowlist, an upstream"
+		echo "API, an expiring credential — turns red with no commit on either side,"
+		echo "so an old green there proves nothing about ${BASE} now. If the failure"
+		echo "reproduces against the base tree it is inherited: leave it to a"
+		echo "standalone fix for ${BASE}."
+	fi
 	echo
 	local link run_id emitted=0
 	# De-duplicate run ids across failed checks; emit at most a few excerpts.

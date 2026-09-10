@@ -218,6 +218,21 @@ report identifies the base run by its workflow **`.path`** and never `.name` or
 `.display_title`, which a `run-name:` expression can interpolate a commit message
 or PR title into — human-writable text this plugin does not ingest.
 
+Workflow scoping fixes the staleness a path filter causes. It cannot fix the
+staleness no commit causes. A check that reads state from *outside* the
+repository — a vulnerability database, a remote allowlist, an upstream API, an
+expiring credential — flips red between two runs of unchanged code, so the base's
+latest recorded run stays green while the base tree is red, and the comparison
+hands the session a failure it cannot fix. Re-running the base's workflow would
+settle it, and a watcher that triggers CI to answer its own question is the wrong
+trade. Nothing else on the API dates the flip, and how old is too old depends on
+how often that workflow runs on that base — which the watcher cannot know. So the
+residue is reported rather than guessed at: a `check_failure` the comparison
+cleared names the base run it cleared from and how long ago that ran, and says to
+reproduce against the base tree first. Measured 2026-09-09, a `trivy` job failing
+on a CVE published after the base's last security scan cost one session four
+wakes with no fix available to it.
+
 The notice does not exit because the unblock signal is *green on the base again*,
 which holds whether the fix lands as a standalone PR or a revert; when the base
 clears while the check is still red here, that failure is the PR's own and the

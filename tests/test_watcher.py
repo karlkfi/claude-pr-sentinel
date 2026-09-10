@@ -85,13 +85,14 @@ GH_STUB = textwrap.dedent(
       case "$2" in
         # repos/<o>/<r>/actions/workflows/<wf>/runs?branch=... -> base_run.<wf>,
         # or base_duration.<wf> for the poll clamp, whose query shares that path
-        # and differs only by projection. No fixture means the base has no such
-        # run of that workflow at all.
+        # and differs only by projection. Both project a date difference, so the
+        # discriminator is `.run_started_at`, which only the clamp's reads. No
+        # fixture means the base has no such run of that workflow at all.
         */actions/workflows/*)
           wf="${2#*/actions/workflows/}"; wf="${wf%%/*}"
           case "${4:-}" in
-            *fromdateiso8601*) emit "base_duration.$wf" || true ;;
-            *)                 emit "base_run.$wf" || true ;;
+            *run_started_at*) emit "base_duration.$wf" || true ;;
+            *)                emit "base_run.$wf" || true ;;
           esac
           exit 0 ;;
       esac
@@ -459,7 +460,7 @@ class WatcherCase(unittest.TestCase):
 
     # -- failures inherited from the base branch (issue #44) ------------------
 
-    def _inherited(self, base_conclusion="failure"):
+    def _inherited(self, base_conclusion="failure", base_age="900"):
         """One failing check whose workflow (99) is also red on the base."""
         return {
             "pr_view": "OPEN\tUNSTABLE\tmain\tabc1234def\n",
@@ -467,7 +468,8 @@ class WatcherCase(unittest.TestCase):
             "run_conclusion.22": "failure\n",
             "run_workflow.22": "99\n",
             "base_run.99": f"{base_conclusion}\t31274922338\t"
-                           "47815b6adeadbeef\t.github/workflows/doc-links.yml\n",
+                           "47815b6adeadbeef\t.github/workflows/doc-links.yml"
+                           f"\t{base_age}\n",
             "run_log": "boom\n",
         }
 
@@ -484,7 +486,8 @@ class WatcherCase(unittest.TestCase):
         # The base run is identified by its workflow FILE, never a run name a
         # `run-name:` expression could interpolate a commit message into.
         self.assertIn(
-            "Also failing on main: doc-links.yml (run 31274922338, 47815b6, failure)",
+            "Also failing on main: doc-links.yml "
+            "(run 31274922338, 47815b6, failure, 15m ago)",
             out)
         self.assertIn("none of them is this PR's to fix", out)
         self.assertIn("Do NOT add the fix to this PR", out)
@@ -586,6 +589,70 @@ class WatcherCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("PR-SENTINEL EVENT: check_failure", out)
         self.assertNotIn("EVENT: base_failure", out)
+
+    # -- how old the "not inherited" verdict's evidence is (2026-09-09) ------
+
+    def test_check_failure_names_the_base_run_that_cleared_it(self):
+        """A green base run is the whole evidence that a failure is this PR's
+        own, and it can be arbitrarily old — a check reading a vulnerability
+        database flips red with no commit on either side. Name the run and its
+        age so the session can weigh that instead of taking the verdict."""
+        rc, out, _ = self.run_watcher(
+            self._inherited(base_conclusion="success", base_age="66196"))
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertIn(
+            "Last main run: doc-links.yml "
+            "(run 31274922338, 47815b6, success, 18h 23m ago)",
+            out)
+        self.assertIn("the only evidence this failure is yours", out)
+        self.assertIn("reads state from outside the", out)
+        self.assertIn("reproduces against the base tree it is inherited", out)
+
+    def test_cancelled_base_run_is_named_too(self):
+        """`cancelled` is not red, so it ends the comparison the same way — and
+        is even weaker evidence, which the reader can only see if it is named."""
+        rc, out, _ = self.run_watcher(
+            self._inherited(base_conclusion="cancelled", base_age="120"))
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertIn("Last main run: doc-links.yml "
+                      "(run 31274922338, 47815b6, cancelled, 2m ago)", out)
+
+    def test_unparseable_base_run_age_drops_only_the_age(self):
+        """The age is an ornament on a line that is useful without it: a jq with
+        no `now`, or a clock skewed past the run, must not cost the whole note."""
+        files = self._inherited(base_conclusion="success")
+        files["base_run.99"] = (
+            "success\t31274922338\t47815b6adeadbeef"
+            "\t.github/workflows/doc-links.yml\n")
+        rc, out, _ = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn(
+            "Last main run: doc-links.yml (run 31274922338, 47815b6, success)",
+            out)
+        self.assertNotIn("ago)", out)
+
+    def test_no_base_run_leaves_the_wake_unqualified(self):
+        """Nothing was compared, so there is no run to name and no caution to
+        draw from one — the report must not imply a comparison happened."""
+        files = self._inherited()
+        del files["base_run.99"]
+        rc, out, _ = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("Last main run:", out)
+        self.assertNotIn("outside the repository", out)
+
+    def test_base_check_off_names_no_base_run(self):
+        """PR_SENTINEL_BASE_CHECK=0 makes no base query at all, so the wake
+        carries no claim about the base."""
+        rc, out, _ = self.run_watcher(
+            self._inherited(base_conclusion="success"),
+            env={"PR_SENTINEL_BASE_CHECK": "0"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("Last main run:", out)
 
     def test_absorbed_failure_is_never_compared_to_the_base(self):
         """Absorption runs first, so a `continue-on-error` failure is already
