@@ -34,9 +34,15 @@ GUARD = REPO / "scripts" / "pr-sentinel.py"
 MODULE = REPO / "scripts" / "pr_sentinel_overlap.py"
 PRIVACY = REPO / "PRIVACY.md"
 
+GUARD_MODULE = REPO / "scripts" / "pr_sentinel_guard.py"
+
 _spec = util.spec_from_file_location("pr_sentinel_overlap", MODULE)
 overlap = util.module_from_spec(_spec)
 _spec.loader.exec_module(overlap)
+
+_gspec = util.spec_from_file_location("pr_sentinel_guard", GUARD_MODULE)
+guard = util.module_from_spec(_gspec)
+_gspec.loader.exec_module(guard)
 
 GH_STUB = textwrap.dedent(
     """\
@@ -69,7 +75,8 @@ def numbered(count, marker_at=None, marker="CHANGED"):
 class Scenario:
     """A temp git repo on `feature`, forked from `origin/main`, plus a gh stub."""
 
-    def __init__(self, tmp, base_files, head_files, branch="feature"):
+    def __init__(self, tmp, base_files, head_files, branch="feature",
+                 parent_files=None, parent_branch="parent"):
         self.root = Path(tmp) / "repo"
         self.root.mkdir()
         self.stub_dir = Path(tmp) / "stub"
@@ -82,6 +89,14 @@ class Scenario:
         git(self.root, "commit", "-qm", "base")
         # The base ref, without a remote: this is what merge-base resolves to.
         git(self.root, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.parent_branch = parent_branch if parent_files else ""
+        if parent_files:
+            git(self.root, "checkout", "-q", "-b", parent_branch)
+            self._write(parent_files)
+            git(self.root, "add", "-A")
+            git(self.root, "commit", "-qm", "parent")
+            git(self.root, "update-ref",
+                "refs/remotes/origin/" + parent_branch, "HEAD")
         git(self.root, "checkout", "-q", "-b", branch)
         self._write(head_files)
         git(self.root, "add", "-A")
@@ -92,6 +107,27 @@ class Scenario:
         gh.write_text(GH_STUB, encoding="utf-8")
         gh.chmod(0o755)
         self.bin_dir = bin_dir
+
+    def rebase_parent(self, main_files):
+        """Advance `main`, rebase the parent onto it, leave this branch behind —
+        the shape the child is in when its parent force-pushes."""
+        branch = self.current_branch()
+        git(self.root, "checkout", "-q", "main")
+        self._write(main_files)
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-qm", "main moves")
+        git(self.root, "update-ref", "refs/remotes/origin/main", "HEAD")
+        git(self.root, "checkout", "-q", self.parent_branch)
+        git(self.root, "rebase", "-q", "main")
+        git(self.root, "update-ref",
+            "refs/remotes/origin/" + self.parent_branch, "HEAD")
+        git(self.root, "checkout", "-q", branch)
+
+    def current_branch(self):
+        proc = subprocess.run(
+            ("git", "-C", str(self.root), "symbolic-ref", "--short", "HEAD"),
+            capture_output=True, text=True, check=True)
+        return proc.stdout.strip()
 
     def _write(self, files):
         for name, body in files.items():
@@ -134,14 +170,14 @@ class Scenario:
             env.update(extra)
         return env
 
-    def hits(self, extra_env=None):
+    def hits(self, extra_env=None, base=""):
         """`overlapping_prs` in a subprocess, so PATH and env are the real thing."""
         code = (
             "import json,sys;"
             "sys.path.insert(0, %r);"
             "import pr_sentinel_overlap as o;"
-            "print(json.dumps(o.overlapping_prs(%r)))"
-            % (str(REPO / "scripts"), str(self.root))
+            "print(json.dumps(o.overlapping_prs(%r, %r)))"
+            % (str(REPO / "scripts"), str(self.root), base)
         )
         proc = subprocess.run(["python3", "-c", code], capture_output=True,
                               text=True, env=self.env(extra_env), timeout=60,
@@ -397,6 +433,129 @@ class OverlapDetection(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         self.addCleanup(subprocess.run, ["rm", "-rf", tmp])
         self.assertEqual(overlap.overlapping_prs(tmp), [])
+
+
+class StackedBranches(unittest.TestCase):
+    """A branch built on another open PR. Its diff against the DEFAULT branch
+    contains its parent's hunks by construction, so numbering it from there
+    collides it with its own parent on lines it never touched. The `--base` the
+    create declares is the only place the stack is written down."""
+
+    def stack(self, parent_line, our_line, size=80):
+        """`parent` edits one line, `feature` is built on it and edits another.
+
+        The child's file carries BOTH markers: `Scenario` writes whole files, so
+        a child built from the pristine text would revert its parent's line
+        instead of inheriting it — and then have no parent hunk to collide with,
+        which is the very thing under test.
+        """
+        parent_file = numbered(size, parent_line, "PARENT")
+        lines = parent_file.rstrip("\n").split("\n")
+        lines[our_line - 1] = "OURS"
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", tmp])
+        return Scenario(
+            tmp,
+            {"app.py": numbered(size)},
+            {"app.py": "\n".join(lines) + "\n"},
+            parent_files={"app.py": parent_file},
+        )
+
+    def test_an_undeclared_base_still_collides_with_the_parent(self):
+        """Unchanged behaviour, and correct: a create naming no base targets the
+        default branch, so the PR it opens really does carry the parent's work."""
+        s = self.stack(parent_line=5, our_line=60)
+        s.pr_list([(7, "parent", ["app.py"])])
+        s.pr_diff(7, "app.py", 5)
+        self.assertEqual(s.hits(), [[7, ["app.py"], True]])
+
+    def test_a_declared_base_leaves_only_this_branchs_own_lines(self):
+        s = self.stack(parent_line=5, our_line=60)
+        s.pr_list([(7, "parent", ["app.py"])])
+        s.pr_diff(7, "app.py", 5)
+        self.assertEqual(s.hits(base="parent"), [])
+
+    def test_the_parent_is_skipped_even_where_the_child_edits_its_lines(self):
+        """Refining the parent's own hunk is what a stack is for, not a second
+        PR over the same work."""
+        s = self.stack(parent_line=5, our_line=5)
+        s.pr_list([(7, "parent", ["app.py"])])
+        s.pr_diff(7, "app.py", 5)
+        self.assertEqual(s.hits(base="parent"), [])
+
+    def test_a_real_duplicate_is_still_caught_from_a_stack(self):
+        """The negative direction: skipping the parent must not switch the
+        check off for every other open PR."""
+        s = self.stack(parent_line=5, our_line=60)
+        s.pr_list([(7, "parent", ["app.py"]), (9, "other", ["app.py"])])
+        s.pr_diff(7, "app.py", 5)
+        s.pr_diff(9, "app.py", 60)
+        self.assertEqual(s.hits(base="parent"), [[9, ["app.py"], True]])
+
+    def test_the_parents_lines_are_not_charged_to_this_branch(self):
+        """Skipping the parent is not enough on its own. A third PR editing the
+        PARENT's line must not collide with this branch, which never touched it
+        — which is only true if the branch is numbered from the parent's head
+        rather than from the default branch."""
+        s = self.stack(parent_line=5, our_line=60)
+        s.pr_list([(7, "parent", ["app.py"]), (9, "other", ["app.py"])])
+        s.pr_diff(7, "app.py", 5)
+        s.pr_diff(9, "app.py", 5)
+        self.assertEqual(s.hits(base="parent"), [])
+
+    def test_a_rebased_parent_leaves_nothing_comparable(self):
+        """`main` moves, the parent rebases onto it, this branch does not
+        restack. The two sides are now numbered in different pre-images, so the
+        check declines rather than compare them."""
+        s = self.stack(parent_line=5, our_line=60)
+        s.rebase_parent({"app.py": numbered(80, 1, "MAIN MOVED")})
+        s.pr_list([(7, "parent", ["app.py"]), (9, "other", ["app.py"])])
+        s.pr_diff(7, "app.py", 5)
+        s.pr_diff(9, "app.py", 60)
+        self.assertEqual(s.hits(base="parent"), [])
+
+    def test_a_base_that_is_no_open_prs_head_is_an_ordinary_base(self):
+        """`--base main` on an unstacked branch names no PR, so nothing is
+        skipped and nothing declines."""
+        s = self.stack(parent_line=5, our_line=60)
+        s.pr_list([(9, "other", ["app.py"])])
+        s.pr_diff(9, "app.py", 60)
+        self.assertEqual(s.hits(base="main"), [[9, ["app.py"], True]])
+
+
+class DeclaredBase(unittest.TestCase):
+    """Reading `--base` off the create. `pflag` accepts four spellings."""
+
+    def base(self, command):
+        return guard.pr_create_base(command)
+
+    def test_long_flag(self):
+        self.assertEqual(self.base("gh pr create --base parent"), "parent")
+
+    def test_long_flag_with_equals(self):
+        self.assertEqual(self.base("gh pr create --base=parent"), "parent")
+
+    def test_short_flag(self):
+        self.assertEqual(self.base("gh pr create -B parent"), "parent")
+
+    def test_short_flag_glued(self):
+        self.assertEqual(self.base("gh pr create -Bparent"), "parent")
+
+    def test_no_base_declared(self):
+        self.assertEqual(self.base("gh pr create --fill"), "")
+
+    def test_a_dangling_base_takes_no_value(self):
+        self.assertEqual(self.base("gh pr create --base --draft"), "")
+
+    def test_a_base_on_another_command_is_not_borrowed(self):
+        """`--base` belongs to the create that matched, not to whatever else is
+        in the chain."""
+        self.assertEqual(
+            self.base("gh pr edit --base release && gh pr create --fill"), "")
+
+    def test_the_base_survives_an_env_prefix(self):
+        self.assertEqual(
+            self.base("GH_TOKEN=x gh pr create --base parent"), "parent")
 
 
 class GuardDeny(unittest.TestCase):

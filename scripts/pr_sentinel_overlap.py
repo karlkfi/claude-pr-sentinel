@@ -24,6 +24,14 @@ in that ancestor and their ranges are comparable. Each range is widened by the
 three lines of context a hunk carries, so edits within six lines meet and edits
 seven apart do not. The false-positive direction carries the weight: an overlap
 reported where there is none sends a session to fold a branch that was fine.
+
+**A stacked branch is numbered from its own base.** A create that declares
+`--base <another open PR's head>` is numbered from that head rather than from
+the default branch, so the parent's hunks are not counted as this branch's own
+— and the parent is skipped outright, its lines being inherited rather than
+duplicated. Once that parent is rebased and this branch is not restacked onto
+it, the two sides are numbered in different pre-images and nothing comparable
+is left, so the check declines rather than guess.
 """
 import fnmatch
 import json
@@ -84,6 +92,19 @@ def git(root, *args):
     return out if status == 0 else None
 
 
+def resolves(root, rev):
+    """Whether `rev` names a commit here."""
+    out = git(root, 'rev-parse', '--verify', '--quiet', rev + '^{commit}')
+    return bool(out and out.strip())
+
+
+def contains(root, rev):
+    """Whether HEAD already carries `rev` — this branch is built on top of it."""
+    status, _ = capture(('git', '-C', root, 'merge-base', '--is-ancestor',
+                         rev, 'HEAD'), root)
+    return status == 0
+
+
 def repo_root(cwd):
     """The working tree the session is in — from the payload's `cwd`, never
     this file's location, so a worktree session reads its own branch."""
@@ -91,9 +112,23 @@ def repo_root(cwd):
     return out.strip() if out and out.strip() else None
 
 
-def base_ref(root):
-    """The ref this branch would be merged into: `PR_SENTINEL_BASE_REF`, else
-    the remote's own default branch, else `origin/main`."""
+def base_ref(root, declared=''):
+    """The ref this branch would be merged into: the `--base` the create itself
+    declares, else `PR_SENTINEL_BASE_REF`, else the remote's own default branch,
+    else `origin/main`.
+
+    The declared base comes first because it is the only one of the four that
+    can know about a stack — `origin/HEAD` names the default branch by
+    definition, and `PR_SENTINEL_BASE_REF` is one value for every branch in the
+    repo.
+
+    Resolved against the remote first: `--base` names a branch in the GitHub
+    repo, and a local branch of that name is routinely stale.
+    """
+    declared = (declared or '').strip()
+    if declared:
+        remote = 'origin/' + declared
+        return remote if resolves(root, remote) else declared
     configured = (os.environ.get('PR_SENTINEL_BASE_REF') or '').strip()
     if configured:
         return configured
@@ -214,7 +249,7 @@ def pr_ranges(root, number):
     return None if status != 0 else parse_hunks(out, widen=False)
 
 
-def overlapping_prs(cwd):
+def overlapping_prs(cwd, declared_base=''):
     """[(number, paths, precise)] for open PRs on this branch's own lines, or [].
 
     `precise` is False when the PR's diff was not fetched — the cap was reached,
@@ -227,7 +262,8 @@ def overlapping_prs(cwd):
     branch = current_branch(root)
     if not branch:
         return []                        # detached HEAD: nothing to compare
-    fork = git(root, 'merge-base', 'HEAD', base_ref(root))
+    base = base_ref(root, declared_base)
+    fork = git(root, 'merge-base', 'HEAD', base)
     if fork is None or not fork.strip():
         return []
     mine = changed_ranges(root, fork.strip(), 'HEAD')
@@ -236,11 +272,18 @@ def overlapping_prs(cwd):
     prs = open_prs(root)
     if prs is None:
         return []
+    parent = (declared_base or '').strip()
+    stacked = bool(parent) and any(pr.get('headRefName') == parent
+                                   for pr in prs)
+    if stacked and not contains(root, base):
+        return []                        # stale stack: nothing comparable left
     patterns = ignore_patterns()
     hits, fetched = [], 0
     for pr in prs:
         if pr.get('headRefName') == branch:
             continue                     # this branch's own PR, already open
+        if stacked and pr.get('headRefName') == parent:
+            continue                     # the stack's parent: inherited work
         shared = sorted(p for p in (f.get('path')
                                     for f in pr.get('files') or [])
                         if p in mine and not is_ignored(p, patterns))
