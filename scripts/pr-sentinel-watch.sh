@@ -19,6 +19,10 @@
 #   blocked        every check that reported is green, but GitHub still reports
 #                  mergeStateStatus == BLOCKED — a merge requirement the checks
 #                  cannot see is unsatisfied (see the green branch in `main`)
+#   unchecked      no check has reported on the head at all, for long enough
+#                  that a run registering late no longer explains it: either the
+#                  PR triggers no workflow, or GitHub never started one. Never
+#                  `ready`, which would claim checks passed that never ran
 #   closed         the PR was merged or closed
 #   timeout        the overall watch budget elapsed with no other event
 #   error          gh could not be queried after retries (fail-safe hand-back)
@@ -37,6 +41,7 @@
 #                   not. Re-reporting `ready` on a still-green PR would exit
 #                   immediately on every relaunch — a spin loop, not a watch.
 #   blocked_watching  the same relationship to `blocked`, for the same reason.
+#   unchecked_watching  likewise for `unchecked`.
 #
 # SECURITY: this script queries ONLY GitHub-controlled check metadata,
 # mergeable state, merge-queue membership, and the login of whoever removed the
@@ -87,11 +92,21 @@ GH_RETRY_HORIZON="${PR_SENTINEL_GH_RETRY_HORIZON:-900}"  # transient-retry horiz
 # resolves on its own within a poll or two once the workflow appears; the streak
 # is what tells that apart from a requirement that is genuinely stuck.
 BLOCKED_POLLS="${PR_SENTINEL_BLOCKED_POLLS:-3}"  # green+BLOCKED polls before `blocked`
-# Consecutive polls a PR must look green before `ready`. A push opens a window
-# in which the new run has not registered and the poll reads green on evidence
-# from the run before it; the next poll lands after it registers and reports
-# pending. See docs/plan/confirm-green.md.
+# Consecutive polls a PR must look green before `ready`. A re-push opens a
+# window in which the previous run's rows are still served and the poll reads
+# green on evidence from the run before it; the next poll lands after the new
+# one registers and reports pending. See docs/plan/confirm-green.md.
 GREEN_POLLS="${PR_SENTINEL_GREEN_POLLS:-2}"  # green polls before `ready`
+# How long the head may carry NO check row at all before the watcher reports
+# `unchecked`, in seconds. A run registers within seconds of the push — median
+# 2-4s, worst 76s across two repos of 1 and 39 workflows — so this is a wait
+# for something that has already gone wrong, not for the queue. It paces the
+# report only: an empty check set is never green whatever this is set to. See
+# docs/plan/unchecked-head.md.
+UNCHECKED_GRACE="${PR_SENTINEL_UNCHECKED_GRACE:-600}"  # seconds with no check row before `unchecked`
+# 0 is meaningful (report on the first empty poll); anything non-numeric falls
+# back to the default, the same fail-safe stance as POLL_AGE_DIVISOR.
+[[ "$UNCHECKED_GRACE" =~ ^[0-9]+$ ]] || UNCHECKED_GRACE=600
 # Consecutive polls the merge-queue entry must stay gone (on a still-open PR
 # that was seen queued) before `dequeued`. GitHub removes the entry a moment
 # BEFORE a successful queue merge lands, so a single absent poll can be a merge
@@ -129,6 +144,16 @@ BLOCKED_SEEN=0
 
 # Consecutive polls the PR has looked green. Same reset rule.
 GREEN_SEEN=0
+
+# When the head was first seen carrying no check row at all, or 0 when the last
+# poll saw one. Cleared the moment any row appears, so a run that registers
+# late ends the wait rather than shortening it, and a re-push that empties the
+# set again starts a fresh one.
+UNCHECKED_SINCE=0
+
+# Set to 1 once the `unchecked_watching` notice has been emitted, so it fires
+# once per run like the other two (WATCH_UNTIL=closed only).
+UNCHECKED_REPORTED=0
 
 # When the current run of pending checks was first seen, or 0 when the last poll
 # saw nothing pending. This is what paces a pending poll; clearing it on a poll
@@ -854,6 +879,48 @@ notice_blocked_watching() {
 	echo "later needs attention or is merged/closed."
 }
 
+# Shared body of the `unchecked` event and its `unchecked_watching` notice: the
+# head carries no check row at all. That is not green — the counts are zero
+# because nothing reported, not because it passed — and the report must not let
+# a reader take it for green. It names both causes and refuses to pick: the
+# watcher can see that no run exists, never why.
+unchecked_detail() {
+	local waited="$1"
+	echo "State: OPEN"
+	echo "mergeStateStatus: ${MERGE}"
+	echo "Head SHA: ${HEAD_SHA}"
+	echo
+	echo "NO check has reported on this head in ${waited} — not passing, not"
+	echo "pending, no row at all. Nothing here says the code was tested. The two"
+	echo "causes look identical from the API:"
+	echo "  - this PR triggers no workflow — the repo runs no CI on pull"
+	echo "    requests, or every workflow's path filter excludes these files"
+	echo "  - GitHub never started the run. Registration takes seconds when the"
+	echo "    queue is healthy, so this long a gap means an Actions incident or"
+	echo "    a workflow that failed to start"
+	echo "Separate them with: gh run list --commit ${HEAD_SHA}"
+	echo "If runs are queued, relaunch this watcher. If there are none, the PR is"
+	echo "as mergeable as it will get and no check ever ran on it — say so when"
+	echo "handing back to a human. Do NOT auto-merge."
+}
+
+emit_unchecked() {
+	report_header unchecked
+	unchecked_detail "$1"
+	exit 0
+}
+
+# The non-terminal counterpart of emit_unchecked, for PR_SENTINEL_WATCH_UNTIL=
+# closed. Same once-per-run, keep-polling shape as notice_blocked_watching.
+notice_unchecked_watching() {
+	report_header unchecked_watching
+	unchecked_detail "$1"
+	echo
+	echo "This is a NOTICE, not a wake-up: PR_SENTINEL_WATCH_UNTIL=closed, so the"
+	echo "watcher keeps polling and will exit (waking this session) only if the PR"
+	echo "later needs attention or is merged/closed."
+}
+
 emit_closed() {
 	local lower
 	lower=$(printf '%s' "$STATE" | tr '[:upper:]' '[:lower:]')
@@ -882,6 +949,11 @@ emit_timeout() {
 		echo "Its checks were green, but GitHub never computed a merge state"
 		echo "(mergeStateStatus stayed UNKNOWN), so 'ready' was withheld — an"
 		echo "uncomputed state can still resolve to a conflict."
+	fi
+	if (( UNCHECKED_REPORTED == 1 )) || (( UNCHECKED_SINCE > 0 )); then
+		echo "No check ever reported on its head: the counts were empty because"
+		echo "nothing ran, so 'ready' was withheld — it would have claimed checks"
+		echo "that do not exist. Verify with 'gh run list --commit <head>'."
 	fi
 	if (( QUEUED_SEEN == 1 )); then
 		echo "The PR held a merge-queue entry when last confirmed; if it is still"
@@ -1004,7 +1076,8 @@ main() {
 			# is the queue's own progress — nobody's schedule. Pace it with the
 			# idle backoff rather than a check age this poll never read.
 			PENDING_SINCE=0
-			local confirmed_green=0
+			UNCHECKED_SINCE=0
+			local confirmed_green=0 unchecked=0
 		else
 			# (b) conflicting
 			if [[ "$MERGE" == "DIRTY" ]]; then emit_conflict; fi
@@ -1077,23 +1150,38 @@ main() {
 				fi
 			fi
 
-			# (c) every check that reported is green, on a PR that has at least one
-			# check row or a CLEAN merge state — a PR with neither has told us
-			# nothing at all, which is the shape right after `gh pr create`.
-			local green=0
+			# (c) every check that reported is green, on a PR that has at least
+			# one check row. A head carrying no row has reported nothing: the
+			# counts are all zero because nothing ran, and `mergeStateStatus` is
+			# CLEAN on any PR with no unsatisfied merge requirement — so taking
+			# the two together as green claims checks passed that never existed.
+			# That state is `unchecked` below instead. See #112 and
+			# docs/plan/unchecked-head.md.
+			local green=0 unchecked=0
 			if (( pending_count == 0 && fail_count == 0 )); then
-				if (( pass_count > 0 )) || [[ "$MERGE" == "CLEAN" ]]; then
+				if (( pass_count > 0 )); then
 					green=1
+				elif [[ "$MERGE" == "CLEAN" ]]; then
+					unchecked=1
 				fi
 			fi
 
-			# One green poll is not evidence that the current head's checks ran.
-			# Until a push's run registers, the new head has no check rows at all:
-			# pending_count is 0 because the run is absent, not because it
-			# reported, and a repo with no branch protection reports CLEAN
-			# throughout — so both operands above are satisfied by exactly the
-			# state they exist to reject. The next poll sees the run and reports it
-			# pending. Reset on any non-green poll, like BLOCKED_SEEN.
+			# Wall clock, not a poll streak: what this waits out is GitHub's
+			# registration queue, whose depth owes nothing to how often we
+			# asked. Any row appearing clears it, so a late run ends the wait
+			# rather than shortening it.
+			if (( unchecked == 1 )); then
+				if (( UNCHECKED_SINCE == 0 )); then UNCHECKED_SINCE=$(now); fi
+			else
+				UNCHECKED_SINCE=0
+			fi
+
+			# One green poll is not evidence that the CURRENT head's checks ran.
+			# For a moment after a re-push GitHub still serves the previous
+			# run's rows, so they read as passing while the new run has not
+			# started; the next poll sees it and reports it pending. (A head
+			# with no rows at all never gets here — it is `unchecked`.) Reset on
+			# any non-green poll, like BLOCKED_SEEN.
 			if (( green == 1 )); then
 				GREEN_SEEN=$(( GREEN_SEEN + 1 ))
 			else
@@ -1152,6 +1240,24 @@ main() {
 					emit_ready
 				fi
 			fi
+
+			# The head has carried no check row for longer than a run
+			# registering late can explain. Terminal, like `blocked`: the two
+			# causes are told apart by looking at the repo's workflows, which
+			# this watcher cannot do and no further polling answers.
+			if (( unchecked == 1 && UNCHECKED_SINCE > 0 )); then
+				local waited=$(( $(now) - UNCHECKED_SINCE ))
+				if (( waited >= UNCHECKED_GRACE )); then
+					if [[ "$WATCH_UNTIL" == "closed" ]]; then
+						if (( UNCHECKED_REPORTED == 0 )); then
+							notice_unchecked_watching "$(fmt_age "$waited")"
+							UNCHECKED_REPORTED=1
+						fi
+					else
+						emit_unchecked "$(fmt_age "$waited")"
+					fi
+				fi
+			fi
 		fi
 
 		# --- nothing terminal: back off and poll again, respecting the budget ---
@@ -1198,6 +1304,13 @@ main() {
 		# one poll away.
 		if (( DEQUEUE_SEEN > 0 && DEQUEUE_SEEN < DEQUEUED_POLLS )); then
 			sleep_for="$INTERVAL"
+		fi
+		# Waiting out the unchecked grace: the report is due at a wall-clock
+		# moment, so a backed-off poll would land it up to MAX_INTERVAL late.
+		# Clamp to what is left of it.
+		if (( unchecked == 1 && UNCHECKED_SINCE > 0 )); then
+			local due=$(( UNCHECKED_SINCE + UNCHECKED_GRACE - $(now) ))
+			if (( due > 0 && sleep_for > due )); then sleep_for="$due"; fi
 		fi
 		local remaining=$(( deadline - $(now) ))
 		(( sleep_for > remaining )) && sleep_for="$remaining"

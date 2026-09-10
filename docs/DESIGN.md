@@ -76,11 +76,13 @@ task's stdout to the session as the wake payload.
    — see [Queue membership](#queue-membership-is-a-different-fact-from-pr-health)
    — (c) all checks are green and the PR is mergeable on
    two consecutive polls,
-   (c′) all checks are green but the merge stays `BLOCKED` — see [Green is not
+   (c′) all checks are green but the merge stays `BLOCKED`, (c″) no check has
+   reported on the head at all for long enough that a late run no longer
+   explains it — see [Green is not
    ready](#green-is-not-ready-and-blocked-is-the-only-field-that-knows) — or
    (d) the PR is closed/merged. On exit it prints a structured, single-event
    report (see [Report format](#report-format-and-the-data-not-instructions-frame)).
-   `PR_SENTINEL_WATCH_UNTIL=closed` turns (c) and (c′) into non-terminal notices
+   `PR_SENTINEL_WATCH_UNTIL=closed` turns (c), (c′) and (c″) into non-terminal notices
    so the watch continues past green — see [Why `ready` ends the watch by
    default](#why-ready-ends-the-watch-by-default-and-what-closed-mode-changes).
 
@@ -487,11 +489,31 @@ configuring protection; the API refuses to set any.
 
 Persistence is the instrument there too, one branch over. `ready` and its
 `ready_watching` notice need `PR_SENTINEL_GREEN_POLLS` consecutive green polls
-(default 2): an unregistered run turns up as pending on the second, while a
-genuinely green PR stays green. The confirming poll is scheduled at the base
-interval rather than the current backoff — it asks about the last few seconds,
-so inheriting a 300s idle interval would be perverse — which bounds the cost of
+(default 2): after a re-push GitHub serves the previous run's rows for a moment
+and they read as passing, and the second poll lands after the new run has
+registered as pending. The confirming poll is scheduled at the base interval
+rather than the current backoff — it asks about the last few seconds, so
+inheriting a 300s idle interval would be perverse — which bounds the cost of
 the guard to one `PR_SENTINEL_INTERVAL` per genuine handoff.
+
+That leaves the case where the rows are absent rather than stale, which is
+where persistence runs out (#112). Nothing distinguishes "the run has not
+registered" from "this PR triggers no workflow" by waiting, because the wait is
+GitHub's queue depth: four gaps measured in one afternoon ran 8 to 21.5 minutes
+against a two-poll confirmation, and every poll in them reported `ready` on a PR
+nothing had tested. So the empty set is taken out of the green test entirely —
+`ready` requires at least one row that reported, and `mergeStateStatus` no
+longer rescues a head with none. A head that keeps carrying none for
+`PR_SENTINEL_UNCHECKED_GRACE` seconds (default 600) gets its own terminal
+**`unchecked`** event, which names both causes and the `gh run list --commit`
+that separates them. The grace paces that report and nothing else: fired early
+it states something true, where an early `ready` states something false, so no
+timing constant is left deciding whether the PR is green. 600s is about eight
+times the slowest healthy registration measured (median 2–4s and worst 76s from
+push to first run, across repos of 1 and 39 workflows — the `PushEvent`
+timestamp is the instrument, since a commit's own timestamp is mostly the local
+gate that ran before the push) and inside the incident band, so a run that never
+starts is reported in ten minutes instead of waiting out the watch budget.
 
 The third failure in the family is `UNKNOWN` (#40). The guard #29 left behind
 excluded exactly one value — `MERGE != BLOCKED` — and `UNKNOWN` satisfies it,
@@ -508,14 +530,15 @@ ready. An allowlist (`ready` only on `CLEAN`) was rejected: `UNSTABLE` (a
 non-required check failing) and `HAS_HOOKS` are legitimately mergeable, and a
 repo can sit in them indefinitely.
 
-`blocked` joins `ready`/`closed` in the Stop hook's concluded set. Both causes
-need a human — a review gate is the human's turn by definition, and a gate that
-never registered can't be waited out, since the branch protection or the trigger
-paths have to change. Leaving it out would have the hook re-block every stop and
+`blocked` and `unchecked` join `ready`/`closed` in the Stop hook's concluded
+set. Both of `blocked`'s causes need a human — a review gate is the human's turn
+by definition, and a gate that never registered can't be waited out, since the
+branch protection or the trigger paths have to change — and neither of
+`unchecked`'s is a thing the session fixes by pushing. Leaving it out would have the hook re-block every stop and
 the session relaunch a watcher that reports the same thing — the livelock class
 #9 fixed for `check_failure`. The `closed`-mode notice is `blocked_watching`, and the
 `(?![\w-])` guard keeps it out of the concluded set for the same reason it keeps
-`ready_watching` out.
+`ready_watching` out; `unchecked_watching` is the same shape again.
 
 ### Queue membership is a different fact from PR health
 

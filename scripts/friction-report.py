@@ -80,6 +80,7 @@ EVENT_KIND = {
     'behind':        'work',      # same fix, before it becomes a conflict
     'dequeued':      'work',      # left the merge queue, re-enqueue owed
     'blocked':       'work',      # green but a merge requirement is unmet
+    'unchecked':     'work',      # no check reported at all — verify, don't merge
     'ready':         'done',      # green and mergeable — hand back
     'closed':        'done',      # merged or closed
     'timeout':       'degraded',  # watch budget elapsed with no verdict
@@ -87,6 +88,7 @@ EVENT_KIND = {
     'base_failure':  'notice',    # inherited from the base; watch continues
     'ready_watching': 'notice',   # green, still watching for a sibling merge
     'blocked_watching': 'notice',
+    'unchecked_watching': 'notice',
 }
 
 KIND_HINT = {

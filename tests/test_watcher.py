@@ -693,13 +693,14 @@ class WatcherCase(unittest.TestCase):
     # -- green confirmed across polls (issue #37) -----------------------------
 
     def test_ready_waits_for_a_second_green_poll(self):
-        """The post-push window: the new run has not registered, so the head has
-        no check rows at all, and a repo with no branch protection reports CLEAN
-        regardless. That poll looks green on evidence from the previous run; the
-        next one sees the run and reports it pending."""
+        """The post-re-push window: GitHub is still serving the PREVIOUS run's
+        rows, so they read as passing while the new head's run has not started,
+        and a repo with no branch protection reports CLEAN regardless. The next
+        poll sees the new run and reports it pending. (A head with NO rows is a
+        different case — see the #112 block below.)"""
         files = {
             "pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
-            "pr_checks.1": "",  # run not registered yet
+            "pr_checks.1": "pass\tbuild\tlink\n",  # the previous run's row
             "pr_checks": "pending\tbuild\tlink\n",
         }
         rc, out, _ = self.run_watcher(files, env={"PR_SENTINEL_TIMEOUT": "3"})
@@ -726,7 +727,7 @@ class WatcherCase(unittest.TestCase):
         """PR_SENTINEL_GREEN_POLLS=1 opts back into deciding on a single poll."""
         files = {
             "pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
-            "pr_checks.1": "",
+            "pr_checks.1": "pass\tbuild\tlink\n",
             "pr_checks": "pending\tbuild\tlink\n",
         }
         rc, out, _ = self.run_watcher(
@@ -739,7 +740,7 @@ class WatcherCase(unittest.TestCase):
         bar — a single green poll must not produce it either."""
         files = {
             "pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
-            "pr_checks.1": "",
+            "pr_checks.1": "pass\tbuild\tlink\n",
             "pr_checks": "pending\tbuild\tlink\n",
         }
         rc, out, _ = self.run_watcher(
@@ -749,6 +750,113 @@ class WatcherCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("PR-SENTINEL EVENT: timeout", out)
         self.assertNotIn("EVENT: ready_watching", out)
+
+    # -- no check row at all (issue #112) ------------------------------------
+
+    def _unchecked(self):
+        """A head no check has reported on: no rows, CLEAN merge state. The
+        counts are all zero because nothing ran, which is indistinguishable
+        from every check passing if you only count buckets."""
+        return {
+            "pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
+            "pr_checks": "",
+        }
+
+    def test_empty_check_set_never_fires_ready(self):
+        """The defect: `pass_count == 0 && pending_count == 0` is exactly `no
+        check ever reported`, and CLEAN is what used to let it read as green."""
+        rc, out, _ = self.run_watcher(
+            self._unchecked(), env={"PR_SENTINEL_TIMEOUT": "3"})
+        self.assertEqual(rc, 0)
+        self.assertNotIn("EVENT: ready", out)
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+
+    def test_timeout_names_the_withheld_ready(self):
+        """Timing out inside the grace must still say why nothing fired."""
+        _, out, _ = self.run_watcher(
+            self._unchecked(), env={"PR_SENTINEL_TIMEOUT": "3"})
+        self.assertIn("No check ever reported on its head", out)
+
+    def test_unchecked_event_after_the_grace(self):
+        rc, out, _ = self.run_watcher(
+            self._unchecked(), env={"PR_SENTINEL_UNCHECKED_GRACE": "0"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: unchecked", out)
+        self.assertIn("Head SHA: abc1234def", out)
+        self.assertIn("NO check has reported on this head", out)
+        # The one command that separates the two causes.
+        self.assertIn("gh run list --commit abc1234def", out)
+        self.assertIn("Do NOT auto-merge", out)
+
+    def test_unchecked_waits_out_the_grace(self):
+        """It is a wall clock, not a poll streak: the report is due a fixed
+        time after the head was first seen bare, however often we asked."""
+        rc, out, err = self.run_watcher(
+            self._unchecked(), virtual_clock=True,
+            env={"PR_SENTINEL_UNCHECKED_GRACE": "20",
+                 "PR_SENTINEL_TIMEOUT": "600"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: unchecked", out)
+        self.assertGreaterEqual(sum(sleeps(err)), 20)
+
+    def test_a_late_run_clears_the_clock_rather_than_shortening_the_wait(self):
+        """A row appearing resets the wait: the question the grace asks is how
+        long the head has been bare, and it has not been bare since."""
+        files = dict(self._unchecked())
+        for n in range(1, 6):
+            files["pr_checks.%d" % n] = ""
+        files["pr_checks.6"] = "pending\tbuild\tlink\n"
+        rc, out, err = self.run_watcher(
+            files, virtual_clock=True,
+            env={"PR_SENTINEL_UNCHECKED_GRACE": "10",
+                 "PR_SENTINEL_TIMEOUT": "600"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: unchecked", out)
+        # Without the reset the first five bare polls would carry the clock to
+        # the threshold; with it, the wait restarts after the pending poll.
+        self.assertGreaterEqual(sum(sleeps(err)), 15)
+
+    def test_a_registered_run_reaches_ready_instead(self):
+        """The whole point of the grace: a run that turns up inside it takes
+        the normal path, and the bare polls cost nothing."""
+        files = dict(self._unchecked())
+        files["pr_checks.1"] = ""
+        files["pr_checks.2"] = "pending\tbuild\tlink\n"
+        files["pr_checks"] = "pass\tbuild\tlink\n"
+        rc, out, _ = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: ready", out)
+        self.assertNotIn("EVENT: unchecked", out)
+
+    def test_unchecked_grace_falls_back_on_a_non_numeric_value(self):
+        """Same fail-safe stance as POLL_AGE_DIVISOR: an unusable value takes
+        the default, it does not disable the wait."""
+        _, out, _ = self.run_watcher(
+            self._unchecked(),
+            env={"PR_SENTINEL_UNCHECKED_GRACE": "soon",
+                 "PR_SENTINEL_TIMEOUT": "3"})
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+        self.assertNotIn("EVENT: unchecked", out)
+
+    def test_unchecked_is_a_notice_in_watch_until_closed(self):
+        _, out, _ = self.run_watcher(
+            self._unchecked(),
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed",
+                 "PR_SENTINEL_UNCHECKED_GRACE": "0",
+                 "PR_SENTINEL_TIMEOUT": "3"})
+        self.assertIn("PR-SENTINEL EVENT: unchecked_watching", out)
+        self.assertNotIn("PR-SENTINEL EVENT: unchecked\n", out)
+        # Non-terminal: the watch runs on to its budget.
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+
+    def test_unchecked_notice_fires_once(self):
+        """A bare head stays bare, so re-reporting it every poll is noise."""
+        _, out, _ = self.run_watcher(
+            self._unchecked(),
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed",
+                 "PR_SENTINEL_UNCHECKED_GRACE": "0",
+                 "PR_SENTINEL_TIMEOUT": "4"})
+        self.assertEqual(1, out.count("PR-SENTINEL EVENT: unchecked_watching"))
 
     # -- UNKNOWN merge state (issue #40) -------------------------------------
 
