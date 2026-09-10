@@ -182,8 +182,8 @@ the session to launch the watcher before stopping:
 | the hook already blocked over this PR once and **no watcher has been launched since** | **allow + warn** — the ask was made and not acted on; repeating it cannot help a session that has no move here |
 | a launched watcher hasn't reported completion yet (still running) | silent (already covered) |
 | a launch the harness never answered with a task id (it never started) | **block once** — nothing is watching, so the pull request still needs a watcher |
-| PR handed off (watcher **terminal** `ready`/`closed`/`blocked`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
-| the watcher's output ends on a `base_failure`, `ready_watching`, or `blocked_watching` **notice** (a watch that exited without a terminal event) | **block once** — a notice isn't a handoff; the PR is still open and unwatched |
+| PR handed off (watcher **terminal** `ready`/`closed`/`blocked`/`unchecked`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
+| the watcher's output ends on a `base_failure`, `ready_watching`, `blocked_watching`, or `unchecked_watching` **notice** (a watch that exited without a terminal event) | **block once** — a notice isn't a handoff; the PR is still open and unwatched |
 | no PR opened or watched this session | silent (a PR merely viewed or commented on is not yours) |
 | `stop_hook_active` already set (a prior block) | silent — **never loops** |
 | unreadable transcript / any uncertainty | silent (fail-open) |
@@ -276,10 +276,12 @@ needed:
 | `mergeStateStatus == BEHIND` | **behind** | rebase onto `<base>` (default) and force-push with lease, relaunch — or merge to fast-forward (`PR_SENTINEL_HEAL=merge`) |
 | the PR holds a **merge-queue entry** | *(keep polling, hands off)* | nothing — the queue is merging it, and any push to a queued PR evicts it (see [Merge queues](#merge-queues)) |
 | the queue entry is **gone** but the PR is still open, for `PR_SENTINEL_DEQUEUED_POLLS` polls | **dequeued** | heal whatever the report names, then hand back to a human to **re-enqueue** — never enqueue or merge yourself. The report names who removed it: the queue (an eviction) or a person (deliberate, often to allow a push) |
-| all checks green, no conflict, a computed `mergeStateStatus` (not `BLOCKED`, not `UNKNOWN`), for `PR_SENTINEL_GREEN_POLLS` polls running | **ready** | hand back to a human for merge review — **never auto-merge** |
+| **at least one check reported**, all checks green, no conflict, a computed `mergeStateStatus` (not `BLOCKED`, not `UNKNOWN`), for `PR_SENTINEL_GREEN_POLLS` polls running | **ready** | hand back to a human for merge review — **never auto-merge** |
 | the same, **and** `PR_SENTINEL_WATCH_UNTIL=closed` | *(notice: **ready_watching**, keep polling)* | nothing — the watch continues past green (see [Configuration](#configuration)) |
 | all checks green but `mergeStateStatus == BLOCKED` for `PR_SENTINEL_BLOCKED_POLLS` polls running | **blocked** | don't treat it as green: a required check may never have registered, or an approval is outstanding (see [Green is not the same as ready](#green-is-not-the-same-as-ready)) |
 | the same, **and** `PR_SENTINEL_WATCH_UNTIL=closed` | *(notice: **blocked_watching**, keep polling)* | nothing — the watch continues |
+| **no check row at all** on the head, for `PR_SENTINEL_UNCHECKED_GRACE` seconds | **unchecked** | never green — nothing was tested. Run `gh run list --commit <head>`: runs queued means relaunch, no runs means say so when handing back (see [A head no check reported on](#a-head-no-check-reported-on)) |
+| the same, **and** `PR_SENTINEL_WATCH_UNTIL=closed` | *(notice: **unchecked_watching**, keep polling)* | nothing — the watch continues |
 | PR merged or closed | **closed** | done; stop watching |
 | watch budget elapsed | **timeout** | re-check and relaunch if still open |
 | no `gh` credentials, PR unresolvable, or transient failures past the retry horizon | **error** | check `gh auth status`, relaunch |
@@ -504,6 +506,7 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_WATCH_UNTIL` | `ready` | stopping condition: `ready` ends the watch when the PR goes green; `closed` keeps watching past green so a *later* conflict still wakes you (see below); unrecognised values fall back to `ready` |
 | `PR_SENTINEL_BLOCKED_POLLS` | `3` | consecutive polls an all-green-but-`BLOCKED` PR must hold before the `blocked` event fires (see [Green is not the same as ready](#green-is-not-the-same-as-ready)) |
 | `PR_SENTINEL_GREEN_POLLS` | `2` | consecutive green polls before `ready` fires, so a push whose run hasn't registered yet can't read as green (see [Green is not the same as ready](#green-is-not-the-same-as-ready)); `1` decides on a single poll |
+| `PR_SENTINEL_UNCHECKED_GRACE` | `600` | seconds the head may carry **no check row at all** before the watcher reports `unchecked`. It paces that report only — an empty check set is never `ready` whatever this is set to (see [A head no check reported on](#a-head-no-check-reported-on)). Raise it in a repo whose runs routinely take longer than ten minutes to register; `0` reports on the first empty poll |
 | `PR_SENTINEL_DEQUEUED_POLLS` | `2` | consecutive polls a once-queued, still-open PR must be missing from the merge queue before `dequeued` fires; the confirming poll turns a queue merge in flight into `closed` instead of a phantom eviction (see [Merge queues](#merge-queues)) |
 | `PR_SENTINEL_BASE_CHECK` | (on) | compare each failing check against the same workflow's latest run on the base branch, and report `base_failure` instead of `check_failure` when the base is already red; `0`/`false`/empty wakes on every failure as before (see [Failures inherited from the base branch](#failures-inherited-from-the-base-branch)) |
 | `PR_SENTINEL_BACKOFF_NUM` / `PR_SENTINEL_BACKOFF_DEN` | `3` / `2` | backoff multiplier once checks have settled (interval × num ÷ den each poll) |
@@ -659,19 +662,60 @@ ambiguity to you. Any poll that isn't green-and-blocked resets the streak.
 `blocked` is terminal and counts as a handoff to the Stop hook, because both
 causes need a human and neither can be waited out.
 
-The seconds right after a push are the same problem without the branch
-protection. The new head has no check rows until the run registers, so nothing
-is pending because nothing exists yet — and on a repo with no required checks,
-`mergeStateStatus` is `CLEAN` throughout, so `BLOCKED` never engages. That poll
-reads green on evidence from the *previous* run.
+The seconds right after a **re-push** are the same problem without the branch
+protection. GitHub keeps serving the previous run's check rows for a moment, so
+they still count as passing while the new head's run has not started — and on a
+repo with no required checks, `mergeStateStatus` is `CLEAN` throughout, so
+`BLOCKED` never engages. That poll reads green on evidence from the *previous*
+run.
 
-Persistence answers this one too: the run registers within seconds and the next
+Persistence answers this one: the new run registers within seconds and the next
 poll reports it pending. `ready` (and its `ready_watching` notice) therefore
 needs `PR_SENTINEL_GREEN_POLLS` consecutive green polls, default 2. It costs one
 poll interval on a genuine ready — the confirming poll is scheduled at
 `PR_SENTINEL_INTERVAL` rather than the backed-off interval, so a long CI run
 doesn't turn that into a five-minute wait. Set it to `1` to decide on a single
 poll.
+
+### A head no check reported on
+
+A head with **no check row at all** is the case persistence cannot reach, and
+it is not a race. The counts are zero because nothing ran, `mergeStateStatus` is
+`CLEAN` because nothing is required, and both stay that way for as long as the
+run takes to register — measured at 8 to 21.5 minutes during a GitHub Actions
+incident, against a confirmation window of two polls. No number of polls tells
+that apart from a repository that runs no CI on this PR at all.
+
+So an empty check set is never green. `ready` needs at least one row that
+reported, whatever the merge state says. When the head keeps carrying none for
+`PR_SENTINEL_UNCHECKED_GRACE` seconds (default 600), the watcher reports
+**`unchecked`** instead, naming the head commit and both causes:
+
+```
+PR-SENTINEL EVENT: unchecked
+PR: 35
+State: OPEN
+mergeStateStatus: CLEAN
+Head SHA: 57afcb3119fb3ca495be5fb36c202502a1302a5c
+
+NO check has reported on this head in 10m — not passing, not pending, no row
+at all. Nothing here says the code was tested.
+```
+
+The grace paces the report, never the verdict: firing it early states
+something true — no check has reported on this head — where an early `ready`
+states something false. Ten minutes is roughly eight times the slowest healthy
+registration measured across a one-workflow repo and a thirty-nine-workflow one
+(median 2–4s, worst 76s, from push to the first run), and well inside the
+incident band, so a run that never starts is reported in ten minutes rather
+than waiting out the hour-long watch budget.
+
+`unchecked` is terminal and counts as a handoff to the Stop hook, for the
+reason `blocked` does: telling its two causes apart means looking at the
+repository's workflows, which the watcher cannot do and no further polling
+answers. `gh run list --commit <head>` is the one command that separates them —
+runs queued means relaunch the watcher, no runs means this PR is as mergeable
+as it will get and nothing tested it.
 
 `UNKNOWN` gets the same treatment for the same reason. It is not a merge state
 but GitHub saying it hasn't computed one yet — the window a sibling PR's merge
@@ -870,7 +914,7 @@ Four things it reports, and how to read them:
   [backstop](#what-it-does) caught the turns that were about to end unwatched,
   and the session launched a watcher after it fired.
 - **Events by kind** — `work` (`check_failure`, `conflict`, `behind`,
-  `dequeued`, `blocked`) is the plugin earning its keep; `done` (`ready`,
+  `dequeued`, `blocked`, `unchecked`) is the plugin earning its keep; `done` (`ready`,
   `closed`) means the PR needed no babysitting; `degraded` (`timeout`, `error`)
   means the watch ended with no verdict, which usually calls for a larger
   `PR_SENTINEL_TIMEOUT`.

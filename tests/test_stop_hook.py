@@ -319,7 +319,8 @@ class ClassifierUnit(unittest.TestCase):
         """The notices the watcher keeps polling past are not what the session
         is blocked over, so they must not produce a signature of their own —
         even `blocked_watching`, which does print a Head SHA."""
-        for notice in ("base_failure", "ready_watching", "blocked_watching"):
+        for notice in ("base_failure", "ready_watching", "blocked_watching",
+                       "unchecked_watching"):
             self.assertIsNone(hook._report_signature(
                 f"PR-SENTINEL EVENT: {notice}\nPR: 42\nState: OPEN\n"
                 "Head SHA: aaa\n"), notice)
@@ -852,6 +853,33 @@ class NeedsWatcherLogic(unittest.TestCase):
         # and unwatched.
         report = ("PR-SENTINEL EVENT: blocked_watching\nPR: 42\nState: OPEN\n"
                   "mergeStateStatus: BLOCKED (merge requirement unsatisfied)\n")
+        with real_outfile(report) as fp:
+            self.assertEqual(needs([
+                *created_pr(42),
+                *launch_watcher(42, "toolu_w"),
+                task_notification("toolu_w", outfile=fp),
+            ]), {"42"})
+
+    # -- issue #112: `unchecked` is terminal too ------------------------------
+
+    def test_unchecked_concludes(self):
+        # No check reported on the head at all: either the PR triggers no
+        # workflow or GitHub never started one, and neither is something the
+        # session fixes by pushing. Re-blocking would relaunch a watcher that
+        # reports the same thing — the livelock `blocked` is kept out of.
+        report = ("PR-SENTINEL EVENT: unchecked\nPR: 42\nState: OPEN\n"
+                  "mergeStateStatus: CLEAN\nHead SHA: abc1234def\n")
+        with real_outfile(report) as fp:
+            self.assertEqual(needs([
+                *created_pr(42),
+                *launch_watcher(42, "toolu_w"),
+                task_notification("toolu_w", outfile=fp),
+            ]), set())
+
+    def test_unchecked_watching_notice_does_not_conclude(self):
+        # Same rule as the other two notices: the watch continues past it.
+        report = ("PR-SENTINEL EVENT: unchecked_watching\nPR: 42\n"
+                  "State: OPEN\nmergeStateStatus: CLEAN\nHead SHA: abc\n")
         with real_outfile(report) as fp:
             self.assertEqual(needs([
                 *created_pr(42),

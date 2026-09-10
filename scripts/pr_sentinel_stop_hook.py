@@ -125,6 +125,9 @@ pr_number = watchers.pr_number
 # check that never registered — both need a human, and neither can be waited
 # out, so re-blocking the stop would only have the session relaunch a watcher
 # that re-reports it (the livelock the check_failure dampening exists to avoid).
+# `unchecked` counts for the same reason: no check has reported on the head at
+# all, which is either a repo that runs none on this PR or an Actions incident,
+# and neither is a thing the session can fix by pushing.
 # The trailing guard is load-bearing: under `PR_SENTINEL_WATCH_UNTIL=closed` the
 # watcher emits non-terminal `ready_watching`/`blocked_watching` NOTICES and
 # keeps polling, and those must NOT read as a handoff — the PR is still open,
@@ -132,7 +135,7 @@ pr_number = watchers.pr_number
 # word-or-dash continuation keeps a future `ready_*`/`closed_*` event from
 # silently inheriting "concluded" too.
 CONCLUDED_EVENT_RE = re.compile(
-    r'PR-SENTINEL EVENT:\s*(?:ready|closed|blocked)(?![\w-])')
+    r'PR-SENTINEL EVENT:\s*(?:ready|closed|blocked|unchecked)(?![\w-])')
 
 # The banner the watcher prints before every embedded CI-log excerpt. Everything
 # from the FIRST such banner onward is semi-untrusted log text (a compromised
@@ -154,9 +157,9 @@ EVENT_MARKER = 'PR-SENTINEL EVENT:'
 # actionable — the session has usually already healed the branch on disk and is
 # waiting on its own gate before pushing, so the remote head cannot have moved
 # yet (#50). The non-terminal notices (`base_failure`, `ready_watching`,
-# `blocked_watching`) are excluded: the watcher keeps polling past them, so they
-# are not the report the session is being blocked over. So are the concluded
-# events, which already suppress the block outright.
+# `blocked_watching`, `unchecked_watching`) are excluded: the watcher keeps
+# polling past them, so they are not the report the session is being blocked
+# over. So are the concluded events, which already suppress the block outright.
 DAMPENABLE_EVENT_RE = re.compile(
     r'PR-SENTINEL EVENT:\s*(check_failure|conflict|behind|dequeued)(?![\w-])')
 
