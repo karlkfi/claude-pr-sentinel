@@ -675,6 +675,14 @@ class NeedsWatcherLogic(unittest.TestCase):
         self.assertEqual(
             needs([*created_pr(42), *launch_watcher(42, "toolu_w")]), set())
 
+    def test_a_launch_the_harness_never_answered_still_needs_a_watcher(self):
+        # A launch entry with no task id never started — most often one this
+        # plugin's own PreToolUse guard denied. Reading it as live disarmed
+        # this backstop at exactly the moment the PR had no watcher at all.
+        self.assertEqual(
+            needs([*created_pr(42), launch_watcher(42, "toolu_w")[0]]),
+            {"42"})
+
     def test_live_watcher_launched_with_exit_suffix_allows(self):
         # The launch exit-status-guard asks for on a backgrounded call,
         # `… watch.sh 42; exit $?`, is still a live watcher on #42.

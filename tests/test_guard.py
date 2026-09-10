@@ -44,7 +44,7 @@ def run_guard(payload, env=None):
     return proc.stdout, proc.stderr, proc.returncode
 
 
-def bash_payload(command, background=False, transcript=None):
+def bash_payload(command, background=False, transcript=None, tool_use_id=None):
     tool_input = {"command": command}
     if background:
         tool_input["run_in_background"] = True
@@ -52,26 +52,37 @@ def bash_payload(command, background=False, transcript=None):
                "tool_input": tool_input}
     if transcript:
         payload["transcript_path"] = transcript
+    if tool_use_id:
+        payload["tool_use_id"] = tool_use_id
     return payload
 
 
-def transcript_with_live_watcher(pr, tmpdir, task_id="bk1", completed=False):
+def transcript_with_live_watcher(pr, tmpdir, task_id="bk1", completed=False,
+                                 tool_id="toolu_w", started=True):
     """A synthetic transcript in which this session launched a watcher on `pr`
-    as a background task — still running unless `completed`."""
+    as a background task — still running unless `completed`.
+
+    `started=False` writes only the launch's own `tool_use` entry, with no
+    result and so no task id: what the transcript looks like from inside the
+    PreToolUse hook deciding that very launch, since the harness writes the
+    entry before running the hook."""
     entries = [
         {"type": "assistant", "message": {"role": "assistant", "content": [
-            {"type": "tool_use", "id": "toolu_w", "name": "Bash",
+            {"type": "tool_use", "id": tool_id, "name": "Bash",
              "input": {"command": f'bash "{WATCHER}" {pr}',
                        "run_in_background": True}}]}},
-        {"type": "user", "toolUseResult": {"backgroundTaskId": task_id},
-         "message": {"role": "user", "content": [
-             {"type": "tool_result", "tool_use_id": "toolu_w",
-              "content": f"Command running in background with ID: {task_id}."}]}},
     ]
+    if started:
+        entries.append(
+            {"type": "user", "toolUseResult": {"backgroundTaskId": task_id},
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": tool_id,
+                  "content":
+                      f"Command running in background with ID: {task_id}."}]}})
     if completed:
         entries.append({"type": "queue-operation", "content": (
             "<task-notification>\n"
-            f"<tool-use-id>toolu_w</tool-use-id>\n"
+            f"<tool-use-id>{tool_id}</tool-use-id>\n"
             f"<output-file>/tmp/s/tasks/{task_id}.output</output-file>\n"
             "<status>completed</status>\n</task-notification>")})
     path = os.path.join(tmpdir, "transcript.jsonl")
@@ -611,4 +622,30 @@ class DuplicateWatcherDeny(unittest.TestCase):
         t = transcript_with_live_watcher("7", self.tmp.name)
         out, _, _ = self._run(self._launch(), transcript=t,
                               env={"PR_SENTINEL_AUTOALLOW": "0"})
+        self.assertEqual(self._decision(out)["permissionDecision"], "deny")
+
+    def test_a_sessions_first_launch_is_not_its_own_duplicate(self):
+        # The harness writes the in-flight Bash tool_use entry BEFORE running
+        # this hook, so the transcript already names the launch under decision
+        # and nothing else. It has no task id and can never get a completion,
+        # so counting it live refused the first watcher and poisoned the read
+        # for the rest of the session.
+        t = transcript_with_live_watcher("7", self.tmp.name, started=False)
+        out, _, _ = self._run(self._launch(), transcript=t)
+        self.assertEqual(self._decision(out)["permissionDecision"], "allow")
+
+    def test_the_in_flight_tool_use_id_is_excluded_by_name(self):
+        # The second half of the fix, isolated: the incumbent here HAS a task
+        # id, so only naming the call under decision can clear it.
+        t = transcript_with_live_watcher("7", self.tmp.name, tool_id="toolu_x")
+        out, _, _ = run_guard(
+            bash_payload(self._launch(), transcript=t,
+                         tool_use_id="toolu_x"),
+            env={"CLAUDE_PLUGIN_ROOT": str(REPO)})
+        self.assertEqual(self._decision(out)["permissionDecision"], "allow")
+        # ... and a DIFFERENT id leaves the incumbent standing.
+        out, _, _ = run_guard(
+            bash_payload(self._launch(), transcript=t,
+                         tool_use_id="toolu_other"),
+            env={"CLAUDE_PLUGIN_ROOT": str(REPO)})
         self.assertEqual(self._decision(out)["permissionDecision"], "deny")

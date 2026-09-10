@@ -4,10 +4,11 @@
 Run with: python3 -m unittest discover tests
 
 All three hooks decide "is a watcher already running for this PR" through this
-module, so the tests pin the rule itself: a launch with no completion
-notification is live, a completed one is not, and the background task id — the
-thing that makes stopping the incumbent one tool call — is recovered from both
-shapes the harness records it in.
+module, so the tests pin the rule itself: a launch that the harness gave a
+background task id and that has not reported completion is live, a completed
+one is not, one with no task id never started, and the id — the thing that
+makes stopping the incumbent one tool call — is recovered from both shapes the
+harness records it in.
 
 Fixture rule: never use real PR URLs, hosts, or credentials — synthetic
 owner/repo and PR numbers exercise identical code paths.
@@ -61,13 +62,13 @@ def completion(tool_id="toolu_w", task_id="bk1", status="completed"):
 
 
 class LiveWatchers(unittest.TestCase):
-    def live(self, entries):
+    def live(self, entries, exclude=()):
         with tempfile.NamedTemporaryFile("w", suffix=".jsonl",
                                          delete=False) as fh:
             for e in entries:
                 fh.write(json.dumps(e) + "\n")
             path = fh.name
-        return watchers.live_watchers(path)
+        return watchers.live_watchers(path, exclude=exclude)
 
     def test_launch_without_completion_is_live(self):
         self.assertEqual(
@@ -82,9 +83,29 @@ class LiveWatchers(unittest.TestCase):
             self.live([launch("42"), launch_result(structured=False)]),
             {"42": ["bk1"]})
 
-    def test_launch_with_no_recorded_task_id_is_still_live(self):
-        # The id is what makes stopping cheap, not what makes a watcher live.
-        self.assertEqual(self.live([launch("42")]), {"42": [""]})
+    def test_launch_with_no_recorded_task_id_is_not_a_live_watcher(self):
+        # The harness answers every backgrounded launch with a task id before
+        # the next turn, so a launch that has none never started — most often
+        # the in-flight call the PreToolUse hook is deciding right now, whose
+        # tool_use entry the harness has already written. Counting it live let
+        # the guard refuse a session's FIRST watcher as a duplicate of itself.
+        self.assertEqual(self.live([launch("42")]), {})
+
+    def test_the_in_flight_launch_is_excluded_by_its_tool_use_id(self):
+        # Belt and braces: even where the transcript somehow carries a task id
+        # for the call under decision, naming it excludes it.
+        self.assertEqual(
+            self.live([launch("42"), launch_result()],
+                      exclude=("toolu_w",)), {})
+
+    def test_excluding_one_launch_leaves_another_live(self):
+        self.assertEqual(
+            self.live([launch("42", "toolu_a"),
+                       launch_result("toolu_a", "bk1"),
+                       launch("42", "toolu_b"),
+                       launch_result("toolu_b", "bk2")],
+                      exclude=("toolu_b",)),
+            {"42": ["bk1"]})
 
     def test_relaunch_after_completion_reports_only_the_live_one(self):
         self.assertEqual(
@@ -144,8 +165,9 @@ class FailOpen(unittest.TestCase):
                                          delete=False) as fh:
             fh.write("{not json at all\n")
             fh.write(json.dumps(launch("42")) + "\n")
+            fh.write(json.dumps(launch_result()) + "\n")
             path = fh.name
-        self.assertEqual(watchers.live_watchers(path), {"42": [""]})
+        self.assertEqual(watchers.live_watchers(path), {"42": ["bk1"]})
 
 
 class StopHint(unittest.TestCase):

@@ -122,6 +122,15 @@ the watch (to reset its watch budget, say) is one `TaskStop` call and then the
 launch again, rather than a dead end. `PR_SENTINEL_OVERRIDE=<reason>` allows the
 duplicate for the rare case that wants one.
 
+An incumbent counts only once the harness has answered its launch with a
+background task id. The harness writes the in-flight Bash call to the session
+transcript *before* running this hook, so without that rule the guard could
+read a session's **first** launch as an incumbent and refuse it as a duplicate
+of itself — leaving the pull request with no watcher at all, and the entry
+poisoned for every later launch in that session. The hook also excludes the
+`tool_use` id of the call it is deciding, which closes the same case
+independently.
+
 ### Overlapping pull requests
 
 The last thing the PreToolUse hook does is check, at `gh pr create`, whether an
@@ -172,6 +181,7 @@ the session to launch the watcher before stopping:
 | the watcher has reported the **same** terminal event twice (`check_failure`, `conflict`, `behind`, or `dequeued` at the same head commit) | **allow + warn** — nothing has been pushed, so stop nagging; a non-blocking notice naming the event keeps the PR visible |
 | the hook already blocked over this PR once and **no watcher has been launched since** | **allow + warn** — the ask was made and not acted on; repeating it cannot help a session that has no move here |
 | a launched watcher hasn't reported completion yet (still running) | silent (already covered) |
+| a launch the harness never answered with a task id (it never started) | **block once** — nothing is watching, so the pull request still needs a watcher |
 | PR handed off (watcher **terminal** `ready`/`closed`/`blocked`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
 | the watcher's output ends on a `base_failure`, `ready_watching`, or `blocked_watching` **notice** (a watch that exited without a terminal event) | **block once** — a notice isn't a handoff; the PR is still open and unwatched |
 | no PR opened or watched this session | silent (a PR merely viewed or commented on is not yours) |
