@@ -138,7 +138,9 @@ report).
   the same shape one step later: when a watcher *launch* redirected the
   watcher's output to a log, **that log** — the path comes from the launch's own
   command string, the read is capped at 64 KiB (as the watcher output file's
-  is), and a file older than the launch is ignored for the same reason.
+  is), and a file older than the launch is ignored for the same reason. Either
+  path may be written through a shell variable, which resolves only against a
+  literal that same command assigned — never against the hook's own environment.
 - Also reads, from that same transcript, the harness's own record of an
   **earlier block by this hook**, so it asks about a PR once rather than on
   every turn end. Only the harness-written copies of its own message count —

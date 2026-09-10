@@ -411,6 +411,13 @@ class RedirectPathUnit(unittest.TestCase):
         self.assertIsNone(hook._create_redirect_path(
             'gh pr create --fill > "$S/pr.log" 2>&1', "/session/cwd"))
 
+    def test_variable_assigned_a_literal_in_the_same_command_expands(self):
+        self.assertEqual(
+            hook._create_redirect_path(
+                'S=/s/scratch\ngh pr create --fill > "$S/pr.log" 2>&1',
+                "/session/cwd"),
+            "/s/scratch/pr.log")
+
     def test_devnull_and_no_redirect_are_declined(self):
         self.assertIsNone(hook._create_redirect_path(
             "gh pr create --fill > /dev/null 2>&1", "/session/cwd"))
@@ -449,6 +456,45 @@ class WatcherRedirectPathUnit(unittest.TestCase):
     def test_unexpandable_target_is_declined(self):
         self.assertIsNone(hook._watcher_redirect_path(
             'bash "/p/pr-sentinel-watch.sh" 42 > "$LOG" 2>&1', "/session/cwd"))
+
+    def test_variable_assigned_a_literal_in_the_same_command_expands(self):
+        # The measured shape: a long scratchpad path parked in a variable, then
+        # redirected through. Braces and an `export` prefix are the same case.
+        for assign, ref in (("S=/s/scratch", '"$S/w.log"'),
+                            ("export S=/s/scratch", "$S/w.log"),
+                            ('S="/s/scratch"', '"${S}/w.log"')):
+            self.assertEqual(
+                hook._watcher_redirect_path(
+                    f'cd /w/repo\n{assign}\n'
+                    f'bash "/p/pr-sentinel-watch.sh" 42 > {ref} 2>&1',
+                    "/session/cwd"),
+                "/s/scratch/w.log", assign)
+
+    def test_variable_assigned_after_the_redirect_does_not_expand(self):
+        self.assertIsNone(hook._watcher_redirect_path(
+            'bash "/p/pr-sentinel-watch.sh" 42 > "$S/w.log" 2>&1\nS=/s/scratch',
+            "/session/cwd"))
+
+    def test_variable_assigned_from_another_variable_is_declined(self):
+        # A value the hook cannot expand is not a literal, so nothing it builds
+        # is a path — half-expanding it would read the wrong file.
+        self.assertIsNone(hook._watcher_redirect_path(
+            'S=$HOME/scratch\nbash "/p/pr-sentinel-watch.sh" 42'
+            ' > "$S/w.log" 2>&1', "/session/cwd"))
+
+    def test_single_quoted_dollar_is_a_filename_not_a_variable(self):
+        # Single quotes suppress expansion in the shell too, so there is nothing
+        # to resolve `$S` against and the route is declined.
+        self.assertIsNone(hook._watcher_redirect_path(
+            "S=/s/scratch\nbash \"/p/pr-sentinel-watch.sh\" 42"
+            " > '$S/w.log' 2>&1", "/session/cwd"))
+
+    def test_relative_target_from_a_variable_resolves_against_the_cwd(self):
+        self.assertEqual(
+            hook._watcher_redirect_path(
+                'D=logs\nbash "/p/pr-sentinel-watch.sh" 42 > "$D/w.log" 2>&1',
+                "/session/cwd"),
+            "/session/cwd/logs/w.log")
 
     def test_no_redirect_and_no_watcher_are_declined(self):
         self.assertIsNone(hook._watcher_redirect_path(
@@ -936,6 +982,25 @@ class NeedsWatcherLogic(unittest.TestCase):
                 *created_pr(42), *launch,
                 task_notification("toolu_w", outfile=task_out),
             ]), {"42"})
+
+    def test_closed_report_through_a_variable_redirect_concludes(self):
+        # The measured defect (pr-sentinel 0.10.0): the watcher reported the PR
+        # MERGED into a log the launch named as `"$S/sentinel.log"`, the hook
+        # declined the unexpanded path, found no marker in the echo-only task
+        # output, and blocked the stop over a PR that was already finished.
+        with real_outfile("EXIT=0\n") as task_out, \
+                real_outfile("PR-SENTINEL EVENT: closed\nPR: 42\n"
+                             "State: MERGED\n") as log:
+            directory, name = os.path.split(log)
+            self.assertEqual(needs([
+                *created_pr(42),
+                assistant_bash(
+                    f'S={directory}\n'
+                    f'bash "/opt/plugins/pr-sentinel/scripts/pr-sentinel-watch.sh"'
+                    f' 42 > "$S/{name}" 2>&1', "toolu_w", background=True),
+                background_result("toolu_w"),
+                task_notification("toolu_w", outfile=task_out),
+            ]), set())
 
     def test_appended_redirect_log_is_not_read(self):
         # `>>` keeps run 1's header at the top of the file for ever, so the
