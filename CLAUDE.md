@@ -84,8 +84,9 @@ response.
 - Stdlib only — no third-party deps. Runs on whatever `python3` is on PATH.
 - **Fail open**: on any parsing uncertainty the hook emits nothing (defers).
   It must never break a session. `PR_SENTINEL_DEBUG=1` re-raises for debugging.
-- The hook stays **purely local** — no network calls, no reading PR text beyond
-  echoing back a URL the command already printed.
+- The hooks stay **local except for the overlap check**, which runs `gh pr list`
+  / `gh pr diff` (`pr_sentinel_overlap.py`). Everything else makes no network
+  call and reads no PR text beyond echoing back a URL the command printed.
 
 ## Security principles
 
