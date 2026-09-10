@@ -61,7 +61,8 @@ process table, writes nothing, and never touches the PR body or comment stream
     watcher's own output — `… pr-sentinel-watch.sh 42 > w42.log 2>&1` — leaves
     that task output file holding only the echoed exit code, so the report is
     read from the redirect target instead; the path comes from the launch's own
-    command string, the same model-authored source the create route reads.
+    command string, the same model-authored source the create route reads, and
+    a `$VAR` in it resolves against a literal that command assigned earlier.
 
 We cannot verify check status locally (that needs a network call), so "checks
 still pending" is approximated as "owned, not handed off, unwatched". The block
@@ -209,9 +210,22 @@ _NEEDLES = tuple(set(
 
 
 # The redirect on the same simple command as a `gh pr create`: `> out.log`,
-# `>> out.log`, `&> out.log`. A target carrying `$` or a backtick is left alone —
-# the hook cannot expand it, and guessing would read the wrong file.
-_REDIRECT_RE = re.compile(r"""(?:&|\d)?>>?\s*("[^"$`]+"|'[^'$`]+'|[^\s;&|<>$`]+)""")
+# `>> out.log`, `&> out.log`. A backtick in the target is left alone — the hook
+# cannot run a substitution, and guessing would read the wrong file. `$` is
+# captured and resolved against `_ASSIGN_RE` below.
+_REDIRECT_RE = re.compile(r"""(?:&|\d)?>>?\s*("[^"`]+"|'[^'`]+'|[^\s;&|<>`]+)""")
+
+# A `NAME=<literal>` assignment, which is what a redirect target built from a
+# variable expands against: sessions routinely park a long scratchpad path in
+# one and redirect through it (`S=/tmp/…/scratchpad`, then `… > "$S/w.log"`),
+# and refusing that shape left an already-merged PR blocking the stop. Only
+# a plain literal value counts — one carrying `$` or a backtick is skipped, so
+# nothing half-expanded ever becomes a path.
+_ASSIGN_RE = re.compile(
+    r"""(?:^|[\s;&|(])([A-Za-z_][A-Za-z0-9_]*)=("[^"$`]*"|'[^'`]*'|[^\s;&|<>$`]*)""")
+
+# `$VAR` / `${VAR}` inside a redirect target.
+_VAR_RE = re.compile(r'\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?')
 
 # A `cd` to a literal path earlier in the same command, which is what a relative
 # redirect target resolves against (`cd /path/to/repo && gh pr create … > o.log`).
@@ -231,6 +245,22 @@ def _unquote(token):
     return token.strip().strip('"\'')
 
 
+def _expand_vars(token, command_prefix):
+    """`token` with every `$VAR`/`${VAR}` replaced by the literal that `VAR` was
+    assigned earlier in the SAME command string (last assignment wins), or
+    `None` if any `$` survives — an inherited environment variable, a
+    substitution, or a name never assigned here. Only the command the harness
+    recorded is consulted, so the expansion reads a path the model wrote, never
+    the hook's own environment."""
+    assigned = {}
+    for m in _ASSIGN_RE.finditer(command_prefix):
+        value = _unquote(m.group(2))
+        if value:
+            assigned[m.group(1)] = value
+    out = _VAR_RE.sub(lambda m: assigned.get(m.group(1), m.group(0)), token)
+    return None if '$' in out else out
+
+
 def _redirect_target(command, cd_before, segment_from, cwd, appends_ok=True):
     """The absolute path the simple command running at `segment_from` sent its
     output to, or None. Only that command's own segment is considered, so an
@@ -246,6 +276,14 @@ def _redirect_target(command, cd_before, segment_from, cwd, appends_ok=True):
     if not appends_ok and '>>' in rm.group(0):
         return None
     target = _unquote(rm.group(1))
+    if '$' in target:
+        # Single quotes suppress expansion in the shell, so a `$` inside them is
+        # part of the filename and there is nothing here to resolve it against.
+        if rm.group(1).startswith("'"):
+            return None
+        target = _expand_vars(target, command[:segment_from + rm.start(1)])
+        if target is None:
+            return None
     if not target or target.startswith('/dev/'):
         return None
     if target.startswith('~'):
@@ -732,8 +770,9 @@ def build_reason(prs, urls=None):
         f'--watch`, `gh run watch`, or a sleep loop. Command'
         f'{"s" if len(prs) > 1 else ""}:\n{commands}\n'
         f'Launch it as printed: a redirect (`> log 2>&1`) moves the watcher\'s '
-        f'report out of the task output this hook reads, and only a literal '
-        f'redirect path — not one built from a variable — is followed there. '
+        f'report out of the task output this hook reads, and only a redirect '
+        f'path this hook can resolve — a literal, or a variable assigned a '
+        f'literal in the same command — is followed there. '
         f'When the watcher wakes you, act on the single reported event, push, '
         f'and relaunch it. If you have already handed this PR to a human for '
         f'merge review, you may stop. Never auto-merge.'

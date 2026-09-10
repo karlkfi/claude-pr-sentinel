@@ -254,10 +254,13 @@ with the `Read` tool or a Bash `cat`/`tail`. A launch that redirected the
 watcher's output away from that file — `… pr-sentinel-watch.sh 42 > w42.log
 2>&1`, so a backgrounded call can carry its exit status out — leaves it holding
 only the echoed code, so the report is read from the redirect target instead.
-Truncating redirects to a literal path only: `>>` keeps the first run's header
-at the top of the file for ever, and a target built from a variable is one the
-hook cannot expand. Throughout: **no network call, no process table, and never
-the PR body or comments** (see
+Truncating redirects only: `>>` keeps the first run's header at the top of the
+file for ever. The path may be a literal, or a variable the same command
+assigned a literal to (`S=/tmp/…` then `… > "$S/w.log"` — the shape a long
+scratchpad path invites); anything else, an inherited environment variable or a
+command substitution, the hook cannot resolve, and it declines rather than
+guess. Throughout: **no network call, no process table, and never the PR body
+or comments** (see
 [Security invariants](#security-invariants)). It respects `stop_hook_active` so it
 blocks once and then lets the stop proceed.
 
