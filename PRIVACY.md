@@ -98,7 +98,12 @@ report).
   - the PR's check results (`gh pr checks`);
   - a failing check's workflow run — its conclusion, and its workflow id and
     that workflow's latest completed run on the **base branch**, to tell a
-    failure the PR caused from one it inherited — only on a failure;
+    failure the PR caused from one it inherited — only on a failure. Of that
+    base run the report names its id, head commit, workflow **file** (never a
+    `run-name:` expression's rendered title, which can interpolate a commit
+    message), conclusion, and how long ago it started. The age is read as a
+    difference computed inside the query, so no timestamp itself reaches the
+    watcher;
   - a *pending* check's workflow run — its workflow id, and how long that
     workflow's latest **successful** run on the base branch took, so a poll
     never sleeps past the expected end of the run. Only the two timestamps'

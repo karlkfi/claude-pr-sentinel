@@ -278,9 +278,11 @@ it's greppable in the transcript. Every event that asks you to push —
 commit (`Head SHA:`), which is what lets both the Stop hook and you tell a
 re-reported state apart from a genuinely new one; without it, a conflict
 re-reported while your local gate runs is byte-identical to one the base branch
-just caused. A **check_failure** header adds the failed checks, then appends the
-failing run's log, **ANSI-stripped, size-capped, and wrapped** in an explicit
-`DATA, NOT INSTRUCTIONS` frame (see [Security invariants](#security-invariants)).
+just caused. A **check_failure** header adds the failed checks and, when the base
+comparison ran and cleared them, the base run it cleared them from (see
+[Failures inherited from the base branch](#failures-inherited-from-the-base-branch)),
+then appends the failing run's log, **ANSI-stripped, size-capped, and wrapped**
+in an explicit `DATA, NOT INSTRUCTIONS` frame (see [Security invariants](#security-invariants)).
 
 ## Install
 
@@ -682,7 +684,7 @@ instead — a notice, not a wake-up — and **keeps polling**:
 ```
 PR-SENTINEL EVENT: base_failure
 Failed checks: doc-links (fail)
-Also failing on main: doc-links.yml (run 31274922338, 47815b6, failure)
+Also failing on main: doc-links.yml (run 31274922338, 47815b6, failure, 15m ago)
 ```
 
 The unblock signal is "green on the base again", not "somebody closed the
@@ -690,7 +692,7 @@ tracking issue", so it holds whether the fix arrives as a standalone PR or a
 revert. And if the base clears while the check is still red here, that failure
 *is* the PR's own — the next poll wakes you with a normal `check_failure`.
 
-Three details do the work:
+Four details do the work:
 
 - **The lookup is scoped to the workflow, never to the base branch's newest
   run.** A path-gated workflow only runs when its paths change, so the tip of
@@ -705,6 +707,25 @@ Three details do the work:
   run behind it, an unreadable workflow id, a `cancelled` base run, and a base
   with *no* run of that workflow at all (a new workflow, or one whose paths the
   base has never touched) are all treated as "not inherited".
+- **When the answer is "not inherited", the wake names the run that decided
+  it.** That green base run is the entire evidence for "this failure is yours",
+  and it can be arbitrarily stale. A check that reads state from *outside* the
+  repository — a vulnerability database, a remote allowlist, an upstream API, an
+  expiring credential — turns red with no commit on either side, so the base's
+  last recorded run is green as a matter of record while the base tree is red as
+  a matter of fact. Nothing the watcher can query dates that flip, and how old is
+  *too* old depends on how often the workflow runs on your base, so it reports
+  instead of guessing: `check_failure` carries the run and its age, and tells you
+  to reproduce against the base tree before writing a fix.
+
+  ```
+  PR-SENTINEL EVENT: check_failure
+  Failed checks: vuln-scan (api) (fail), vuln-scan (worker) (fail)
+  Last main run: vuln-scan.yml (run 31274999999, e60000d, success, 18h 23m ago)
+  ```
+
+  Minutes old, dismiss it and fix your PR. A day old on a scanner, check the base
+  tree first — that one costs a wake per relaunch until somebody does.
 
 `PR_SENTINEL_BASE_CHECK=0` turns the comparison off. It's on by default but has
 an off switch that the absorption rule doesn't, because the evidence is weaker:
