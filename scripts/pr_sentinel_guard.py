@@ -281,6 +281,38 @@ def is_pr_create(command):
     return any(_is_gh_pr_create(group) for group in simple_commands(command))
 
 
+def _pr_create_base(group):
+    """The `--base` this create declares, or ''. `pflag` accepts four spellings
+    and `gh` inherits all of them: `--base x`, `--base=x`, `-B x`, `-Bx`."""
+    rest = _strip_env_prefix(list(group))[1:]
+    for i, arg in enumerate(rest):
+        if arg.startswith('--base='):
+            return arg[len('--base='):]
+        if arg.startswith('-B') and not arg.startswith('--') and len(arg) > 2:
+            return arg[2:]
+        if arg in ('--base', '-B'):
+            nxt = rest[i + 1] if i + 1 < len(rest) else ''
+            return '' if nxt.startswith('-') else nxt
+    return ''
+
+
+def pr_create_base(command):
+    """The branch a `gh pr create` says it targets, or '' when it says nothing.
+
+    On a stacked branch this is the parent PR's head rather than the default
+    branch, and the command is the only place that fact is written down — the
+    repo's own refs cannot tell a stack from an ordinary branch. Read from the
+    same simple command that matched the create, so a `--base` belonging to
+    some other command in the chain is not borrowed.
+    """
+    for group in simple_commands(command):
+        if _is_gh_pr_create(group):
+            base = _pr_create_base(group)
+            if base:
+                return base
+    return ''
+
+
 # `gh` in command position: at the start, after whitespace or a shell operator,
 # or opening a substitution (`$(gh …)`, `` `gh …` ``) — which the tokenizer
 # hands back as one opaque token, so this is matched on the raw string. An
@@ -439,7 +471,8 @@ def run(data):
     # machine with no `gh`, no credentials, or a base ref that won't resolve
     # yields no hits and the create proceeds.
     if overlap.enabled() and not overridden and is_pr_create(command):
-        hits = overlap.overlapping_prs(data.get('cwd'))
+        hits = overlap.overlapping_prs(data.get('cwd'),
+                                       pr_create_base(command))
         if hits:
             print(json.dumps({'hookSpecificOutput': {
                 'hookEventName': 'PreToolUse',

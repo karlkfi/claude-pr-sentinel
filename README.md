@@ -149,6 +149,19 @@ do not. The false-positive direction is the one that matters — an overlap
 reported where there is none sends you to fold a branch that was fine — so a
 shared path with no shared range is silent.
 
+**A stacked branch is read from its own base.** A branch built on another open
+PR carries that PR's hunks by construction, so numbering it from the default
+branch would collide it with its own parent on lines it never touched — every
+stacked create denied, on the one case that is not the duplicate-PR mistake.
+The `--base` on your `gh pr create` is what settles it: declare it and the
+branch is numbered from there, its parent is skipped as inherited work rather
+than duplicated, and every other open PR is still checked. Declare no base and
+nothing changes — a create naming none targets the default branch, so the PR it
+opens really does carry the parent's commits. If that parent has since been
+rebased and you have not restacked onto it, the two sides are numbered in
+different pre-images and no comparison between them means anything, so the
+check declines outright rather than guess.
+
 This is the one part of the hooks that **talks to GitHub**: `gh pr list` for the
 open PRs and their paths, then `gh pr diff` for at most three of them, and only
 ones already sharing a path. It reads code, never prose — no PR body, no
@@ -514,7 +527,7 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_AUTOALLOW` | (on) | auto-approve the plugin's own watcher launch so it isn't prompted by the base Bash permission; `0`/`false`/empty keeps the prompt (see below) |
 | `PR_SENTINEL_OVERLAP_ENABLED` | (on) | deny a `gh pr create` whose branch edits lines an open PR already changes; `false`/`0`/empty turns the check off, and with it the only GitHub query any hook makes (see [Overlapping pull requests](#overlapping-pull-requests)) |
 | `PR_SENTINEL_OVERLAP_IGNORE` | (unset) | comma-separated glob patterns the overlap check discounts — for a file every branch edits by construction, e.g. `CHANGELOG.md,docs/roadmap.md` |
-| `PR_SENTINEL_BASE_REF` | (`origin/HEAD`, else `origin/main`) | the ref the overlap check forks this branch from when computing its changed lines |
+| `PR_SENTINEL_BASE_REF` | (`origin/HEAD`, else `origin/main`) | the ref the overlap check forks this branch from when computing its changed lines. One value for every branch in the repo, so a `--base` on the `gh pr create` itself wins over it — that is the only place a [stack](#overlapping-pull-requests) is written down |
 | `PR_SENTINEL_DISABLE` | (unset) | `1` disables the PostToolUse nudge, the Stop backstop, and the watcher-launch auto-allow |
 | `PR_SENTINEL_SESSIONS_ROOT` | (platform default) | overrides the session-store path the [migration helper](#migrating-from-desktop-auto-fix) scans (same as its `--root`) |
 | `PR_SENTINEL_ASSUME_APP_QUIT` | (unset) | `1` asserts the desktop app is quit, so the migration helper's `--apply` skips live-app detection (use only after quitting it) |
@@ -929,7 +942,10 @@ Four things it reports, and how to read them:
   report on itself — an override makes it defer, and a defer is silence, so the
   count is read off the commands sessions ran. Read it against the denies: an
   override tally near the deny count means the escape hatch is doing the guard's
-  job.
+  job. It falls for two different reasons, though, and they read alike: sessions
+reaching for the hatch less often, and the guard no longer firing where it
+should not have. Recognising a stacked create was the second kind — a three-PR
+stack used to spend one override per PR.
 
 Nudges that name no PR number (a branch push where the hook could not resolve
 one) are counted separately and left out of the follow-through rate, rather than
