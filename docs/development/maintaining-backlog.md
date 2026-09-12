@@ -112,10 +112,11 @@ hook itself is what changed.
 CI runs the same lint on the pull request's **merge result** —
 `actions/checkout` resolves `refs/pull/N/merge` — which is the only place a
 defect that exists solely in the merged set is visible. It also runs
-`queue.py claims`, so an ID a branch adds without claiming it is caught, and
-prints the ordered backlog to the job summary. The pre-commit hook cannot stand
-in for either: it sees one branch's files, and `git rebase --continue` skips it
-entirely.
+`queue.py claims`, which catches an ID a branch adds without a claim, and one
+that re-files work this repo already completed — a completed row is deleted, so
+history holds the only record that the ID was spent. And it prints the ordered
+backlog to the job summary. The pre-commit hook cannot stand in for either: it
+sees one branch's files, and `git rebase --continue` skips it entirely.
 
 ## Reading the backlog
 
