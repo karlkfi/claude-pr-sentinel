@@ -812,6 +812,7 @@ emit_ready() {
 	report_header ready
 	echo "State: OPEN"
 	echo "mergeStateStatus: ${MERGE}"
+	echo "Head SHA: ${HEAD_SHA}"
 	echo
 	echo "All checks are green and the PR has no merge conflict. Nothing left to"
 	echo "babysit. Next action: hand back to a human for merge review. Do NOT"
@@ -828,6 +829,7 @@ notice_ready_watching() {
 	report_header ready_watching
 	echo "State: OPEN"
 	echo "mergeStateStatus: ${MERGE}"
+	echo "Head SHA: ${HEAD_SHA}"
 	echo
 	echo "All checks are green and the PR has no merge conflict. Hand it back to a"
 	echo "human for merge review; do NOT auto-merge."
@@ -926,6 +928,7 @@ emit_closed() {
 	lower=$(printf '%s' "$STATE" | tr '[:upper:]' '[:lower:]')
 	report_header closed
 	echo "State: ${STATE}"
+	echo "Head SHA: ${HEAD_SHA}"
 	echo
 	echo "The PR was ${lower}. The watcher is done; no further action needed."
 	exit 0
@@ -935,6 +938,7 @@ emit_timeout() {
 	report_header timeout
 	echo "State: ${STATE:-OPEN}"
 	echo "mergeStateStatus: ${MERGE:-UNKNOWN}"
+	echo "Head SHA: ${HEAD_SHA:-UNKNOWN}"
 	echo
 	echo "The watch budget (${TIMEOUT}s) elapsed without a terminal event."
 	if (( READY_REPORTED == 1 )); then
@@ -971,6 +975,15 @@ emit_timeout() {
 emit_error() {
 	report_header error
 	echo "Detail: $1"
+	# Unlike every other emitter, this one can fire with no successful read
+	# behind it: the query that would have named the head is the one that
+	# failed. A blank or stale value would read as a head somebody confirmed,
+	# so say which of the two this is instead.
+	if [[ -n "${HEAD_SHA:-}" ]]; then
+		echo "Head SHA: ${HEAD_SHA} (last successful read; NOT confirmed current)"
+	else
+		echo "Head SHA: none read — every query for this PR failed"
+	fi
 	echo
 	echo "Next action: pr-sentinel could not query GitHub for this PR. This is a"
 	echo "permanent failure (auth or an unresolvable PR) or transient failures that"
