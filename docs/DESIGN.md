@@ -179,11 +179,15 @@ followed by human/agent-readable fields (PR number, state, `mergeStateStatus`,
 the head commit `Head SHA:`, the failing check names) and a recommended next
 action. `Head SHA:` sits in the header, above the CI-log excerpt, so the Stop
 hook can trust it (see the dampening note below) — a copy planted inside the
-excerpt cannot be mistaken for it. Every event whose next action is "push"
-carries it, not just `check_failure`: without it two `conflict` reports are
+excerpt cannot be mistaken for it. Every report carries it, not just
+`check_failure`, for two separate reasons. Dampening needs it on the events
+whose next action is "push": without it two `conflict` reports are
 byte-identical whether the base moved or the session is mid-gate on a heal it
-already committed, which leaves neither the hook nor a human reading the outputs
-afterwards able to tell them apart.
+already committed. And every report needs it to date itself — `ready` most of
+all, since that is the one handed back as a verdict, so a green read at a head a
+push has already replaced is the one that costs something. `error` is the
+exception the field admits: it can fire with no successful read behind it, so it
+names the last head it read and marks it unconfirmed, or says none was read.
 
 Before a check failure is reported at all, the watcher asks GitHub whether the
 failure actually blocks anything. A job marked `continue-on-error: true` fails

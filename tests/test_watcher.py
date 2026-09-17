@@ -295,6 +295,58 @@ class WatcherCase(unittest.TestCase):
             self.assertIn(f"PR-SENTINEL EVENT: {event}", out)
             self.assertIn("Head SHA: abc1234def", out)
 
+    def test_ready_reports_head_sha(self):
+        """Q39: `ready` is the report a session acts on hardest — it hands the
+        PR back for merge — and it carried no commit, so two watchers on the
+        same PR at different heads emitted byte-identical reports and a green
+        verdict taken before a push read as one taken after it. The head is
+        already in the watcher's query and in scope here: no extra GitHub
+        read."""
+        rc, out, _ = self.run_watcher({
+            "pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
+            "pr_checks": "pass\tbuild\thttps://github.com/o/r/actions/runs/11/job/1\n",
+        })
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: ready", out)
+        self.assertIn("Head SHA: abc1234def", out)
+
+    def test_closed_event_reports_head_sha(self):
+        """A merged PR's head is the commit that landed; a closed one's is the
+        last that was ever proposed. Either is what a session writes down when
+        it records the outcome."""
+        rc, out, _ = self.run_watcher(
+            {"pr_view": "MERGED\tUNKNOWN\tmain\tabc1234def\n"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: closed", out)
+        self.assertIn("Head SHA: abc1234def", out)
+
+    def test_timeout_reports_head_sha(self):
+        """Timeout hands back a PR still in flight, and the next session's first
+        question is whether the state described is the head it now sees."""
+        rc, out, _ = self.run_watcher(
+            {"pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
+             "pr_checks": "pending\tbuild\tlink\n"},
+            env={"PR_SENTINEL_TIMEOUT": "3"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+        self.assertIn("Head SHA: abc1234def", out)
+
+    def test_ready_watching_notice_reports_head_sha(self):
+        """The notice claims the same green as `ready`, so it dates itself the
+        same way. Asserted inside the notice's own region: the `timeout` that
+        ends the same run now prints a head too, so a whole-output search would
+        pass on either one."""
+        rc, out, _ = self.run_watcher(
+            {"pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
+             "pr_checks": "pass\tbuild\tlink\n"},
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed", "PR_SENTINEL_TIMEOUT": "3"},
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: ready_watching", out)
+        notice = out.split("PR-SENTINEL EVENT: ready_watching", 1)[1] \
+                    .split("PR-SENTINEL EVENT: timeout", 1)[0]
+        self.assertIn("Head SHA: abc1234def", notice)
+
     def test_heal_mode_unrecognized_falls_back_to_rebase(self):
         """Any unrecognised PR_SENTINEL_HEAL value fails safe to the rebase default."""
         rc, out, _ = self.run_watcher(
@@ -1480,6 +1532,57 @@ class WatcherCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("PR-SENTINEL EVENT: error", out)
         self.assertIn("transient", out)
+
+    def test_error_event_says_no_head_was_ever_read(self):
+        """`error` is the one emitter that can fire with no successful read
+        behind it — the query that would have named the head is what failed. It
+        must say so, not print a blank that reads as a head somebody looked
+        at."""
+        gh = textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -u
+            case "${1:-}:${2:-}" in
+              auth:status)
+                echo "You are not logged into any GitHub hosts." >&2
+                exit 1 ;;
+              *) exit 1 ;;
+            esac
+            """
+        )
+        rc, out, _ = self._run_with_gh(gh, env={"PR_SENTINEL_GH_RETRY_HORIZON": "60"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: error", out)
+        self.assertIn("Head SHA: none read", out)
+
+    def test_error_event_marks_an_earlier_head_as_unconfirmed(self):
+        """When an earlier poll DID read a head, naming it is worth more than
+        withholding it — but it is the head as of that poll, not now, and the
+        report has to say which. A bare `Head SHA:` line here would claim the
+        failed query's answer."""
+        gh = textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -u
+            case "${1:-}:${2:-}" in
+              auth:status) exit 0 ;;
+              pr:view)
+                c="$GH_STUB_DIR/.c"; n=0; [[ -f "$c" ]] && n=$(cat "$c")
+                n=$((n + 1)); echo "$n" > "$c"
+                if (( n == 1 )); then
+                  printf 'OPEN\\tCLEAN\\tmain\\tabc1234def\\thttps://github.com/o/r/pull/7\\n'
+                  exit 0
+                fi
+                echo "HTTP 503: server error" >&2; exit 1 ;;
+              *) exit 0 ;;
+            esac
+            """
+        )
+        rc, out, _ = self._run_with_gh(gh, env={"PR_SENTINEL_GH_RETRY_HORIZON": "2"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: error", out)
+        self.assertIn("Head SHA: abc1234def", out)
+        self.assertIn("NOT confirmed current", out)
 
     # -- poll pacing while checks are pending ---------------------------------
     # See docs/plan/adaptive-poll-interval.md. These use the virtual clock, so

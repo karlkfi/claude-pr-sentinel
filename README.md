@@ -302,12 +302,14 @@ needed:
 | checks still pending | *(keep polling, paced by how long they've been running)* | — |
 
 Every event report starts with a stable `PR-SENTINEL EVENT: <type>` line, so
-it's greppable in the transcript. Every event that asks you to push —
-**check_failure**, **conflict**, **behind**, **dequeued** — carries the head
-commit (`Head SHA:`), which is what lets both the Stop hook and you tell a
-re-reported state apart from a genuinely new one; without it, a conflict
+it's greppable in the transcript. Every report names the head commit
+(`Head SHA:`), so it dates itself — a **ready** from a watcher armed before your
+last push is otherwise byte-identical to one that covers it, and a **conflict**
 re-reported while your local gate runs is byte-identical to one the base branch
-just caused. A **check_failure** header adds the failed checks and, when the base
+just caused. That field is also what the Stop hook dampens on. **error** is the
+one exception: the query that would have named the head is what failed, so it
+names the last head it read and marks that reading as not current, or says none
+was ever read. A **check_failure** header adds the failed checks and, when the base
 comparison ran and cleared them, the base run it cleared them from (see
 [Failures inherited from the base branch](#failures-inherited-from-the-base-branch)),
 then appends the failing run's log, **ANSI-stripped, size-capped, and wrapped**
