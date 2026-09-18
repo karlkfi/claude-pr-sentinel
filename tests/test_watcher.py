@@ -734,25 +734,20 @@ class WatcherCase(unittest.TestCase):
             "run_log": "boom\n",
         }
 
-    def relaunch(self, first, second=None, state=None, env=None, presleep=0,
-                 **kw):
+    def relaunch(self, first, second=None, state=None, env=None, **kw):
         """Run the watcher twice over one shared state dir, as two launches on
         one PR do. Returns both (rc, stdout, stderr) triples.
 
         The scenario dir is fresh each time — the second run is a new process
         with its own stub counters, which is exactly what a relaunch is. Only
-        the record survives, because only that is on disk. `presleep` waits
-        real seconds between the two, for the one case whose subject is how old
-        the record has become.
+        the record survives, because only that is on disk.
         """
         state = state or tempfile.mkdtemp(prefix="pr-sentinel-state-")
         shared = {"PR_SENTINEL_STATE_DIR": state}
         shared.update(env or {})
-        one = self.run_watcher(first, env=shared, **kw)
-        if presleep:
-            time.sleep(presleep)
-        return one, self.run_watcher(
-            second if second is not None else first, env=shared, **kw)
+        return (self.run_watcher(first, env=shared, **kw),
+                self.run_watcher(second if second is not None else first,
+                                 env=shared, **kw))
 
     def test_relaunch_over_the_same_failure_notices_instead_of_waking(self):
         """The motivating case. A session told the failure is not its own has no
@@ -814,16 +809,47 @@ class WatcherCase(unittest.TestCase):
         self.assertNotIn("EVENT: repeat_failure", out)
         self.assertIn("lint (fail)", out)
 
+    def _aged_record(self, age):
+        """A state dir holding one record written `age` seconds ago.
+
+        The record is constructed rather than produced by a first watcher run
+        and a real sleep. `now()` reads WHOLE seconds, so a slept 1.5s lands as
+        an integer age of 1 or 2 depending only on where the two readings fell
+        inside their own second — and at `PR_SENTINEL_DAMPEN=1` those two
+        answers sit on opposite sides of `age <= DAMPEN`. Written as a sleep
+        this passed locally and failed on CI at 3.10 and 3.11 (2026-09-18).
+        Naming the age makes the boundary the subject instead of the weather.
+        """
+        state = tempfile.mkdtemp(prefix="pr-sentinel-state-")
+        with open(os.path.join(state, "123"), "w", encoding="utf-8") as f:
+            f.write("%d\tcheck_failure\tabc1234def\tbuild (fail)\n"
+                    % (int(time.time()) - age))
+        return state
+
     def test_a_record_older_than_the_window_wakes_again(self):
         """A record must not outlive the session it was written for: tomorrow's
         session has never seen that report, and answering it with silence is the
         one way this mechanism can lose a real failure."""
-        _, (rc, out, _) = self.relaunch(
-            self._failing(), env=dict(self.SHORT_BUDGET, PR_SENTINEL_DAMPEN="1"),
-            presleep=1.5)
+        rc, out, _ = self.run_watcher(
+            self._failing(),  # two hours old, against the 3600 default
+            env=dict(self.SHORT_BUDGET,
+                     PR_SENTINEL_STATE_DIR=self._aged_record(7200)))
         self.assertEqual(rc, 0)
         self.assertIn("PR-SENTINEL EVENT: check_failure", out)
         self.assertNotIn("EVENT: repeat_failure", out)
+
+    def test_a_record_inside_the_window_still_dampens(self):
+        """The control the case above rests on. Without it, waking could mean
+        the age bound fired or could mean the record was never found at all —
+        a wrong filename reads identically. Same record, same fixtures, one
+        field different."""
+        rc, out, _ = self.run_watcher(
+            self._failing(),
+            env=dict(self.SHORT_BUDGET,
+                     PR_SENTINEL_STATE_DIR=self._aged_record(60)))
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: repeat_failure", out)
+        self.assertNotIn("EVENT: check_failure", out)
 
     def test_dampen_zero_restores_the_old_behaviour(self):
         """The documented escape from a default this change moves."""
