@@ -1424,11 +1424,15 @@ main() {
 				elif head_predates_base_green; then
 					# The base is green again and this head predates the run
 					# that proved it, so the evidence for "yours" is code this
-					# branch does not have. Terminal, and deliberately NOT
-					# dampened: unlike check_failure, whose repeat notice exists
-					# because declining a report is a legitimate stance, this
-					# one's instruction is unconditional and cheap, and a
-					# relaunch at the same head means it was not carried out.
+					# branch does not have. Terminal, and NOT recorded for the
+					# repeat dampening — a gap rather than a property, and the
+					# same one conflict/behind/dequeued already have: the Stop
+					# hook counts all four as dampenable, so a repeat quiets the
+					# block while the wake still fires. An unmoved head does say
+					# the rebase did not happen, but deferring it is a legitimate
+					# stance (a branch stacked on a parent that has not merged, a
+					# session still running its gate), so that is not the same as
+					# never having decided. Q57 carries the asymmetry.
 					emit_base_fixed "$failed_names"
 				elif repeat_of_prior_report check_failure "$failed_names"; then
 					# An earlier RUN already woke the session with this exact
