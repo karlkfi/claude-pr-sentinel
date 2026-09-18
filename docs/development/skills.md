@@ -45,8 +45,10 @@ pull request each, and carries every one to ready without merging it. Its §7
 has the orchestrator hold its own mergeability watch on each handed-off PR.
 
 Nothing in this repo invokes it. It is named here because that watch and this
-plugin's Stop hook ask overlapping questions about the same PR, which
-[`../queue/Q40.md`](../queue/Q40.md) is about.
+plugin's Stop hook ask overlapping questions about the same PR — overlapping,
+and not the same, which is why the Stop hook names such a watch in its block
+rather than counting it as coverage. See
+[A watcher that is not ours does not answer the question](../DESIGN.md#a-watcher-that-is-not-ours-does-not-answer-the-question).
 
 ## Names drift, and nothing here goes red
 

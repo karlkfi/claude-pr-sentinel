@@ -170,6 +170,84 @@ class FailOpen(unittest.TestCase):
         self.assertEqual(watchers.live_watchers(path), {"42": ["bk1"]})
 
 
+class ForeignWatchers(unittest.TestCase):
+    """A background watch this session armed that is not this plugin's. It is
+    never an ownership signal and never makes a PR watched — the Stop hook only
+    names it — so these pin what the matcher does and does not claim."""
+
+    def pr(self, command):
+        return watchers.foreign_watch_pr(command)
+
+    def scan(self, entries):
+        s = watchers.WatcherScan()
+        for e in entries:
+            s.feed(e)
+        return s
+
+    def foreign_launch(self, tool_id="toolu_f", background=True,
+                       command="python3 /s/pr-mergeability-watch.py 42"):
+        entry = launch("42", tool_id=tool_id, background=background)
+        entry["message"]["content"][0]["input"]["command"] = command
+        return entry
+
+    def test_recognises_another_tool_s_pr_watch(self):
+        self.assertEqual(
+            self.pr("python3 /skills/scripts/pr-mergeability-watch.py 42"),
+            ("42", "pr-mergeability-watch.py"))
+
+    def test_a_separated_option_value_is_not_the_pr(self):
+        # `--timeout 600` is a number and is not a PR number.
+        self.assertEqual(
+            self.pr("python3 /s/pr-mergeability-watch.py --timeout 600 42"),
+            ("42", "pr-mergeability-watch.py"))
+
+    def test_a_pr_url_resolves_to_the_number(self):
+        self.assertEqual(
+            self.pr("python3 /s/watch.py https://github.com/o/r/pull/9"),
+            ("9", "watch.py"))
+
+    def test_gh_pr_view_is_not_a_watcher(self):
+        # The negative case that keeps the matcher from firing on any
+        # backgrounded `gh` call that happens to name a PR.
+        self.assertIsNone(self.pr("gh pr view 42"))
+
+    def test_a_watch_flag_is_not_a_watcher_basename(self):
+        self.assertIsNone(self.pr("gh pr checks --watch 42"))
+
+    def test_this_plugin_s_own_watcher_is_never_foreign(self):
+        self.assertIsNone(self.pr(f'bash "{WATCHER}" 42'))
+
+    def test_a_watcher_with_no_pr_operand_resolves_nothing(self):
+        self.assertIsNone(self.pr("python3 /s/pr-mergeability-watch.py --help"))
+
+    def test_an_unparseable_command_yields_nothing(self):
+        self.assertIsNone(self.pr("python3 /s/watch.py 'unbalanced 42"))
+
+    def test_a_live_foreign_launch_is_reported_with_its_script(self):
+        scan = self.scan([self.foreign_launch(),
+                          launch_result(tool_id="toolu_f")])
+        self.assertEqual(scan.foreign(), {"42": ["pr-mergeability-watch.py"]})
+
+    def test_a_foreign_launch_is_not_an_ownership_signal(self):
+        # `pr_by_toolid` feeds the Stop hook's `owned` set, so a foreign watch
+        # on someone else's PR must stay out of it.
+        scan = self.scan([self.foreign_launch(),
+                          launch_result(tool_id="toolu_f")])
+        self.assertEqual(scan.pr_by_toolid, {})
+        self.assertEqual(scan.live(), {})
+
+    def test_a_completed_foreign_launch_is_not_live(self):
+        scan = self.scan([self.foreign_launch(),
+                          launch_result(tool_id="toolu_f"),
+                          completion(tool_id="toolu_f")])
+        self.assertEqual(scan.foreign(), {})
+
+    def test_a_foreground_foreign_run_is_not_a_watch(self):
+        scan = self.scan([self.foreign_launch(background=False),
+                          launch_result(tool_id="toolu_f")])
+        self.assertEqual(scan.foreign(), {})
+
+
 class StopHint(unittest.TestCase):
     def test_names_the_single_task_id(self):
         hint = watchers.stop_hint("42", ["bk1"])
