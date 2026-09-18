@@ -195,6 +195,7 @@ the session to launch the watcher before stopping:
 | the watcher has reported the **same** terminal event twice (`check_failure`, `conflict`, `behind`, or `dequeued` at the same head commit) | **allow + warn** — nothing has been pushed, so stop nagging; a non-blocking notice naming the event keeps the PR visible |
 | the hook already blocked over this PR once and **no watcher has been launched since** | **allow + warn** — the ask was made and not acted on; repeating it cannot help a session that has no move here |
 | a launched watcher hasn't reported completion yet (still running) | silent (already covered) |
+| another tool's PR watch is running, **no** live pr-sentinel watcher | **block once** — a foreign watch covers merge state and need not report check conclusions at all, so the ask stands; the block names the script it found rather than saying nothing is watching |
 | a launch the harness never answered with a task id (it never started) | **block once** — nothing is watching, so the pull request still needs a watcher |
 | PR handed off (watcher **terminal** `ready`/`closed`/`blocked`/`unchecked`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
 | the watcher's output ends on a `base_failure`, `ready_watching`, `blocked_watching`, or `unchecked_watching` **notice** (a watch that exited without a terminal event) | **block once** — a notice isn't a handoff; the PR is still open and unwatched |

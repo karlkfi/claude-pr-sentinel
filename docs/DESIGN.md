@@ -842,6 +842,32 @@ after a hard kill, and an immediate-exit path that wakes a session to tell it
 nothing. Neither hook needs any of that: the transcript already holds the
 answer, and a wrong answer only ever fails open.
 
+#### A watcher that is not ours does not answer the question
+
+Sessions arm other PR watches — a dispatch skill's mergeability watch, say —
+and the backstop used to tell them "no watcher is tracking it", which is false
+and reads as the hook being broken. The obvious repair is to count such a watch
+and allow the stop. That is the one option to reject: the watch measured
+against this reads `state`, `mergeStateStatus`, `baseRefName` and `headRefOid`,
+and no `statusCheckRollup` at all. It answers whether the merge went dirty and
+has no view of check conclusions, so a failing check that moves nothing else
+wakes nobody until its polling budget runs out. Counting it would silently drop
+the half of the coverage this plugin exists for.
+
+So the block still fires and only the wording changes: it names the script it
+found and asks for ours *alongside* rather than instead. That leaves the
+recognition free to be a heuristic — a script basename carrying `watch`, as a
+`.py` or `.sh` file — because nothing rests on it. A miss costs a less specific
+sentence, a wrong hit costs nothing else, and a session cannot silence the
+backstop by backgrounding something watcher-shaped. An allowlist of names, or a
+configurable one, would each have bought a coupling or a config to keep in sync
+for a decision no longer being made.
+
+A foreign watch is also deliberately **not** an ownership signal. Launching this
+plugin's watcher for a PR is taking responsibility for it; watching someone
+else's PR with another tool is not, so the two launch kinds are kept in separate
+maps and only ours feeds the owned set.
+
 ### Why fail-open in the hook, fail-safe in the watcher
 
 The hook **defers silently** (emits nothing) on any uncertainty — unparseable

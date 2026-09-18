@@ -43,7 +43,11 @@ process table, writes nothing, and never touches the PR body or comment stream
     task exits, the harness records a `<task-notification>` carrying the same
     `<tool-use-id>` and a `<status>`. A watcher is LIVE iff its launch id has no
     task-notification yet. This is a harness-generated record — untrusted CI-log
-    text cannot forge it.
+    text cannot forge it. A live background watch that is NOT this plugin's
+    watcher is read off the same launches and never answers this question: it
+    covers merge state, and need not report check conclusions at all, so the
+    block still fires and only names it, rather than telling a session that
+    armed one that nothing is watching (Q40).
   * Was the PR handed off?  -> a `gh pr merge`/`close`, or a watcher terminal
     `ready`/`closed`/`blocked` report (NOT the non-terminal `ready_watching` and
     `blocked_watching` notices a `PR_SENTINEL_WATCH_UNTIL=closed` watcher emits
@@ -737,7 +741,14 @@ def _analyze(path):
             dampened[pr] = repeated
         elif pr in asked and pr not in launched_since_ask:
             dampened[pr] = REPEAT_ASK
-    return block - set(dampened), dampened, url_by_pr
+    unwatched = block - set(dampened)
+    # A foreign watch never suppresses the block: it answers the conflict half
+    # of "is this PR watched" and may report no check conclusions at all, which
+    # is the coverage this plugin exists for (Q40). It goes to the ask so the
+    # block says what is already running rather than "nothing is".
+    foreign = {pr: scripts for pr, scripts in scan.foreign().items()
+               if pr in unwatched}
+    return unwatched, dampened, url_by_pr, foreign
 
 
 def prs_needing_watcher(path):
@@ -757,8 +768,27 @@ def watcher_command(pr, url=None):
     return f'    bash "{watcher}" {url or pr}'
 
 
-def build_reason(prs, urls=None):
-    """The block message fed back to the model."""
+def _foreign_note(foreign):
+    """The clause naming a background watch already running on a blocked PR.
+    Empty when there is none, so the ask is unchanged in the common case.
+
+    It says what this hook knows and no more: the watch is not this plugin's,
+    and nothing here can tell whether it reports check conclusions."""
+    if not foreign:
+        return ''
+    listed = '; '.join(
+        '#{} ({})'.format(pr, ', '.join(sorted(set(foreign[pr]))))
+        for pr in sorted(foreign, key=int))
+    return (f' A background watch this session launched is already running on '
+            f'{listed} — but it is not a pr-sentinel watcher, and this hook '
+            f'cannot tell whether it reports check conclusions at all, so '
+            f'launch ours alongside it rather than instead of it.')
+
+
+def build_reason(prs, urls=None, foreign=None):
+    """The block message fed back to the model. `foreign` maps a PR to the
+    non-pr-sentinel watch scripts already running on it, which the ask names so
+    a session that armed one is not told nothing is watching."""
     urls = urls or {}
     prs = sorted(prs, key=int)
     label = 'pull request #' + prs[0] if len(prs) == 1 \
@@ -766,8 +796,8 @@ def build_reason(prs, urls=None):
     commands = '\n'.join(watcher_command(p, urls.get(p)) for p in prs)
     return (
         f'{BLOCK_MARKER} with an open {label} this '
-        f'session opened or was watching, but no watcher is tracking it and CI may still be '
-        f'running. Launch the PR Sentinel watcher as a BACKGROUND task '
+        f'session opened or was watching, but no pr-sentinel watcher is tracking it and CI may still be '
+        f'running.{_foreign_note(foreign)} Launch the PR Sentinel watcher as a BACKGROUND task '
         f'(run_in_background) before you stop, so a CI failure or merge conflict '
         f'wakes this session — do NOT foreground-poll with `gh pr checks '
         f'--watch`, `gh run watch`, or a sleep loop. Command'
@@ -846,14 +876,14 @@ def run(data):
     transcript = data.get('transcript_path')
     if not transcript:
         return
-    unwatched, dampened, urls = _analyze(transcript)
+    unwatched, dampened, urls, foreign = _analyze(transcript)
     if not unwatched and not dampened:
         return  # nothing opened-and-unwatched, nothing to warn about: allow
 
     out = {}
     if unwatched:
         out['decision'] = 'block'
-        out['reason'] = build_reason(unwatched, urls)
+        out['reason'] = build_reason(unwatched, urls, foreign)
     if dampened:
         # Non-blocking notice; survives even when the stop is allowed.
         out['systemMessage'] = build_warning(dampened)

@@ -147,7 +147,11 @@ report).
   literal that same command assigned — never against the hook's own environment.
 - Also reads, from that same transcript, the harness's own record of an
   **earlier block by this hook**, so it asks about a PR once rather than on
-  every turn end. Only the harness-written copies of its own message count —
+  every turn end. From the same background-launch records it already reads, it
+  additionally notes a watch the session armed with a script that is **not**
+  this plugin's, so the block can name it. That is the same local source and no
+  new one: it inspects no process table, and such a watch never suppresses the
+  block. Only the harness-written copies of its own message count —
   it extracts nothing from your prompts or the model's replies.
 - Extracts nothing from a redirected log but a `github.com` PR URL (the
   create's) or the watcher's own report header (the launch's). It does **not**

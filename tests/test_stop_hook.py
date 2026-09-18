@@ -244,6 +244,28 @@ def analyze_urls(entries):
         os.unlink(path)
 
 
+def analyze_foreign(entries):
+    """{PR: [script basename]} for blocked PRs that already have a live watch
+    this session armed with something other than this plugin's watcher."""
+    path = write_transcript(entries)
+    try:
+        return hook._analyze(path)[3]
+    finally:
+        os.unlink(path)
+
+
+def launch_foreign_watch(pr, tool_id="toolu_fw",
+                         script="/skills/scripts/pr-mergeability-watch.py"):
+    """A background watch on `pr` armed with someone else's watcher — the shape
+    a session following the session-orchestrator skill arms alongside its PR.
+    Splat it: a started watch is two entries."""
+    return [
+        assistant_bash(f'python3 "{script}" {pr}',
+                       tool_id=tool_id, background=True),
+        background_result(tool_id),
+    ]
+
+
 class ClassifierUnit(unittest.TestCase):
     def test_pr_number_normalises(self):
         self.assertEqual(hook.pr_number("42"), "42")
@@ -1402,6 +1424,54 @@ class StopHookEndToEnd(unittest.TestCase):
                                 transcript_entries=None)
         self.assertEqual(out.strip(), "")
         self.assertEqual(rc, 0)
+
+
+class ForeignWatcherBlock(unittest.TestCase):
+    """A session that armed another tool's PR watch and no pr-sentinel watcher.
+
+    The block still fires: a foreign watch answers whether the merge went dirty
+    and need not report check conclusions at all, which is the coverage this
+    plugin exists for. What changes is that the ask names it, so a session that
+    did arm a watch is not told nothing is watching (Q40)."""
+
+    def entries(self, pr=42):
+        return created_pr(pr) + launch_foreign_watch(pr)
+
+    def test_a_foreign_watch_does_not_satisfy_the_block(self):
+        self.assertEqual(needs(self.entries()), {"42"})
+
+    def test_a_foreign_watch_alone_never_makes_the_pr_owned(self):
+        # No `gh pr create`: watching someone else's PR with another tool is
+        # not taking responsibility for it, so there is nothing to block over.
+        self.assertEqual(needs(launch_foreign_watch(42)), set())
+
+    def test_the_block_names_the_foreign_watch(self):
+        self.assertEqual(analyze_foreign(self.entries()),
+                         {"42": ["pr-mergeability-watch.py"]})
+
+    def test_a_completed_foreign_watch_is_not_named(self):
+        entries = created_pr(42) + launch_foreign_watch(42) + [
+            task_notification("toolu_fw")]
+        self.assertEqual(needs(entries), {"42"})
+        self.assertEqual(analyze_foreign(entries), {})
+
+    def test_our_own_watcher_is_never_named_as_foreign(self):
+        entries = created_pr(42) + launch_watcher(42)
+        self.assertEqual(analyze_foreign(entries), {})
+
+    def test_the_reason_says_what_is_running_and_asks_for_ours_too(self):
+        reason = hook.build_reason({"42"}, None,
+                                   {"42": ["pr-mergeability-watch.py"]})
+        self.assertIn("pr-mergeability-watch.py", reason)
+        self.assertIn("alongside it rather than instead of it", reason)
+        # Still the same ask, and still findable as a prior block on a later
+        # turn — the marker and the PR list must not move.
+        self.assertTrue(reason.startswith(hook.BLOCK_MARKER))
+        self.assertEqual(hook._prior_block_prs(
+            stop_block_record(42)), {"42"})
+
+    def test_the_reason_is_unchanged_when_nothing_foreign_is_running(self):
+        self.assertNotIn("alongside it", hook.build_reason({"42"}))
 
 
 if __name__ == "__main__":
