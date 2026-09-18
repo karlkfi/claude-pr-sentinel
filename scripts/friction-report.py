@@ -78,6 +78,7 @@ EVENT_KIND = {
     'check_failure': 'work',      # CI failed — the session has a fix to push
     'conflict':      'work',      # needs a base merge
     'behind':        'work',      # same fix, before it becomes a conflict
+    'base_fixed':    'work',      # base green, head predates it — rebase
     'dequeued':      'work',      # left the merge queue, re-enqueue owed
     'blocked':       'work',      # green but a merge requirement is unmet
     'unchecked':     'work',      # no check reported at all — verify, don't merge
