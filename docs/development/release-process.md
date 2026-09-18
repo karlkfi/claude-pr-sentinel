@@ -49,11 +49,33 @@ cheaper trade.
    ```
 
 2. **Walk the window's PRs, re-asking the PR template's questions of what
-   merged.** Each merge commit names its PR:
+   merged.** A merge commit names its PR mid-subject and a squash commit names
+   it in a trailing `(#NNN)`, so read both shapes off the first-parent walk:
 
    ```
-   git log --merges --oneline v<previous>..HEAD
+   git log --oneline --first-parent v<previous>..HEAD |
+   	sed -n -e 's/.*(#\([0-9][0-9]*\))$/\1/p' \
+   	       -e 's/^.*Merge pull request #\([0-9][0-9]*\) .*/\1/p' |
+   	sort -un | nl
    ```
+
+   Then read what it did **not** account for. Expect one line, the previous
+   release's own bump:
+
+   ```
+   git log --oneline --first-parent v<previous>..HEAD |
+   	grep -vE '\(#[0-9]+\)$|Merge pull request #[0-9]+ '
+   ```
+
+   The two commands partition the window, which is what makes an empty first
+   one readable: if the extraction breaks, the second prints the whole window
+   rather than leaving you a silent zero. `git log --merges` was the old form
+   here and cannot be trusted on either count — it printed **0** against the
+   five PRs of v0.11.0, exiting 0, and **36** against v0.9.0..v0.10.0, which
+   had 51. Cross-check the total with `gh pr list --state merged --search
+   'merged:>=<v-previous tag date>'`, reading it as a coarse net rather than as
+   the list: the search is day-granular and open-ended, so it returns PRs from
+   either side of the window as well.
 
    For every one, put the questions in
    [`.github/pull_request_template.md`](../../.github/pull_request_template.md)
