@@ -20,7 +20,10 @@ Fires on a `Bash` command the session is *about to run*. Four branches:
   redirects / substitutions / globs, `argv[1]` resolving (via realpath) to this
   plugin's own `pr-sentinel-watch.sh`, and `argv[2]` a bare positive integer or
   a `https://github.com/<owner>/<repo>/pull/<n>` URL — the two forms the watcher
-  itself accepts.
+  itself accepts. The launch may carry leading `PR_SENTINEL_*=<value>`
+  assignments, the only per-launch route to a setting like `WATCH_UNTIL` when
+  every settings file is shared; a leading assignment outside that namespace is
+  not this shape and defers (`watcher_launch_pr`).
   ANY doubt -> defer (emit nothing), never allow. Gated by
   `PR_SENTINEL_AUTOALLOW` (default on; `0`/`false`/empty disables) and off when
   `PR_SENTINEL_DISABLE=1`.
@@ -107,6 +110,18 @@ _AUTOALLOW_FORBIDDEN = set(';|&<>$`()*?[]{}\\\n\r')
 _WATCHER_PR_URL_RE = re.compile(
     r'\Ahttps://github\.com/[^/\s]+/[^/\s]+/pull/([1-9][0-9]*)/?\Z')
 
+# Leading assignments the watcher launch may carry: this plugin's OWN namespace
+# and nothing else. Deliberately not `_strip_env_prefix`, which drops any
+# assignment — that helper serves the deny path, where seeing past a prefix can
+# only widen what gets refused. Here the direction inverts: whatever survives
+# this strip runs unprompted, so a blanket strip would auto-allow
+# `BASH_ENV=evil.sh bash <watcher> N`, and bash sources BASH_ENV before the
+# script body — arbitrary code, with argv[1]'s realpath check still passing.
+# Matching the namespace by pattern rather than by an enumerated list keeps a
+# new PR_SENTINEL_* knob working without a code change; every name in it is a
+# tuning knob the watcher reads, none names a path or an executable.
+_PLUGIN_ASSIGNMENT_RE = re.compile(r'\APR_SENTINEL_[A-Z0-9_]+=')
+
 
 def _autoallow_enabled():
     """Whether the watcher-launch auto-allow is active. On by default; off when
@@ -140,12 +155,21 @@ def watcher_launch_pr(command):
     """The PR number if `command` is unambiguously `bash <own-watcher> <PR>`:
 
       * no shell operator / redirect / substitution / glob (`_AUTOALLOW_FORBIDDEN`)
-      * exactly three tokens, `argv[0]` basename `bash`
+      * after dropping leading `PR_SENTINEL_*` assignments, exactly three
+        tokens, `argv[0]` basename `bash`
       * `argv[1]` realpath-equals this plugin's own watcher script
       * `argv[2]` a bare positive integer, or a github.com PR URL
 
     Both identifier forms normalise to the number, so a URL launch and a bare
     number for the same PR are one PR to the duplicate check.
+
+    The leading assignments are this plugin's own namespace only
+    (`_PLUGIN_ASSIGNMENT_RE`): `PR_SENTINEL_WATCH_UNTIL` and friends are
+    per-launch settings with no per-launch route otherwise, since one machine
+    runs orchestrator and worker sessions that want different values and every
+    settings file is shared. A foreign assignment stops the strip where it
+    stands, so the token count then refuses the launch — including when it is
+    mixed in among recognised ones, in either order.
 
     Any doubt returns None so the caller defers rather than allowing — or, for
     the duplicate check, rather than denying."""
@@ -155,6 +179,10 @@ def watcher_launch_pr(command):
         argv = shlex.split(command)  # posix; respects quotes
     except ValueError:
         return None
+    i = 0
+    while i < len(argv) and _PLUGIN_ASSIGNMENT_RE.match(argv[i]):
+        i += 1
+    argv = argv[i:]
     if len(argv) != 3:
         return None
     if os.path.basename(argv[0]) != 'bash':
