@@ -17,14 +17,23 @@ Both directions are exercised, with the NEGATIVE direction carrying the weight:
 an overlap reported where there is none sends a session to fold a branch that
 was fine.
 
+A probe that blows `PROBE_TIMEOUT` makes the check fail open, which is correct
+and deliberate — but `overlapping_prs` flattens that to the same `[]` a genuine
+no-overlap gives, and the guard to the same silence, so it is indistinguishable
+from a pass. `Scenario.hits` refuses such a result instead of returning it, and
+`Scenario.slow_git` plants a timeout deliberately, so the fail-open has a test
+of its own rather than only ever arriving as a flake.
+
 Fixture rule: never use real PR URLs, hosts, or credentials — synthetic
 owner/repo and PR numbers exercise identical code paths with zero risk.
 """
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 from importlib import util
 from pathlib import Path
@@ -44,6 +53,23 @@ _gspec = util.spec_from_file_location("pr_sentinel_guard", GUARD_MODULE)
 guard = util.module_from_spec(_gspec)
 _gspec.loader.exec_module(guard)
 
+# Both halves of the same finding, said where each one can be read. The first
+# replaces a `JSONDecodeError` from the JSON layer, which names the symptom and
+# points at the wrong layer; the second replaces an `[] != [[7, …]]` diff, which
+# reads as the range comparison getting the answer wrong.
+GUARD_SILENT = (
+    "the guard emitted nothing, so no verdict was reached: a probe failed open "
+    "rather than finding no overlap. Under concurrent load that is a probe "
+    "blowing PROBE_TIMEOUT, which is a flake in this suite and not a defect in "
+    "the overlap logic."
+)
+PROBE_TIMED_OUT = (
+    "no verdict: a probe blew PROBE_TIMEOUT and the check failed open, so this "
+    "result is an absence of opinion rather than an answer. Timed out: %s. "
+    "Under concurrent load this is a flake in this suite, not a defect in the "
+    "overlap logic."
+)
+
 GH_STUB = textwrap.dedent(
     """\
     #!/usr/bin/env bash
@@ -55,6 +81,48 @@ GH_STUB = textwrap.dedent(
       "pr diff") [[ -f "$dir/pr_diff.$3" ]] && cat "$dir/pr_diff.$3" || exit 1 ;;
       *) exit 1 ;;
     esac
+    """
+)
+
+SLOW_STUB = textwrap.dedent(
+    """\
+    #!/usr/bin/env bash
+    # Sleep past PROBE_TIMEOUT, then hand over to the real binary. The real
+    # path is resolved at plant time, before this directory is on PATH, so
+    # this cannot re-enter itself.
+    set -u
+    sleep {seconds}
+    exec {real} "$@"
+    """
+)
+
+# `overlapping_prs` in a subprocess, so PATH and env are the real thing.
+#
+# `capture` is wrapped rather than read afterwards: a timeout is the one
+# outcome the return value cannot carry out, `overlapping_prs` flattening it
+# to the same `[]` a genuine no-overlap gives. The wrapper is what makes the
+# two separable at all, and it rests on `TIMED_OUT` being distinct from the
+# `None` a probe that never ran returns.
+PROBE = textwrap.dedent(
+    """\
+    import json, sys
+    sys.path.insert(0, {scripts!r})
+    import pr_sentinel_overlap as o
+
+    timed_out = []
+    inner = o.capture
+
+
+    def capture(argv, *args, **kwargs):
+        status, out = inner(argv, *args, **kwargs)
+        if status is o.TIMED_OUT:
+            timed_out.append(" ".join(argv[:3]))
+        return status, out
+
+
+    o.capture = capture
+    print(json.dumps({{"hits": o.overlapping_prs({cwd!r}, {base!r}),
+                       "timed_out": timed_out}}))
     """
 )
 
@@ -170,23 +238,48 @@ class Scenario:
             env.update(extra)
         return env
 
-    def hits(self, extra_env=None, base=""):
-        """`overlapping_prs` in a subprocess, so PATH and env are the real thing."""
-        code = (
-            "import json,sys;"
-            "sys.path.insert(0, %r);"
-            "import pr_sentinel_overlap as o;"
-            "print(json.dumps(o.overlapping_prs(%r, %r)))"
-            % (str(REPO / "scripts"), str(self.root), base)
-        )
+    def slow_git(self, seconds=6):
+        """Put a `git` that sleeps past `PROBE_TIMEOUT` ahead of the real one,
+        so exactly one probe crosses the cap and does so deterministically.
+
+        Only `hits` and `guard` see it — `env` is what prepends this
+        directory, and the repository setup above shells out to git with the
+        ambient environment instead, so the fixture is built at full speed.
+        """
+        real = shutil.which("git")
+        assert real, "no real git on PATH to hand over to"
+        shim = self.bin_dir / "git"
+        shim.write_text(SLOW_STUB.format(seconds=seconds, real=real),
+                        encoding="utf-8")
+        shim.chmod(0o755)
+        return shim
+
+    def hits(self, extra_env=None, base="", allow_timeout=False):
+        """`overlapping_prs`, refusing a result that is a fail-open.
+
+        A timed-out probe returns `[]`, which is what a genuine no-overlap
+        returns, so every assertion in this file — the ones expecting a hit
+        and the ones expecting silence alike — would otherwise read a probe
+        that never answered as an answer. Pass `allow_timeout` where the
+        fail-open is the thing under test.
+        """
+        code = PROBE.format(scripts=str(REPO / "scripts"),
+                            cwd=str(self.root), base=base)
         proc = subprocess.run(["python3", "-c", code], capture_output=True,
                               text=True, env=self.env(extra_env), timeout=60,
                               check=False)
         if proc.returncode != 0:
             raise AssertionError("probe failed: " + proc.stderr)
-        return json.loads(proc.stdout)
+        result = json.loads(proc.stdout)
+        self.timed_out = result["timed_out"]
+        if self.timed_out and not allow_timeout:
+            raise AssertionError(PROBE_TIMED_OUT % "; ".join(self.timed_out))
+        return result["hits"]
 
-    def guard(self, command, extra_env=None, background=False):
+    def guard_run(self, command, extra_env=None, background=False):
+        """(exit status, stdout) for the PreToolUse decision. The status is
+        separate because a fail-open has to be silent AND clean, and stdout
+        alone cannot say the second."""
         tool_input = {"command": command}
         if background:
             tool_input["run_in_background"] = True
@@ -196,7 +289,44 @@ class Scenario:
             ["python3", str(GUARD)], input=json.dumps(payload),
             capture_output=True, text=True, env=self.env(extra_env),
             timeout=60, check=False)
-        return proc.stdout
+        return proc.returncode, proc.stdout
+
+    def guard(self, command, extra_env=None, background=False):
+        return self.guard_run(command, extra_env, background)[1]
+
+
+SLEEPER = ("python3", "-c", "import time; time.sleep(30)")
+MISSING = ("pr-sentinel-no-such-binary",)
+
+
+class Capture(unittest.TestCase):
+    """The two ways `capture()` comes back with no status. Every caller here
+    flattens both to the same fail-open, which is right for the decision and
+    is why nothing downstream can report that the check stopped evaluating."""
+
+    def timed_out(self):
+        """A budget short enough to be quick, against a probe far enough over
+        it that load can only make the timeout surer to fire."""
+        return overlap.capture(SLEEPER, "", timeout=0.2)
+
+    def test_a_probe_that_ran_returns_its_status_and_stdout(self):
+        self.assertEqual(overlap.capture(("python3", "-c", "print('ok')"), ""),
+                         (0, "ok\n"))
+
+    def test_a_probe_that_never_ran_returns_none(self):
+        self.assertEqual(overlap.capture(MISSING, ""), (None, ""))
+
+    def test_a_probe_that_blew_its_budget_returns_timed_out(self):
+        self.assertEqual(self.timed_out(), (overlap.TIMED_OUT, ""))
+
+    def test_the_two_are_distinguishable(self):
+        """The load-bearing one. Both tests above still pass if `TIMED_OUT` is
+        set to `None` — each compares the status against the same constant —
+        so neither can see the regression this row exists to prevent."""
+        never, _ = overlap.capture(MISSING, "")
+        timed, _ = self.timed_out()
+        self.assertIsNot(timed, never)
+        self.assertNotEqual(timed, never)
 
 
 class HunkParsing(unittest.TestCase):
@@ -337,6 +467,27 @@ class OverlapDetection(unittest.TestCase):
         s.pr_list([(7, "other", ["app.py"])])
         s.pr_diff(7, "app.py", 44)
         self.assertEqual(s.hits(), [[7, ["app.py"], True]])
+
+    def test_a_slow_probe_is_refused_rather_than_read_as_an_answer(self):
+        """`hits` is the instrument every other test in this class trusts, so
+        it gets its own control. The first line is that control: the same
+        scenario reaches a verdict until a timeout is planted.
+
+        Both assertions after it matter, and they say different things — that
+        the fail-open really is `[]` (the shipped behaviour, which had no test),
+        and that `hits` refuses to hand that `[]` back as an answer (the defect
+        this row is about, since `[]` is also what no-overlap returns)."""
+        s = self.one_file(40)
+        s.pr_list([(7, "other", ["app.py"])])
+        s.pr_diff(7, "app.py", 40)
+        self.assertEqual(s.hits(), [[7, ["app.py"], True]])
+        s.slow_git()
+        self.assertEqual(s.hits(allow_timeout=True), [],
+                         "a timed-out probe must fail open, not raise")
+        self.assertTrue(s.timed_out, "and the timeout must be recorded")
+        with self.assertRaises(AssertionError) as caught:
+            s.hits()
+        self.assertIn("PROBE_TIMEOUT", str(caught.exception))
 
     def test_a_failed_diff_fetch_falls_back_to_the_shared_path(self):
         """No `pr_diff.7` fixture: the fetch fails, so the entry rests on the
@@ -570,6 +721,7 @@ class GuardDeny(unittest.TestCase):
         self.s.pr_diff(7, "app.py", 40)
 
     def deny_reason(self, out):
+        self.assertNotEqual(out, "", GUARD_SILENT)
         hso = json.loads(out)["hookSpecificOutput"]
         self.assertEqual(hso["hookEventName"], "PreToolUse")
         self.assertEqual(hso["permissionDecision"], "deny")
@@ -635,8 +787,53 @@ class GuardDeny(unittest.TestCase):
             self.assertEqual(self.s.guard(cmd), "", cmd)
 
     def test_a_non_overlapping_create_is_silent(self):
+        """Deny first over the overlapping fixture, because that is what makes
+        the silence below attributable: it proves the probes reach git and the
+        `gh` stub on this machine, right now. Without it the assertion passes
+        just as readily for a probe that timed out and never compared
+        anything."""
+        self.deny_reason(self.s.guard("gh pr create --fill"))
         self.s.pr_diff(7, "app.py", 70)
         self.assertEqual(self.s.guard("gh pr create --fill"), "")
+
+    def test_an_empty_verdict_names_the_fail_open(self):
+        """`deny_reason` only speaks on failure, so its message needs a test of
+        its own or nothing ever reads it. Without this the JSON layer raises
+        `JSONDecodeError: Expecting value: line 1 column 1 (char 0)`, which
+        names the symptom and points a reader at the wrong layer."""
+        with self.assertRaises(AssertionError) as caught:
+            self.deny_reason("")
+        self.assertIn("no verdict was reached", str(caught.exception))
+
+    def test_a_slow_probe_fails_open_silently(self):
+        """The check's whole safety argument, which had no test at all: a probe
+        that cannot answer in time must cost a missed catch and never a blocked
+        create.
+
+        `setUp`'s fixture overlaps, so the deny on the first line is the
+        control — the same scenario reaches a verdict until the timeout is
+        planted, which is what rules out the silence below being an ordinary
+        no-overlap.
+
+        The elapsed assertion is what rules out the *other* way to be silent.
+        Nothing here can read `TIMED_OUT`, the guard being a subprocess, so a
+        shim that failed to hand over to the real git would make the probe
+        never run, return `(None, '')`, and produce this same silence and this
+        same exit status. A probe that never ran comes back at once; only one
+        that blew the cap can take it. The bound is the subject's own, so the
+        two cannot drift apart."""
+        self.deny_reason(self.s.guard("gh pr create --fill"))
+        self.s.slow_git()
+        started = time.monotonic()
+        status, out = self.s.guard_run("gh pr create --fill")
+        elapsed = time.monotonic() - started
+        self.assertEqual(out, "", "a probe that timed out must not deny")
+        self.assertEqual(status, 0, "the guard must exit clean, not crash")
+        self.assertGreaterEqual(
+            elapsed, overlap.PROBE_TIMEOUT,
+            "returned in %.2fs, under the %ss cap: the probe never ran rather "
+            "than timing out, so this silence is not the one under test"
+            % (elapsed, overlap.PROBE_TIMEOUT))
 
     def test_the_poll_deny_still_fires(self):
         """The new branch must not have displaced the one already there."""
