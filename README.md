@@ -208,7 +208,9 @@ the session to launch the watcher before stopping:
 The two dampening rows are what stop a livelock when nothing is moving. The
 first covers a watcher that keeps reporting the same thing: every event it
 covers asks the session to change the PR and push, so a second report at the
-*same head commit* proves nothing was pushed in between. The second covers the
+*same head commit* proves nothing was pushed in between. The failed checks are
+compared as a set — GitHub's ordering is not stable between polls, so two reports
+of one unchanged state can list the same checks in different orders. The second covers the
 case with no watcher report at all — the hook asked for a watcher, none was
 launched, and the turn is ending again. Either way the session gets one block to
 act; after that the hook allows the stop with a warning rather than re-blocking
