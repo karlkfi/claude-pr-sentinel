@@ -2039,6 +2039,39 @@ class WatcherCase(unittest.TestCase):
         # Truncation was announced.
         self.assertIn("excerpt truncated to last 256", out)
 
+    def test_the_state_key_can_never_be_a_dot_path(self):
+        """The record's filename is built from the PR URL, so the sanitiser is
+        what keeps the path inside STATE_DIR. Replacing `/` alone is not enough:
+        `.` and `..` would survive intact and `$STATE_DIR/..` is the parent
+        directory. That is harmless today only because reading and writing a
+        directory both fail — an accident, not a defence, so pin the class.
+
+        Asserted against the sanitiser's own character class, the way
+        test_never_queries_comments_or_body asserts the gh field list: the
+        watcher rejects a `..` argument long before this runs, so no end-to-end
+        fixture can reach the case.
+        """
+        keep = re.search(r"tr -c '([^']*)' '_'",
+                         WATCHER.read_text(encoding="utf-8"))
+        self.assertTrue(keep, "state_file's sanitiser is no longer a `tr -c`")
+        self.assertNotIn(".", keep.group(1),
+                         msg="`.` is kept, so a key of `..` survives sanitising")
+        # The class is the whole defence, so prove it actually contains the
+        # inputs it exists for rather than trusting the character list. The
+        # property is containment, not that every byte is replaced:
+        # `../../etc/passwd` becoming `______etc_passwd` is a flat name inside
+        # the directory and perfectly fine.
+        allowed = set(re.sub(r"(\w)-(\w)", lambda m: "".join(
+            chr(c) for c in range(ord(m.group(1)), ord(m.group(2)) + 1)),
+            keep.group(1)))
+        for hostile in ("..", ".", "...", "../../etc/passwd", "/etc/passwd"):
+            slug = "".join(c if c in allowed else "_" for c in hostile)
+            resolved = os.path.normpath(os.path.join("/state", slug))
+            self.assertEqual(
+                os.path.dirname(resolved), "/state",
+                msg="%r sanitises to %r, which resolves to %r — outside"
+                    % (hostile, slug, resolved))
+
     def test_never_queries_comments_or_body(self):
         """Guard the core security invariant at the call boundary: the watcher
         must never ask gh for the PR body or comments. We scan only the lines

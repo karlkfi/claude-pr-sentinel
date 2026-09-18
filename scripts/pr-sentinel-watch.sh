@@ -593,9 +593,15 @@ base_failures_only() {
 # `gh pr view` returns, never on the watcher's own argument: that may be a bare
 # number, which does not say which repo, and two repos sharing a PR number would
 # then share one record. Falls back to the argument when no URL was read.
+#
+# `.` is NOT in the kept class, so no key can be `.` or `..` and the path always
+# names a file inside STATE_DIR. Replacing `/` alone would leave `..` intact,
+# and `$STATE_DIR/..` is the parent directory — harmless today only because
+# reading and writing a directory both fail, which is an accident rather than a
+# defence. Dots carry nothing here anyway: the key is opaque and disposable.
 state_file() {
 	local key
-	key=$(printf '%s' "${PR_URL:-$PR}" | tr -c 'A-Za-z0-9._-' '_')
+	key=$(printf '%s' "${PR_URL:-$PR}" | tr -c 'A-Za-z0-9_-' '_')
 	printf '%s/%s' "$STATE_DIR" "$key"
 }
 
