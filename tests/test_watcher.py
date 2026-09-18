@@ -52,6 +52,7 @@ import re
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -212,6 +213,13 @@ class WatcherCase(unittest.TestCase):
         run_env["GH_STUB_DIR"] = scen
         if cwd_repo:
             run_env["GH_STUB_CWD_REPO"] = cwd_repo
+        # The repeat-report record is the one thing the watcher keeps between
+        # runs, so it is pinned INTO this scenario — assigned, not setdefault,
+        # because the developer's own environment would otherwise supply it.
+        # Every case then starts with no prior report, whatever ran before and
+        # however many times the suite has been run; a case that wants a
+        # relaunch to see one passes the same dir to both runs explicitly.
+        run_env["PR_SENTINEL_STATE_DIR"] = os.path.join(scen, "state")
         # Fast, deterministic defaults; individual tests can override.
         run_env.setdefault("PR_SENTINEL_INTERVAL", "1")
         run_env.setdefault("PR_SENTINEL_MAX_INTERVAL", "1")
@@ -705,6 +713,196 @@ class WatcherCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("PR-SENTINEL EVENT: check_failure", out)
         self.assertNotIn("Last main run:", out)
+
+    # -- a relaunch over a failure already reported (Q43) ---------------------
+
+    # Every case below that must NOT dampen asserts `check_failure`. A wrongly
+    # dampened poll is non-terminal, so the watch would run on and the case
+    # would die on the harness's own subprocess timeout — which reads as a
+    # crash rather than as the assertion it is. A short budget makes it exit on
+    # `timeout` instead, and the assertion says what actually went wrong.
+    SHORT_BUDGET = {"PR_SENTINEL_TIMEOUT": "3"}
+
+    def _failing(self, head="abc1234def", checks=None):
+        """One failing check with no base comparison available, so the poll
+        lands on `check_failure` — the event the dampening is about."""
+        return {
+            "pr_view": f"OPEN\tUNSTABLE\tmain\t{head}\n",
+            "pr_checks": checks or (
+                "fail\tbuild\thttps://github.com/o/r/actions/runs/22/job/2\n"),
+            "run_conclusion.22": "failure\n",
+            "run_log": "boom\n",
+        }
+
+    def relaunch(self, first, second=None, state=None, env=None, presleep=0,
+                 **kw):
+        """Run the watcher twice over one shared state dir, as two launches on
+        one PR do. Returns both (rc, stdout, stderr) triples.
+
+        The scenario dir is fresh each time — the second run is a new process
+        with its own stub counters, which is exactly what a relaunch is. Only
+        the record survives, because only that is on disk. `presleep` waits
+        real seconds between the two, for the one case whose subject is how old
+        the record has become.
+        """
+        state = state or tempfile.mkdtemp(prefix="pr-sentinel-state-")
+        shared = {"PR_SENTINEL_STATE_DIR": state}
+        shared.update(env or {})
+        one = self.run_watcher(first, env=shared, **kw)
+        if presleep:
+            time.sleep(presleep)
+        return one, self.run_watcher(
+            second if second is not None else first, env=shared, **kw)
+
+    def test_relaunch_over_the_same_failure_notices_instead_of_waking(self):
+        """The motivating case. A session told the failure is not its own has no
+        fix to push, so every relaunch re-polls, finds the same red and exits
+        re-reporting it within seconds. The second launch must decline: same
+        event, same head, same failed set."""
+        (rc1, out1, _), (rc2, out2, _) = self.relaunch(
+            self._failing(), env={"PR_SENTINEL_TIMEOUT": "3"})
+        self.assertEqual(rc1, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out1)
+        self.assertNotIn("EVENT: repeat_failure", out1)
+
+        self.assertEqual(rc2, 0)
+        self.assertIn("PR-SENTINEL EVENT: repeat_failure", out2)
+        self.assertNotIn("EVENT: check_failure", out2)
+        self.assertIn("build (fail)", out2)
+        self.assertIn("Head SHA: abc1234def", out2)
+        self.assertIn("Already reported: check_failure, same head", out2)
+        self.assertIn("Next action: NONE from this notice", out2)
+        self.assertIn("PR_SENTINEL_DAMPEN=0", out2)
+        # Non-terminal: the watch continues and ends on the budget, like the
+        # base_failure notice — so the Stop hook sees a live watcher.
+        self.assertIn("PR-SENTINEL EVENT: timeout", out2)
+        # The session already holds the excerpt, from the report being declined.
+        self.assertNotIn("BEGIN CI LOG EXCERPT", out2)
+        # The timeout report names the withheld wake, as it does for base_failure.
+        self.assertIn("already been reported to this session", out2)
+
+    def test_the_repeat_notice_fires_once_per_watch(self):
+        """Non-terminal, so the poll loop comes round again on a state that by
+        definition has not moved — the same reason base_failure fires once."""
+        _, (rc, out, _) = self.relaunch(
+            self._failing(), env={"PR_SENTINEL_TIMEOUT": "4"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.count("PR-SENTINEL EVENT: repeat_failure"), 1)
+
+    def test_a_new_head_wakes_again(self):
+        """The acknowledgement expires by itself: a push moves the head, and
+        the failure at the new head has never been reported."""
+        _, (rc, out, _) = self.relaunch(
+            self._failing(), self._failing(head="99f00dbeef"),
+            env=self.SHORT_BUDGET)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: repeat_failure", out)
+        self.assertIn("Head SHA: 99f00dbeef", out)
+
+    def test_a_changed_failed_set_wakes_again(self):
+        """The other half of the signature. A second check going red at the same
+        head is news, and dampening on the head alone would swallow it."""
+        _, (rc, out, _) = self.relaunch(
+            self._failing(),
+            self._failing(checks=(
+                "fail\tbuild\thttps://github.com/o/r/actions/runs/22/job/2\n"
+                "fail\tlint\thttps://github.com/o/r/actions/runs/22/job/3\n")),
+            env=self.SHORT_BUDGET)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: repeat_failure", out)
+        self.assertIn("lint (fail)", out)
+
+    def test_a_record_older_than_the_window_wakes_again(self):
+        """A record must not outlive the session it was written for: tomorrow's
+        session has never seen that report, and answering it with silence is the
+        one way this mechanism can lose a real failure."""
+        _, (rc, out, _) = self.relaunch(
+            self._failing(), env=dict(self.SHORT_BUDGET, PR_SENTINEL_DAMPEN="1"),
+            presleep=1.5)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: repeat_failure", out)
+
+    def test_dampen_zero_restores_the_old_behaviour(self):
+        """The documented escape from a default this change moves."""
+        _, (rc, out, _) = self.relaunch(
+            self._failing(), env=dict(self.SHORT_BUDGET, PR_SENTINEL_DAMPEN="0"))
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: repeat_failure", out)
+
+    def test_a_record_that_does_not_parse_wakes_again(self):
+        """Fail OPEN, like every other uncertainty in this script: an
+        unreadable record costs the dampening, never the wake."""
+        state = tempfile.mkdtemp(prefix="pr-sentinel-state-")
+        with open(os.path.join(state, "123"), "w", encoding="utf-8") as f:
+            f.write("not-a-timestamp\tcheck_failure\tabc1234def\tbuild (fail)\n")
+        rc, out, _ = self.run_watcher(
+            self._failing(),
+            env=dict(self.SHORT_BUDGET, PR_SENTINEL_STATE_DIR=state))
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: repeat_failure", out)
+
+    def test_an_unwritable_state_dir_costs_only_the_dampening(self):
+        """The record is best effort end to end. A state dir that cannot be
+        created must not break the watch, and must not silence anything."""
+        blocker = tempfile.mkdtemp(prefix="pr-sentinel-state-")
+        # A regular file where the directory should go: mkdir -p fails.
+        path = os.path.join(blocker, "not-a-dir")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("")
+        (rc1, out1, _), (rc2, out2, _) = self.relaunch(
+            self._failing(), state=path, env=self.SHORT_BUDGET)
+        self.assertEqual((rc1, rc2), (0, 0))
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out1)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out2)
+        self.assertNotIn("EVENT: repeat_failure", out2)
+
+    def test_two_repos_sharing_a_pr_number_do_not_share_a_record(self):
+        """The record is keyed on the canonical PR URL, not the argument: a bare
+        number says nothing about which repo, and one repo's acknowledgement
+        must never silence another's failure."""
+        state = tempfile.mkdtemp(prefix="pr-sentinel-state-")
+        files = {
+            "pr_view@o_r": "OPEN\tUNSTABLE\tmain\tabc1234def"
+                           "\thttps://github.com/o/r/pull/7\n",
+            "pr_checks@o_r":
+                "fail\tbuild\thttps://github.com/o/r/actions/runs/22/job/2\n",
+            "pr_view@o_other": "OPEN\tUNSTABLE\tmain\tabc1234def"
+                               "\thttps://github.com/o/other/pull/7\n",
+            "pr_checks@o_other":
+                "fail\tbuild\thttps://github.com/o/other/actions/runs/22/job/2\n",
+            "run_conclusion.22": "failure\n",
+            "run_log": "boom\n",
+        }
+        env = dict(self.SHORT_BUDGET, PR_SENTINEL_STATE_DIR=state)
+        # Both launches pass the SAME bare number, resolved against different
+        # directories — which is the whole case. Passing two URLs instead would
+        # pass whether the record is keyed on the URL or on the argument, since
+        # the arguments would differ too; driven 2026-09-18, keying on the bare
+        # argument left that version of this test green.
+        rc1, out1, _ = self.run_watcher(files, pr="7", cwd_repo="o_r", env=env)
+        rc2, out2, _ = self.run_watcher(
+            files, pr="7", cwd_repo="o_other", env=env)
+        self.assertEqual((rc1, rc2), (0, 0))
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out1)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out2)
+        self.assertNotIn("EVENT: repeat_failure", out2)
+
+    def test_an_inherited_failure_is_not_recorded_as_a_wake(self):
+        """base_failure runs first and never exits, so it writes no record —
+        otherwise the wake it is deferring would be dampened when the base goes
+        green and the failure really does become this PR's own."""
+        (_, out1, _), (rc2, out2, _) = self.relaunch(
+            self._inherited(), self._inherited(base_conclusion="success"),
+            env={"PR_SENTINEL_TIMEOUT": "3"})
+        self.assertIn("PR-SENTINEL EVENT: base_failure", out1)
+        self.assertEqual(rc2, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out2)
+        self.assertNotIn("EVENT: repeat_failure", out2)
 
     def test_absorbed_failure_is_never_compared_to_the_base(self):
         """Absorption runs first, so a `continue-on-error` failure is already
@@ -1920,6 +2118,32 @@ def undisclosed_rest_reads(script, privacy):
                   if not re.search(r"\b%s\b" % re.escape(n), privacy, re.I))
 
 
+def undisclosed_writes(script, privacy):
+    """What `privacy` fails to say about `script` writing to disk.
+
+    The gates above ask what a component READS. Nothing asked what it writes,
+    and the watcher acquired its first write in Q43 — a record of the last
+    `check_failure` it reported, so a relaunch can decline to repeat it.
+    Measured 2026-09-18 by deleting the disclosing bullets: all eight existing
+    disclosure cases still passed, so that disclosure rode on someone
+    remembering, exactly as the merge-queue read once did.
+
+    Narrow like its siblings, and narrow in a different direction: it does not
+    hunt redirects in the shell, where every write target is a variable built
+    from two more. It asks that a component holding a write knob not still
+    describe itself as writing nothing — which is the shape the miss takes,
+    because the stale sentence is what a reader believes.
+    """
+    if not re.search(r"\bPR_SENTINEL_STATE_DIR\b", script):
+        return []
+    missing = []
+    if re.search(r"writes nothing to disk", privacy, re.I):
+        missing.append("still claims it writes nothing to disk")
+    if "PR_SENTINEL_STATE_DIR" not in privacy:
+        missing.append("PR_SENTINEL_STATE_DIR")
+    return missing
+
+
 class PrivacyDisclosure(unittest.TestCase):
     def watcher_section(self, privacy=None):
         privacy = privacy or PRIVACY.read_text(encoding="utf-8")
@@ -1967,6 +2191,39 @@ class PrivacyDisclosure(unittest.TestCase):
             "workflows",
             undisclosed_rest_reads(WATCHER.read_text(encoding="utf-8"),
                                    self.watcher_section(privacy)))
+
+    def test_the_watchers_disk_write_is_disclosed(self):
+        """The read gates have no counterpart for a write, and the watcher now
+        has one. Same question as they ask, asked about the other direction."""
+        missing = undisclosed_writes(
+            WATCHER.read_text(encoding="utf-8"), self.watcher_section())
+        self.assertEqual(
+            missing, [],
+            msg=("the watcher writes a record to disk and PRIVACY.md's watcher "
+                 "section: " + ", ".join(missing)))
+
+    def test_the_write_check_can_fail(self):
+        """Both arms, since this one reports two different gaps: the stale
+        sentence, and the knob going unnamed."""
+        privacy = PRIVACY.read_text(encoding="utf-8")
+        script = WATCHER.read_text(encoding="utf-8")
+        self.assertIn(
+            "PR_SENTINEL_STATE_DIR",
+            undisclosed_writes(script, self.watcher_section(
+                privacy.replace("PR_SENTINEL_STATE_DIR", ""))))
+        self.assertIn(
+            "still claims it writes nothing to disk",
+            undisclosed_writes(script, self.watcher_section(privacy).replace(
+                "It **writes one small file to disk**",
+                "It writes nothing to disk")))
+
+    def test_the_write_check_is_silent_on_a_component_that_writes_nothing(self):
+        """The inverse arm: this must not fire on the hooks, which really do
+        write nothing — a checker that cannot stay quiet reports nothing."""
+        guard = (REPO / "scripts" / "pr_sentinel_guard.py").read_text(
+            encoding="utf-8")
+        self.assertEqual(
+            undisclosed_writes(guard, PRIVACY.read_text(encoding="utf-8")), [])
 
 
 # --- PRIVACY.md must name every component and the files it opens -----------

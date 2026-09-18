@@ -197,7 +197,7 @@ the session to launch the watcher before stopping:
 | a launched watcher hasn't reported completion yet (still running) | silent (already covered) |
 | a launch the harness never answered with a task id (it never started) | **block once** — nothing is watching, so the pull request still needs a watcher |
 | PR handed off (watcher **terminal** `ready`/`closed`/`blocked`/`unchecked`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
-| the watcher's output ends on a `base_failure`, `ready_watching`, `blocked_watching`, or `unchecked_watching` **notice** (a watch that exited without a terminal event) | **block once** — a notice isn't a handoff; the PR is still open and unwatched |
+| the watcher's output ends on a `base_failure`, `repeat_failure`, `ready_watching`, `blocked_watching`, or `unchecked_watching` **notice** (a watch that exited without a terminal event) | **block once** — a notice isn't a handoff; the PR is still open and unwatched |
 | no PR opened or watched this session | silent (a PR merely viewed or commented on is not yours) |
 | `stop_hook_active` already set (a prior block) | silent — **never loops** |
 | unreadable transcript / any uncertainty | silent (fail-open) |
@@ -286,6 +286,7 @@ needed:
 | a check concluded fail/cancel and its workflow run didn't conclude `success` | **check_failure** | fix the failure (log excerpt attached), push, relaunch |
 | every failing check belongs to a run that concluded `success` (`continue-on-error: true`) | *(treated as passing, keep polling)* | nothing — GitHub already ruled the failure non-blocking; the suppression is noted on the task's stderr |
 | every failing check's workflow is **already red on the base branch** | *(notice: **base_failure**, keep polling)* | nothing — the PR inherited the failure; don't add the fix here (see [Failures inherited from the base branch](#failures-inherited-from-the-base-branch)) |
+| the **same** failure (same head commit, same failed set) was already reported by an earlier watcher run, inside `PR_SENTINEL_DAMPEN` | *(notice: **repeat_failure**, keep polling)* | nothing — you were told this last time and nothing has been pushed since (see [A relaunch over a failure you already declined](#a-relaunch-over-a-failure-you-already-declined)) |
 | `mergeStateStatus == DIRTY` | **conflict** | rebase onto `<base>` (default), resolve, `git push --force-with-lease`, relaunch — or merge (`PR_SENTINEL_HEAL=merge`). On a [stacked PR](#a-stacked-pull-request-needs-the---onto-form) the rebase report names the `--onto` escape |
 | `mergeStateStatus == BEHIND` | **behind** | rebase onto `<base>` (default) and force-push with lease, relaunch — or merge to fast-forward (`PR_SENTINEL_HEAL=merge`) |
 | the PR holds a **merge-queue entry** | *(keep polling, hands off)* | nothing — the queue is merging it, and any push to a queued PR evicts it (see [Merge queues](#merge-queues)) |
@@ -524,6 +525,8 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_GREEN_POLLS` | `2` | consecutive green polls before `ready` fires, so a push whose run hasn't registered yet can't read as green (see [Green is not the same as ready](#green-is-not-the-same-as-ready)); `1` decides on a single poll |
 | `PR_SENTINEL_UNCHECKED_GRACE` | `600` | seconds the head may carry **no check row at all** before the watcher reports `unchecked`. It paces that report only — an empty check set is never `ready` whatever this is set to (see [A head no check reported on](#a-head-no-check-reported-on)). Raise it in a repo whose runs routinely take longer than ten minutes to register; `0` reports on the first empty poll |
 | `PR_SENTINEL_DEQUEUED_POLLS` | `2` | consecutive polls a once-queued, still-open PR must be missing from the merge queue before `dequeued` fires; the confirming poll turns a queue merge in flight into `closed` instead of a phantom eviction (see [Merge queues](#merge-queues)) |
+| `PR_SENTINEL_DAMPEN` | `3600` | seconds a `check_failure` this watcher already reported stays dampened, so a **relaunch** over the same head and the same failed set notices instead of waking you again (see [A relaunch over a failure you already declined](#a-relaunch-over-a-failure-you-already-declined)); `0` re-reports on every relaunch, as before. Anything but a count falls back to `3600` |
+| `PR_SENTINEL_STATE_DIR` | `${TMPDIR}/pr-sentinel` | where that one record is written. Created mode `700`; losing it costs only the dampening, never a report |
 | `PR_SENTINEL_BASE_CHECK` | (on) | compare each failing check against the same workflow's latest run on the base branch, and report `base_failure` instead of `check_failure` when the base is already red; `0`/`false`/empty wakes on every failure as before (see [Failures inherited from the base branch](#failures-inherited-from-the-base-branch)) |
 | `PR_SENTINEL_BACKOFF_NUM` / `PR_SENTINEL_BACKOFF_DEN` | `3` / `2` | backoff multiplier once checks have settled (interval × num ÷ den each poll) |
 | `PR_SENTINEL_AUTOALLOW` | (on) | auto-approve the plugin's own watcher launch so it isn't prompted by the base Bash permission; `0`/`false`/empty keeps the prompt (see below) |
@@ -806,6 +809,53 @@ absorption reads GitHub's own verdict on the exact run in question, while this
 infers across two runs. Its false negative is a PR that independently breaks the
 same workflow, which stays masked until the base goes green — a delay rather
 than a loss, since the still-red check wakes you the moment it clears there.
+
+### A relaunch over a failure you already declined
+
+The watcher has two answers for a failing check and needs a third. It wakes you
+(`check_failure`), or it waits (`base_failure`, when the base is red too). There
+was no answer for a failure you had already seen, judged not yours, and decided
+to leave alone.
+
+A watcher process holds no memory across runs, so every relaunch re-polled,
+found the same red, and exited re-reporting it within seconds. The only route to
+a quiet turn end was to push a fix — which is exactly what you had decided not
+to write. Measured 2026-09-09 on a batch of four pull requests: two were red on
+a vulnerability scan neither branch could have caused, the maintainer said to
+ignore it, and seven watcher launches across the two produced five reports of a
+state that by definition could not move, each exiting in five or six seconds.
+
+So a `check_failure` the watcher reports is now recorded, and a **later launch**
+that finds the identical `(event, head commit, failed set)` says so and keeps
+polling instead of exiting:
+
+```
+PR-SENTINEL EVENT: repeat_failure
+Failed checks: vuln-scan (api) (fail), vuln-scan (worker) (fail)
+Already reported: check_failure, same head, same failed set, 143s ago
+```
+
+Three things bound it, because this is the one mechanism here that can decide
+you do *not* hear about a red check:
+
+- **The first report always wakes you.** Only an exact repeat is dampened.
+- **The acknowledgement expires by itself.** A push moves the head and a check
+  flipping either way moves the set, so anything that really changed reports as
+  `check_failure` again with no state to clear by hand.
+- **It expires on a clock too** — `PR_SENTINEL_DAMPEN`, default `3600`, matching
+  the watch budget so the dampening can never outlive the single watch it stands
+  in for. Tomorrow's session has never seen that report and must not be answered
+  with silence about it.
+
+Every uncertainty falls through to the wake: no record, an unreadable one, a
+state directory that cannot be written, a clock that moved backwards. Losing the
+record costs the dampening, never the report. `PR_SENTINEL_DAMPEN=0` turns it off
+and restores the re-report on every relaunch.
+
+This is the watcher-side counterpart of the Stop hook's own dampening, which was
+already doing the same arithmetic on the same signature
+([What it does](#what-it-does)). That one bounds the *block*; this one bounds
+the *wake-up*, which is the thing that was re-firing.
 
 ### A stacked pull request needs the `--onto` form
 

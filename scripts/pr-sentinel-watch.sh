@@ -120,6 +120,21 @@ DEQUEUED_POLLS="${PR_SENTINEL_DEQUEUED_POLLS:-2}"  # unqueued polls before `dequ
 BASE_CHECK=$(printf '%s' "${PR_SENTINEL_BASE_CHECK-1}" | tr '[:upper:]' '[:lower:]')
 case "$BASE_CHECK" in ''|0|false|no|off) BASE_CHECK=0 ;; *) BASE_CHECK=1 ;; esac
 
+# How long (seconds) a `check_failure` this watcher already reported stays
+# dampened, so a RELAUNCH over an unchanged failure notices instead of waking
+# the session again. `0` restores the pre-feature behaviour: every relaunch
+# re-reports. Default matches TIMEOUT's, so the dampening can never outlive the
+# single watch it stands in for.
+DAMPEN="${PR_SENTINEL_DAMPEN:-3600}"      # repeat-report window, seconds
+# Fail safe to the default on anything that is not a count, as UNCHECKED_GRACE
+# does: a typo must not silence a failure for an unbounded span.
+[[ "$DAMPEN" =~ ^[0-9]+$ ]] || DAMPEN=3600
+
+# Where that cross-run record lives. Temp by default: the state is per-PR and
+# disposable, and losing it fails OPEN (the next relaunch re-reports), which is
+# the safe direction for a knob whose whole job is to say less.
+STATE_DIR="${PR_SENTINEL_STATE_DIR:-${TMPDIR:-/tmp}/pr-sentinel}"
+
 # Conflict/behind heal strategy the report recommends: rebase (default) or
 # merge. Normalise to lowercase (bash 3.2: use tr, not ${var,,}) and fail safe
 # to rebase on any unrecognised value.
@@ -198,6 +213,19 @@ BASE_FAIL_DETAIL=""
 # ended the comparison, named in the `check_failure` report so the session can
 # see how old the evidence behind "this failure is yours" actually is.
 BASE_GREEN_DETAIL=""
+
+# The failed-check set last reported as an already-seen repeat, so the
+# `repeat_failure` notice fires once per distinct failure rather than on every
+# poll — the same reason BASE_FAILURE_REPORTED exists, and the same role in the
+# `timeout` report: non-empty means a wake was withheld.
+REPEAT_REPORTED=""
+
+# The prior run's recorded report, read once at the first failing poll:
+# "<event>\t<head sha>\t<failed set>". Empty when nothing was recorded, the
+# record is unreadable, or it has aged past DAMPEN.
+PRIOR_REPORT=""
+PRIOR_REPORT_READ=0
+PRIOR_REPORT_AGE=""
 
 # owner / repo / number for the GraphQL queue query, parsed once from the PR
 # URL that `gh pr view` returns (the watcher's own PR argument may be a bare
@@ -557,6 +585,72 @@ base_failures_only() {
 	(( resolved > 0 ))
 }
 
+# --------------------------------------------------------------------------
+# Repeat-report dampening (the one piece of state that outlives the process)
+# --------------------------------------------------------------------------
+
+# Where this PR's last report is recorded. Keyed on the canonical PR URL that
+# `gh pr view` returns, never on the watcher's own argument: that may be a bare
+# number, which does not say which repo, and two repos sharing a PR number would
+# then share one record. Falls back to the argument when no URL was read.
+state_file() {
+	local key
+	key=$(printf '%s' "${PR_URL:-$PR}" | tr -c 'A-Za-z0-9._-' '_')
+	printf '%s/%s' "$STATE_DIR" "$key"
+}
+
+# Read the record a PREVIOUS run left, once per watch, into PRIOR_REPORT as
+# "<event>\t<head sha>\t<failed set>". Left empty when dampening is off, nothing
+# was recorded, the record does not parse, or it has aged past DAMPEN.
+#
+# Every failure path here falls through to empty, which re-reports. That
+# direction is deliberate: this is the one mechanism in the watcher that can
+# decide a session does NOT hear about a red check, so an unreadable record has
+# to cost the dampening rather than the wake. The age bound is what stops a
+# record outliving the session it was written for — a fresh session tomorrow
+# has never seen the report, and must not be answered with silence about it.
+read_prior_report() {
+	(( PRIOR_REPORT_READ == 1 )) && return 0
+	PRIOR_REPORT_READ=1
+	(( DAMPEN > 0 )) || return 0
+	local file stamp rest age
+	file=$(state_file)
+	[[ -f "$file" ]] || return 0
+	# A record written without its trailing newline is a partial write; `read`
+	# reports that as a failure and the record is discarded.
+	IFS=$'\t' read -r stamp rest < "$file" 2>/dev/null || return 0
+	[[ "$stamp" =~ ^[0-9]+$ ]] || return 0
+	age=$(( $(now) - stamp ))
+	# A negative age is a clock that moved backwards, not a fresh record.
+	(( age >= 0 && age <= DAMPEN )) || return 0
+	PRIOR_REPORT="$rest"
+	PRIOR_REPORT_AGE="$age"
+}
+
+# Record this run's terminal report so the next run can recognise a repeat.
+# Best effort throughout: a state dir that cannot be created or written costs
+# the dampening, never the report — the caller emits either way. The directory
+# is private because its file NAMES carry the PR URL, and the default lives in
+# a world-readable temp directory.
+record_report() {
+	local file
+	mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+	chmod 700 "$STATE_DIR" 2>/dev/null || true
+	file=$(state_file)
+	printf '%s\t%s\t%s\t%s\n' "$(now)" "$1" "${HEAD_SHA:-}" "$2" \
+		> "$file" 2>/dev/null || return 0
+}
+
+# Whether this failing poll repeats a report a PREVIOUS run already made: same
+# event, same head commit, same failed set. Nothing looser counts as the same
+# state — a push moves the head and a check flipping either way moves the set,
+# so the acknowledgement expires by itself the moment anything really changes.
+repeat_of_prior_report() {
+	read_prior_report
+	[[ -n "$PRIOR_REPORT" ]] || return 1
+	[[ "$PRIOR_REPORT" == "${1}"$'\t'"${HEAD_SHA:-}"$'\t'"${2}" ]]
+}
+
 # Print the sanitized, size-capped CI log excerpt for a failed run id.
 # Keeps the TAIL (failures surface at the end) and notes truncation.
 log_excerpt() {
@@ -669,6 +763,41 @@ notice_base_failure() {
 	echo "clears on ${BASE}. If it clears there while still failing here, that"
 	echo "failure IS this PR's own and the next poll wakes this session with"
 	echo "check_failure."
+}
+
+# The non-terminal counterpart of emit_check_failure for a failure an EARLIER
+# run of this watcher already woke the session with, at this same head and with
+# this same failed set. It does NOT exit, and it carries no log excerpt: the
+# session already has that excerpt, from the report this one is declining to
+# repeat.
+#
+# What this answers is a failure the session has seen, judged not its own, and
+# been told to leave alone. A watcher process holds no memory across runs, so
+# every relaunch used to re-poll, find the same red and exit re-reporting it
+# within seconds — and the session's only route to a quiet turn end was to push
+# a fix it had already decided not to write. Emitted once per distinct failed
+# set, for the reason notice_base_failure is: the state does not move on its
+# own.
+notice_repeat_failure() {
+	local failed="$1"
+	report_header repeat_failure
+	echo "State: OPEN"
+	echo "mergeStateStatus: ${MERGE}"
+	echo "Head SHA: ${HEAD_SHA}"
+	echo "Failed checks: ${failed}"
+	echo "Already reported: check_failure, same head, same failed set${PRIOR_REPORT_AGE:+, ${PRIOR_REPORT_AGE}s ago}"
+	echo
+	echo "This exact failure was already reported to this session by an earlier"
+	echo "watcher run. Nothing has been pushed since — the head commit has not"
+	echo "moved and no check has changed bucket — so re-reporting it would tell"
+	echo "you only what you were told last time."
+	echo
+	echo "Next action: NONE from this notice. Whatever you decided about that"
+	echo "report still stands. Push a fix and relaunch if it was yours after all;"
+	echo "the next head or a different failed set reports as check_failure again."
+	echo
+	echo "This is a NOTICE, not a wake-up: the watcher keeps polling. Set"
+	echo "PR_SENTINEL_DAMPEN=0 to have every relaunch re-report instead."
 }
 
 # A stacked PR — a branch carrying a parent PR's commits as well as its own —
@@ -968,6 +1097,11 @@ emit_timeout() {
 		echo "base_failure notice above), so no fix was owed here — relaunching"
 		echo "keeps watching for the base to go green."
 	fi
+	if [[ -n "$REPEAT_REPORTED" ]]; then
+		echo "Its failing check(s) had already been reported to this session at"
+		echo "this same head (see the repeat_failure notice above), so the wake"
+		echo "was withheld rather than repeated."
+	fi
 	echo "Next action: check the PR status and relaunch the watcher if still open."
 	exit 0
 }
@@ -1158,7 +1292,18 @@ main() {
 						notice_base_failure "$failed_names"
 						BASE_FAILURE_REPORTED="$failed_names"
 					fi
+				elif repeat_of_prior_report check_failure "$failed_names"; then
+					# An earlier RUN already woke the session with this exact
+					# report and nothing has been pushed since, so waking again
+					# repeats it. Non-terminal, like the base notice above: the
+					# watch continues, and the Stop hook sees a live watcher.
+					if [[ "$REPEAT_REPORTED" != "$failed_names" ]]; then
+						notice_repeat_failure "$failed_names"
+						REPEAT_REPORTED="$failed_names"
+					fi
 				else
+					# Recorded BEFORE the emit, which exits.
+					record_report check_failure "$failed_names"
 					emit_check_failure "$failed_names" "$failed_links"
 				fi
 			fi
