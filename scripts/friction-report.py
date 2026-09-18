@@ -86,6 +86,7 @@ EVENT_KIND = {
     'timeout':       'degraded',  # watch budget elapsed with no verdict
     'error':         'degraded',  # gh unreachable after retries
     'base_failure':  'notice',    # inherited from the base; watch continues
+    'repeat_failure': 'notice',   # already reported at this head; watch continues
     'ready_watching': 'notice',   # green, still watching for a sibling merge
     'blocked_watching': 'notice',
     'unchecked_watching': 'notice',

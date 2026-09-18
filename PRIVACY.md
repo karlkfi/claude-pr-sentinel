@@ -1,6 +1,6 @@
 # Privacy Policy — pr-sentinel
 
-_Last updated: 2026-09-05_
+_Last updated: 2026-09-18_
 
 pr-sentinel is a Claude Code plugin that runs on your local machine. Its
 components have different data profiles, described honestly below: two hooks,
@@ -124,9 +124,22 @@ report).
 - All network traffic is between your machine and GitHub, via `gh`, under your
   own credentials. The plugin adds no other endpoint, no telemetry, and no
   third party.
-- It writes nothing to disk. The failing-run log excerpt is sanitized
-  (ANSI-stripped, size-capped) and printed to the background task's standard
-  output, which the Claude Code harness delivers to your session.
+- The failing-run log excerpt is sanitized (ANSI-stripped, size-capped) and
+  printed to the background task's standard output, which the Claude Code
+  harness delivers to your session.
+- It **writes one small file to disk**, and reads it back on the next launch:
+  the last `check_failure` it reported for a pull request, so a relaunch over a
+  failure you have already been told about notices instead of waking you again.
+  The file holds four fields — a timestamp, the event name, the head commit,
+  and the failing checks' own names as `gh pr checks` reported them — and its
+  **name** is the pull request's canonical URL with the punctuation replaced,
+  which is what keeps two repositories sharing a PR number apart. Nothing else
+  is recorded, and nothing recorded leaves your machine.
+- That file lives under `${TMPDIR}/pr-sentinel` by default —
+  `PR_SENTINEL_STATE_DIR` moves it, and `PR_SENTINEL_DAMPEN=0` stops it being
+  written or read at all. The directory is created mode `700`, because the
+  default parent is world-readable and the file names carry PR URLs. Losing it
+  costs only the dampening: the next launch reports the failure again.
 
 ## The Stop handler (`scripts/pr_sentinel_stop_hook.py`)
 
@@ -167,10 +180,12 @@ report).
   `prNumber` / `title` fields it uses to filter and to print a report. A file
   that does not parse as an object carrying that toggle is left untouched. It
   does **not** read PR bodies or comments.
-- With `--apply` it **writes to disk** — the only component that does: it backs
-  up each targeted file under `.autofix-backup-<timestamp>/` before setting
-  `autoFixEnabled` to `false`. This is local file editing under your own
-  account; nothing leaves the machine.
+- With `--apply` it **writes to disk** — the only component that edits files
+  you already had: it backs up each targeted file under
+  `.autofix-backup-<timestamp>/` before setting `autoFixEnabled` to `false`.
+  (The watcher also writes, but only its own small record, described above.)
+  This is local file editing under your own account; nothing leaves the
+  machine.
 
 ## The activity report (`scripts/friction-report.py`)
 
