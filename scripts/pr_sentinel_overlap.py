@@ -46,6 +46,8 @@ MAX_PR_DIFFS = 3         # diffs fetched — this runs while someone waits
 
 FALLBACK_BASE_REF = 'origin/main'
 
+TIMED_OUT = 'timed out'  # a `capture()` status: ran, and blew its budget
+
 HUNK_RE = re.compile(r'^@@ -([0-9]+)(?:,([0-9]+))? \+')
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
 
@@ -77,10 +79,21 @@ def ignore_patterns():
 
 
 def capture(argv, cwd, timeout=PROBE_TIMEOUT):
-    """(exit status, stdout) for a subprocess, or (None, '') if it never ran."""
+    """(exit status, stdout) for a subprocess.
+
+    Two ways to get no status: `None` for a probe that never ran, `TIMED_OUT`
+    for one that ran and blew `timeout`. Neither is 0, so both still fail open
+    — the distinction is for a caller that wants to tell "the check stopped
+    evaluating" from "the check found nothing", which are the same silence to
+    every caller below and to the session reading the transcript.
+
+    `TimeoutExpired` is caught first because it subclasses `SubprocessError`.
+    """
     try:
         proc = subprocess.run(argv, cwd=cwd or None, stdout=subprocess.PIPE,
                               stderr=subprocess.DEVNULL, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return TIMED_OUT, ''
     except (OSError, ValueError, subprocess.SubprocessError):
         return None, ''
     return proc.returncode, proc.stdout.decode('utf-8', 'replace')

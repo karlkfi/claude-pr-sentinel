@@ -199,6 +199,40 @@ class Scenario:
         return proc.stdout
 
 
+SLEEPER = ("python3", "-c", "import time; time.sleep(30)")
+MISSING = ("pr-sentinel-no-such-binary",)
+
+
+class Capture(unittest.TestCase):
+    """The two ways `capture()` comes back with no status. Every caller here
+    flattens both to the same fail-open, which is right for the decision and
+    is why nothing downstream can report that the check stopped evaluating."""
+
+    def timed_out(self):
+        """A budget short enough to be quick, against a probe far enough over
+        it that load can only make the timeout surer to fire."""
+        return overlap.capture(SLEEPER, "", timeout=0.2)
+
+    def test_a_probe_that_ran_returns_its_status_and_stdout(self):
+        self.assertEqual(overlap.capture(("python3", "-c", "print('ok')"), ""),
+                         (0, "ok\n"))
+
+    def test_a_probe_that_never_ran_returns_none(self):
+        self.assertEqual(overlap.capture(MISSING, ""), (None, ""))
+
+    def test_a_probe_that_blew_its_budget_returns_timed_out(self):
+        self.assertEqual(self.timed_out(), (overlap.TIMED_OUT, ""))
+
+    def test_the_two_are_distinguishable(self):
+        """The load-bearing one. Both tests above still pass if `TIMED_OUT` is
+        set to `None` — each compares the status against the same constant —
+        so neither can see the regression this row exists to prevent."""
+        never, _ = overlap.capture(MISSING, "")
+        timed, _ = self.timed_out()
+        self.assertIsNot(timed, never)
+        self.assertNotEqual(timed, never)
+
+
 class HunkParsing(unittest.TestCase):
     """The parser, which is where a wrong answer is silent rather than loud."""
 
