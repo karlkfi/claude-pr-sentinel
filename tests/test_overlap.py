@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 from importlib import util
 from pathlib import Path
@@ -812,12 +813,27 @@ class GuardDeny(unittest.TestCase):
         `setUp`'s fixture overlaps, so the deny on the first line is the
         control — the same scenario reaches a verdict until the timeout is
         planted, which is what rules out the silence below being an ordinary
-        no-overlap."""
+        no-overlap.
+
+        The elapsed assertion is what rules out the *other* way to be silent.
+        Nothing here can read `TIMED_OUT`, the guard being a subprocess, so a
+        shim that failed to hand over to the real git would make the probe
+        never run, return `(None, '')`, and produce this same silence and this
+        same exit status. A probe that never ran comes back at once; only one
+        that blew the cap can take it. The bound is the subject's own, so the
+        two cannot drift apart."""
         self.deny_reason(self.s.guard("gh pr create --fill"))
         self.s.slow_git()
+        started = time.monotonic()
         status, out = self.s.guard_run("gh pr create --fill")
+        elapsed = time.monotonic() - started
         self.assertEqual(out, "", "a probe that timed out must not deny")
         self.assertEqual(status, 0, "the guard must exit clean, not crash")
+        self.assertGreaterEqual(
+            elapsed, overlap.PROBE_TIMEOUT,
+            "returned in %.2fs, under the %ss cap: the probe never ran rather "
+            "than timing out, so this silence is not the one under test"
+            % (elapsed, overlap.PROBE_TIMEOUT))
 
     def test_the_poll_deny_still_fires(self):
         """The new branch must not have displaced the one already there."""
