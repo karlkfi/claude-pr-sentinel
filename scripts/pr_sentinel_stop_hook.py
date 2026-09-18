@@ -445,7 +445,23 @@ def _report_signature(text):
     if not sm:
         return None
     fm = FAILED_CHECKS_RE.search(header)
-    return (event, fm.group(1).strip() if fm else '', sm.group(1))
+    return (event, _failed_set(fm.group(1) if fm else ''), sm.group(1))
+
+
+def _failed_set(line):
+    """The `Failed checks:` line as an order-independent key.
+
+    The watcher now sorts this list at the source, but a live transcript still
+    holds reports written by older watchers, where the order is GitHub's and is
+    not stable across polls — so two runs over one unchanged head could differ
+    by order alone and never compare equal (Q45).
+
+    Splitting on `, ` does not recover the individual checks, because a name
+    can contain that separator (`trivy (agc, 1) (fail)`). It does not need to:
+    two renderings of one set yield the same fragments in a different order, so
+    comparing them as a sorted multiset answers the equality question this
+    signature asks. It is not a parse, and nothing downstream treats it as one."""
+    return tuple(sorted(p for p in line.strip().split(', ') if p))
 
 
 def _prior_block_prs(obj):

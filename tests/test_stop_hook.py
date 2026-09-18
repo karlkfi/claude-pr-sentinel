@@ -308,7 +308,7 @@ class ClassifierUnit(unittest.TestCase):
     def test_report_signature(self):
         sig = hook._report_signature(check_failure_report(
             failed="build (fail)", sha="deadbeef"))
-        self.assertEqual(sig, ("check_failure", "build (fail)", "deadbeef"))
+        self.assertEqual(sig, ("check_failure", ("build (fail)",), "deadbeef"))
         # A ready report is not a dampenable signature.
         self.assertIsNone(hook._report_signature(
             "PR-SENTINEL EVENT: ready\nPR: 42\n"))
@@ -322,20 +322,20 @@ class ClassifierUnit(unittest.TestCase):
     def test_report_signature_covers_the_heal_events(self):
         """Issue #50: `conflict` (and its siblings) carry a Head SHA and get a
         signature, so a repeat at an unmoved head can dampen like a
-        check_failure. They have no failed-check set, hence the empty middle."""
+        check_failure. They have no failed-check set, hence the empty tuple."""
         self.assertEqual(hook._report_signature(conflict_report(sha="5e58804")),
-                         ("conflict", "", "5e58804"))
+                         ("conflict", (), "5e58804"))
         self.assertEqual(
             hook._report_signature(
                 "PR-SENTINEL EVENT: behind\nPR: 42\nState: OPEN\n"
                 "mergeStateStatus: BEHIND (branch is behind base)\n"
                 "Head SHA: bbb\nBase branch: main\n"),
-            ("behind", "", "bbb"))
+            ("behind", (), "bbb"))
         self.assertEqual(
             hook._report_signature(
                 "PR-SENTINEL EVENT: dequeued\nPR: 42\nState: OPEN\n"
                 "mergeStateStatus: DIRTY\nHead SHA: ccc\nBase branch: main\n"),
-            ("dequeued", "", "ccc"))
+            ("dequeued", (), "ccc"))
 
     def test_report_signature_ignores_non_terminal_notices(self):
         """The notices the watcher keeps polling past are not what the session
@@ -357,7 +357,7 @@ class ClassifierUnit(unittest.TestCase):
             "Head SHA: oldsha\nFailed checks: doc-links (fail)\n"
             "Also failing on main: doc-links.yml (run 31274922338, 47815b6, failure)\n\n"
             + check_failure_report(failed="unit-test (fail)", sha="newsha"))
-        self.assertEqual(sig, ("check_failure", "unit-test (fail)", "newsha"))
+        self.assertEqual(sig, ("check_failure", ("unit-test (fail)",), "newsha"))
 
     def test_report_signature_takes_the_terminal_event_after_a_notice(self):
         """Under PR_SENTINEL_WATCH_UNTIL=closed a run can report
@@ -366,7 +366,7 @@ class ClassifierUnit(unittest.TestCase):
         sig = hook._report_signature(
             "PR-SENTINEL EVENT: ready_watching\nPR: 42\nState: OPEN\n"
             "mergeStateStatus: CLEAN\n\n" + conflict_report(sha="5e58804"))
-        self.assertEqual(sig, ("conflict", "", "5e58804"))
+        self.assertEqual(sig, ("conflict", (), "5e58804"))
 
     def test_prior_block_prs_reads_every_harness_shape(self):
         for shape in ("attachment", "summary", "feedback"):
@@ -1158,6 +1158,46 @@ class NeedsWatcherLogic(unittest.TestCase):
         b, d = analyze(self._two_reports(
             check_failure_report(failed="build (fail)", sha="aaa"),
             check_failure_report(failed="lint (fail)", sha="aaa")))
+        self.assertEqual(b, {"42"})
+        self.assertEqual(d, {})
+
+    # -- the failed set is a SET, whatever order GitHub returned it in (Q45) --
+    #
+    # The watcher now sorts at the source, but a live transcript still holds
+    # reports from older watchers, where the order is GitHub's and moves
+    # between polls. Measured on one real PR: four runs at one head, two of
+    # them differing only in the order of two `trivy` rows.
+
+    RUN2 = "security-scan-gate (fail), trivy (agc, 1) (fail), trivy (gmc, 1) (fail)"
+    RUN4 = "security-scan-gate (fail), trivy (gmc, 1) (fail), trivy (agc, 1) (fail)"
+    RUN1 = "trivy (agc, 1) (fail), trivy (gmc, 1) (fail)"
+
+    def test_dampens_when_one_set_arrives_in_two_orders(self):
+        # Identical membership, different order, unchanged head: nothing was
+        # pushed, so this must dampen. Exact-string compare never matched here.
+        b, d = analyze(self._two_reports(
+            check_failure_report(failed=self.RUN2, sha="aaa"),
+            check_failure_report(failed=self.RUN4, sha="aaa")))
+        self.assertEqual(b, set())
+        self.assertEqual(d, {"42": "check_failure"})
+
+    def test_a_reordered_set_is_still_not_a_changed_set(self):
+        # The control for the test above: run 1 differs by MEMBERSHIP
+        # (security-scan-gate had not failed yet), which is a real change and
+        # must still block. Without this, "dampen" could just mean "always".
+        b, d = analyze(self._two_reports(
+            check_failure_report(failed=self.RUN1, sha="aaa"),
+            check_failure_report(failed=self.RUN2, sha="aaa")))
+        self.assertEqual(b, {"42"})
+        self.assertEqual(d, {})
+
+    def test_a_name_carrying_the_separator_does_not_split_into_a_match(self):
+        # `trivy (agc, 1)` contains ", ", so the split does not recover the
+        # individual checks. It does not need to — but two genuinely different
+        # sets must not collide because of it.
+        b, d = analyze(self._two_reports(
+            check_failure_report(failed="a (fail), b (fail)", sha="aaa"),
+            check_failure_report(failed="a, b (fail)", sha="aaa")))
         self.assertEqual(b, {"42"})
         self.assertEqual(d, {})
 

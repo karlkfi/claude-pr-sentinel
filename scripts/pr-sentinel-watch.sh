@@ -373,9 +373,17 @@ gh_state_fetch() {
 # Emit one "bucket\tname\tlink" line per check. gh's exit code is non-zero when
 # checks are failing or pending, so callers must tolerate that and read the
 # buckets instead. Buckets: pass | fail | pending | skipping | cancel.
+#
+# `sort_by` is load-bearing, not tidiness: GitHub's order here is its own and
+# is not stable across polls, while the `$failed_names` line built from it is
+# compared for EQUALITY by several callers — the base-failure notice, and the
+# Stop hook's dampening signature. Unsorted, two reports of one unchanged state
+# can differ by order alone, compare unequal, and the dampening they drive
+# never fires (Q45). Sorting at the source is what makes every such comparison
+# sound, including ones in this process that no reader-side fix can reach.
 gh_pr_checks() {
 	gh pr checks "$PR" --json name,bucket,link \
-		-q '.[] | [.bucket, .name, .link] | @tsv'
+		-q 'sort_by(.name, .bucket) | .[] | [.bucket, .name, .link] | @tsv'
 }
 
 # Extract a GitHub Actions run id from a check link like

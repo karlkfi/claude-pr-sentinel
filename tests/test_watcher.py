@@ -1835,6 +1835,21 @@ class WatcherCase(unittest.TestCase):
         self.assertIn("state,mergeStateStatus,baseRefName,headRefOid,url",
                       WATCHER.read_text(encoding="utf-8"))
 
+    def test_the_checks_query_sorts_at_the_source(self):
+        """Q45: the `Failed checks:` line built from this read is compared for
+        EQUALITY — by the base-failure notice here, and by the Stop hook's
+        dampening signature — so GitHub's own order, which is not stable across
+        polls, makes two reports of one unchanged state compare unequal.
+
+        This asserts the query string rather than the behaviour, and that is
+        the whole coverage: the stub `gh` returns already-jq-projected output,
+        so the suite never evaluates `-q` and cannot observe the sort. It is
+        here to stop the sort being dropped silently. Verified live instead —
+        see the PR body."""
+        src = WATCHER.read_text(encoding="utf-8")
+        self.assertIn("sort_by(.name, .bucket) | .[] | [.bucket, .name, .link]",
+                      src)
+
 
 # --- PRIVACY.md must name what the watcher reads ---------------------------
 

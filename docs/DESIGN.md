@@ -744,6 +744,22 @@ real progress would have moved the SHA), it allows the stop, emitting a
 non-blocking `systemMessage` so the PR stays visible. One block to try; no
 livelock; never a *silent* walk-away.
 
+The failed-check set is compared as a **set**, and that is not pedantry. The
+order `gh pr checks` returns is GitHub's own and is not stable across polls, so
+two runs over an unchanged head reporting an unchanged set of failures could
+render it two ways, compare unequal, and never dampen — the guard surviving only
+on the order happening to hold still. It is fixed at both ends, because neither
+end alone is enough: the watcher now sorts at the source, which is the only fix
+that reaches the equality comparisons inside the watcher process itself, and the
+hook normalises what it reads, which is the only fix that reaches reports older
+watchers already wrote into a live transcript.
+
+Splitting that line on `, ` does not recover the individual checks — a check can
+be named `trivy (agc, 1)`, separator and all. It does not need to. Two renderings
+of one set yield the same fragments in a different order, so comparing them as a
+sorted multiset answers the equality question the signature asks, which is the
+only question it asks.
+
 Two shapes reach it, and they mean opposite things:
 
 - **`check_failure`** — the session cannot fix the check: inherited from the
