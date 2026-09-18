@@ -81,7 +81,8 @@ advisory nudge, a deny is *enforced* — the command never runs.
 | `while …; do … sleep …; done` / `until …; do … sleep …; done` **that runs `gh`** | **deny** — hand-rolled poll loop |
 | any of the above submitted with `run_in_background` | allow (deferred — a backgrounded call can't block the session) |
 | any of the above with an inline `PR_SENTINEL_OVERRIDE=<reason>` prefix (or the variable set in the session env) | **allow** (deferred to normal permissions) |
-| `bash …/pr-sentinel-watch.sh N` (the plugin's own watcher) | **allow** — auto-approved (no base Bash prompt), gated by `PR_SENTINEL_AUTOALLOW` |
+| `bash …/pr-sentinel-watch.sh N` (the plugin's own watcher), optionally with leading `PR_SENTINEL_*=…` assignments | **allow** — auto-approved (no base Bash prompt), gated by `PR_SENTINEL_AUTOALLOW` |
+| the same launch with any **other** leading assignment (`BASH_ENV=…`, `PATH=…`, `GH_TOKEN=…`) | allow (deferred — not a recognised shape, so it takes the base Bash prompt) |
 | the same launch for a PR this session is **already watching** | **deny** — one watcher is enough; the reason names the `TaskStop` call that frees the PR for a fresh one |
 | `gh pr create` on a branch editing lines an **open PR already changes** | **deny** — names that PR's number and the shared paths (see [Overlapping pull requests](#overlapping-pull-requests)) |
 | `gh pr create` sharing a *file* with an open PR, but edits 7+ lines apart | allow (a shared file is not a finding — the comparison is line ranges) |
@@ -565,8 +566,18 @@ prompt for the one first-party, read-only command the plugin asks you to run —
 `bash …/pr-sentinel-watch.sh <PR>` — on every (re)launch. Only that exact shape
 is approved (single simple command, the script matched by resolved realpath, and
 a bare PR number or a `https://github.com/<owner>/<repo>/pull/<n>` URL — the two
-forms the watcher accepts); anything else defers to normal permissions. Set it
-to `0` to keep the prompt if you'd rather see each launch. Disabling it does **not** widen
+forms the watcher accepts); anything else defers to normal permissions.
+
+The launch may carry leading `PR_SENTINEL_*=…` assignments, which is how a
+single machine gives one session `PR_SENTINEL_WATCH_UNTIL=closed` while another
+keeps the default — no settings file can, since `settings.json` is per-machine
+and a project `.claude/settings.json` is per-repo. Only this plugin's own
+namespace is allowed past, and every name in it is a tuning knob the watcher
+reads. Any other assignment falls through to the base Bash prompt, because a
+leading `BASH_ENV=…` would run arbitrary code before the script body and leave
+the realpath match above intact but meaningless.
+
+Set it to `0` to keep the prompt if you'd rather see each launch. Disabling it does **not** widen
 what the plugin reads or does — it only reinstates the prompt. Users who disable
 it but still want no prompt can instead add a Bash allowlist entry
 `Bash(bash */.claude/plugins/cache/pr-sentinel/pr-sentinel/*/scripts/pr-sentinel-watch.sh:*)`

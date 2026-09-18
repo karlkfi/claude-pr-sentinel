@@ -302,6 +302,53 @@ class WatcherLaunchUnit(unittest.TestCase):
         for cmd in cases:
             self.assertFalse(guard.is_watcher_launch(cmd), cmd)
 
+    def test_own_env_prefix_matches(self):
+        """`PR_SENTINEL_*` is the only per-launch route to a setting like
+        WATCH_UNTIL: one machine runs orchestrator and worker sessions wanting
+        different values, and every settings file is shared."""
+        self.assertEqual(
+            guard.watcher_launch_pr(
+                f"PR_SENTINEL_WATCH_UNTIL=closed bash {WATCHER} 42"), "42")
+        # several, and the URL form, still resolve to the same PR
+        self.assertEqual(
+            guard.watcher_launch_pr(
+                f"PR_SENTINEL_WATCH_UNTIL=closed PR_SENTINEL_INTERVAL=30 "
+                f'bash "{WATCHER}" https://github.com/o/r/pull/42'), "42")
+        # the namespace is matched by pattern, so a knob added later works
+        # without touching this file
+        self.assertEqual(
+            guard.watcher_launch_pr(
+                f"PR_SENTINEL_FUTURE_KNOB=x bash {WATCHER} 42"), "42")
+
+    def test_foreign_env_prefix_never_matches(self):
+        """The strip is this plugin's namespace and nothing else. Whatever
+        survives it runs unprompted, so a blanket strip would auto-allow
+        arbitrary code: bash sources BASH_ENV before the script body, leaving
+        argv[1]'s realpath check intact and irrelevant."""
+        cases = [
+            f"BASH_ENV=/tmp/evil.sh bash {WATCHER} 6",   # sourced before body
+            f"PATH=/tmp/evil bash {WATCHER} 6",          # hijacks gh/sed/tr
+            f"LD_PRELOAD=/tmp/e.so bash {WATCHER} 6",    # injected into libc
+            f"GH_TOKEN=secret bash {WATCHER} 6",         # unrelated namespace
+            # mixed, either order: a foreign name stops the strip where it
+            # stands and the token count then refuses the launch
+            f"BASH_ENV=/tmp/e.sh PR_SENTINEL_WATCH_UNTIL=closed "
+            f"bash {WATCHER} 6",
+            f"PR_SENTINEL_WATCH_UNTIL=closed BASH_ENV=/tmp/e.sh "
+            f"bash {WATCHER} 6",
+            # lowercase is a different variable; the watcher reads the
+            # uppercase name, so this is a foreign assignment
+            f"pr_sentinel_watch_until=closed bash {WATCHER} 6",
+            # a substitution in the value is caught before the strip runs
+            f"PR_SENTINEL_INTERVAL=$(evil) bash {WATCHER} 6",
+            # the prefix does not excuse any other near miss
+            f"PR_SENTINEL_WATCH_UNTIL=closed sh {WATCHER} 6",
+            f"PR_SENTINEL_WATCH_UNTIL=closed bash {WATCHER} 6 --force",
+            f"PR_SENTINEL_WATCH_UNTIL=closed bash {WATCHER}-evil 6",
+        ]
+        for cmd in cases:
+            self.assertFalse(guard.is_watcher_launch(cmd), cmd)
+
 
 class GuardEndToEnd(unittest.TestCase):
     def _assert_deny(self, out, shape_hint):
@@ -604,12 +651,30 @@ class DuplicateWatcherDeny(unittest.TestCase):
 
     def test_override_downgrades_the_duplicate_deny(self):
         t = transcript_with_live_watcher("7", self.tmp.name)
+        # Inline, which is the only form a session can reach: OVERRIDE is in
+        # this plugin's namespace, so the launch is a recognised shape and the
+        # override downgrades the duplicate deny to the ordinary auto-allow —
+        # the same outcome as the environment form below.
         out, _, _ = self._run(
             f'PR_SENTINEL_OVERRIDE=why bash "{WATCHER}" 7', transcript=t)
-        self.assertEqual(out.strip(), "")   # not a recognised launch shape
+        self.assertEqual(self._decision(out)["permissionDecision"], "allow")
         out, _, _ = self._run(self._launch(), transcript=t,
                               env={"PR_SENTINEL_OVERRIDE": "why"})
         self.assertEqual(self._decision(out)["permissionDecision"], "allow")
+
+    def test_prefixed_relaunch_is_still_a_duplicate(self):
+        """The duplicate deny and the auto-allow read one function, so seeing
+        past the prefix has to reach both. Before that, an env-prefixed
+        relaunch skipped the incumbent check and started a second watcher."""
+        t = transcript_with_live_watcher("7", self.tmp.name)
+        out, _, _ = self._run(
+            f'PR_SENTINEL_WATCH_UNTIL=closed bash "{WATCHER}" 7', transcript=t)
+        self.assertEqual(self._decision(out)["permissionDecision"], "deny")
+        # a foreign prefix is not a recognised launch shape at all, so it
+        # defers to the base permission rather than being denied as a duplicate
+        out, _, _ = self._run(
+            f'BASH_ENV=/tmp/evil.sh bash "{WATCHER}" 7', transcript=t)
+        self.assertEqual(out.strip(), "")
 
     def test_disabled_plugin_never_denies(self):
         t = transcript_with_live_watcher("7", self.tmp.name)
