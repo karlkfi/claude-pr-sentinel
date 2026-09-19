@@ -283,11 +283,15 @@ class TestingSection(unittest.TestCase):
         self.assertIn("test_no_such_suite.py",
                       listed_suites(invented) - suite_files())
 
-        # Undercounting by one is Q20's own drift: a suite added, the prose left.
+        # Undercounting by one is Q20's own drift: a suite added, the prose
+        # left. Asserted as an equality — `assertNotEqual` against the right
+        # word also passes when the extraction returns None, so a regex that
+        # stopped generalising past today's count word would read as a
+        # discriminating control.
         miscounted = self.section.replace(
             lead, COUNT_WORDS[len(suite_files()) - 1] + " suites:", 1)
-        self.assertNotEqual(listed_suite_count(miscounted),
-                            COUNT_WORDS[len(suite_files())])
+        self.assertEqual(COUNT_WORDS[len(suite_files()) - 1],
+                         listed_suite_count(miscounted))
 
 
 if __name__ == "__main__":
