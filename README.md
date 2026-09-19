@@ -811,10 +811,16 @@ Five details do the work:
   and a base with *no* run of that workflow at all (a new workflow, or one whose
   paths the base has never touched) are all treated as "not inherited" — and
   each names itself, because one silence covering three causes is a verdict you
-  can't weigh:
+  can't weigh. The wake carries **one** such line, in whichever form applies —
+  when the comparison ran and didn't settle:
 
   ```
   Base comparison: did not settle — main has no completed run of that workflow
+  ```
+
+  or when it never ran at all:
+
+  ```
   Base comparison: off (PR_SENTINEL_BASE_CHECK=0)
   ```
 
