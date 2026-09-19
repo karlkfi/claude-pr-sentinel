@@ -794,11 +794,34 @@ Five details do the work:
   exists only where the paths matched.
 - **All-or-nothing, like the `continue-on-error` absorption above.** One failure
   the base doesn't share is yours, and that mixed case still wakes you with the
-  full failed list.
-- **Every uncertainty falls through to `check_failure`.** A check with no Actions
-  run behind it, an unreadable workflow id, a `cancelled` base run, and a base
-  with *no* run of that workflow at all (a new workflow, or one whose paths the
-  base has never touched) are all treated as "not inherited".
+  full failed list — plus the members of it the comparison had already found red
+  on the base, so you aren't left to work out which are yours:
+
+  ```
+  Failed checks: doc-links (fail), unit-test (fail)
+  Also failing on main: doc-links.yml (run 31274922338, 47815b6, failure, 15m ago)
+  ```
+
+  Read that as a **partial** list. The comparison stops at the first check that
+  *isn't* red on the base, so it names what it had reached and there may be more.
+  Taking it for the whole inherited set is how you end up diagnosing someone
+  else's failure, which is the thing this whole section exists to prevent.
+- **Every uncertainty falls through to `check_failure`, and the report says
+  which one.** A check with no Actions run behind it, an unreadable workflow id,
+  and a base with *no* run of that workflow at all (a new workflow, or one whose
+  paths the base has never touched) are all treated as "not inherited" — and
+  each names itself, because one silence covering three causes is a verdict you
+  can't weigh:
+
+  ```
+  Base comparison: did not settle — main has no completed run of that workflow
+  Base comparison: off (PR_SENTINEL_BASE_CHECK=0)
+  ```
+
+  A `cancelled` base run is the fourth uncertainty and behaves differently: it
+  ends the comparison like any non-red run, so the wake names it the way a green
+  one is named (`Last main run: … cancelled …`) rather than saying the
+  comparison didn't settle. Weaker evidence, named rather than absent.
 - **When the answer is "not inherited", the wake names the run that decided
   it.** That green base run is the entire evidence for "this failure is yours",
   and it can be arbitrarily stale. A check that reads state from *outside* the
@@ -863,11 +886,15 @@ update the branch, not to fix anything:
   yours, and the next report says so as `check_failure` with the log excerpt.
 - **No log excerpt here.** Diagnosis is premature until the rebase has re-run
   the checks, and the excerpt is semi-untrusted text with no job to do yet.
+- **Any already-inherited members are named**, the same partial list the mixed
+  case gets above. `base_fixed` reaches a mixed set by the same route.
 
-Two things it deliberately does *not* claim. It doesn't say the failure is
-inherited — the base comparison stops at the first workflow that isn't red, so a
-green one doesn't prove every failing check is green on the base. And it doesn't
-rebase for you: the branch belongs to your session, and a rebase can conflict.
+Two things it deliberately does *not* claim. It doesn't say *the failure* is
+inherited — naming the members already found red on the base is a claim about
+those, not about the set, and the comparison stops at the first workflow that
+isn't red, so a green one doesn't prove every failing check is green there. And
+it doesn't rebase for you: the branch belongs to your session, and a rebase can
+conflict.
 
 The ancestry question is one read of GitHub's `compare` endpoint, taken at most
 once per watch and only on the poll where the base goes green while the PR is
