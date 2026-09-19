@@ -229,6 +229,12 @@ report).
   clipped, and the value of every other leading `NAME=VALUE` assignment on it is
   masked first — so a credential a session inlined is not echoed into the
   report.
+- It then **classifies** each of those commands by which deny branch it was
+  headed for, by importing the PreToolUse guard's own predicates from
+  `scripts/pr_sentinel_guard.py` and re-running them locally. They read nothing
+  but the command string and the call's `run_in_background` flag — both already
+  in the transcript — so this adds no network call, no new file read, and
+  nothing new to the output beyond a per-branch count.
 - It does **not** read PR bodies, PR review comments, or issue comments, and it
   parses nothing else out of your transcripts — not your prompts, not the
   model's replies, not other tools' output.
