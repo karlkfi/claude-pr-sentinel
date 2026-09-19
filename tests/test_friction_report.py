@@ -176,10 +176,15 @@ def rec_launch(pr, background=True, ts=TS, cwd=CWD, tool_use_id="toolu_launch",
                  "input": {"command": cmd, "run_in_background": background}}]}}
 
 
-def rec_bash(command, ts=TS, cwd=CWD, tool_use_id="toolu_bash"):
-    """A Bash tool_use that is not a watcher launch."""
+def rec_bash(command, ts=TS, cwd=CWD, tool_use_id="toolu_bash",
+             background=True):
+    """A Bash tool_use that is not a watcher launch.
+
+    `background` is exposed because the guard returns above its poll deny for a
+    backgrounded call, so it decides which branch an override was headed for.
+    """
     return rec_launch(None, ts=ts, cwd=cwd, tool_use_id=tool_use_id,
-                      command=command)
+                      command=command, background=background)
 
 
 def rec_result(text, ts=TS, cwd=CWD, tool_use_id="toolu_result"):
@@ -670,6 +675,113 @@ class TestOverrides(TranscriptCase):
         self.write([rec_bash("cat > f <<'EOF'\ntext\nEOF\n"
                              "PR_SENTINEL_OVERRIDE=why gh run watch 9")])
         self.assertEqual(1, self.report()["overrides"])
+
+
+# A create that would overlap, written once: the branch tests and the ordering
+# tests all reach for it.
+CREATE = 'gh pr create --title t --body-file b.md'
+
+
+class TestOverrideBranches(TranscriptCase):
+    """Q33: the override total is one number with no branch attached, so it
+    cannot tell an overlap deny being correctly routed around from a weak
+    remediation on the poll deny. These split it."""
+
+    def split(self, *records):
+        self.write(list(records))
+        return dict(self.report()["override_branches"])
+
+    def test_a_foreground_poll_is_the_poll_branch(self):
+        self.assertEqual({"poll": 1}, self.split(
+            rec_bash("PR_SENTINEL_OVERRIDE=why gh run watch 9",
+                     background=False)))
+
+    def test_a_backgrounded_poll_reached_no_deny(self):
+        """The guard returns above its poll deny for a backgrounded call, so
+        the prefix on one bought nothing — which is worth seeing, not hiding
+        in the poll bucket."""
+        self.assertEqual({"none": 1}, self.split(
+            rec_bash("PR_SENTINEL_OVERRIDE=why gh run watch 9",
+                     background=True)))
+
+    def test_a_create_is_the_overlap_branch(self):
+        self.assertEqual({"overlap": 1}, self.split(
+            rec_bash('PR_SENTINEL_OVERRIDE="stacked on #5" ' + CREATE)))
+
+    def test_a_watcher_launch_is_the_duplicate_branch(self):
+        self.assertEqual({"duplicate": 1}, self.split(
+            rec_launch(41, command='PR_SENTINEL_OVERRIDE=relaunch '
+                                   'bash "%s" 41' % WATCHER_PATH)))
+
+    def test_a_command_no_branch_would_deny_is_none(self):
+        self.assertEqual({"none": 1}, self.split(
+            rec_bash("PR_SENTINEL_OVERRIDE=why git push", background=False)))
+
+    def test_the_split_accounts_for_every_override(self):
+        self.write([
+            rec_bash("PR_SENTINEL_OVERRIDE=a gh run watch 9",
+                     background=False, tool_use_id="t1"),
+            rec_bash('PR_SENTINEL_OVERRIDE=b ' + CREATE, tool_use_id="t2"),
+            rec_bash("PR_SENTINEL_OVERRIDE=c git push", tool_use_id="t3"),
+        ])
+        r = self.report()
+        self.assertEqual(3, r["overrides"])
+        self.assertEqual(3, sum(r["override_branches"].values()))
+        self.assertEqual({"poll": 1, "overlap": 1, "none": 1},
+                         dict(r["override_branches"]))
+
+    def test_overlap_is_read_above_the_backgrounded_return(self):
+        """Backgrounding answers the poll deny and not the overlap deny — a
+        backgrounded create still opens the PR. The guard reads them in that
+        order and so does this."""
+        self.assertEqual({"overlap": 1}, self.split(
+            rec_bash('PR_SENTINEL_OVERRIDE=x ' + CREATE, background=True)))
+
+    def test_overlap_is_read_before_the_poll(self):
+        self.assertEqual({"overlap": 1}, self.split(
+            rec_bash("PR_SENTINEL_OVERRIDE=x %s && gh run watch 9" % CREATE,
+                     background=False)))
+
+
+class TestOverrideBranchContract(unittest.TestCase):
+    """What the split rests on: the guard's branch set, and the one predicate
+    of the guard's it deliberately does not use."""
+
+    def test_every_deny_branch_has_a_bucket(self):
+        """A new deny branch in the guard must land here too, or its overrides
+        fall into `none` and read as the escape hatch spent on nothing."""
+        denies = set(fr.GUARD_CATEGORY) - {"auto-allow"}
+        self.assertEqual(denies | {"none"}, set(fr.OVERRIDE_BRANCH_HINT))
+
+    def test_the_prefix_needs_no_stripping(self):
+        """Q33 asks for the branch the command would have drawn with the prefix
+        absent. The guard's predicates strip leading assignments themselves, so
+        the recorded command answers the same either way — and leaving it on is
+        the more faithful read, because the guard saw it too."""
+        for bare, background in ((CREATE, True),
+                                 ("gh run watch 9", False),
+                                 ("gh pr checks 9 --watch", False),
+                                 ("while :; do gh pr checks 9; sleep 30; done",
+                                  False),
+                                 ("git push", False)):
+            with self.subTest(command=bare):
+                self.assertEqual(
+                    fr.override_branch(bare, background),
+                    fr.override_branch('PR_SENTINEL_OVERRIDE="why not" ' + bare,
+                                       background))
+
+    def test_the_guards_launch_predicate_cannot_see_a_recorded_launch(self):
+        """Why the duplicate shape is read with this report's own LAUNCH.
+
+        `watcher_launch_pr` realpath-compares argv[1] against the watcher
+        beside the importing file, which for the report is its own checkout. A
+        recorded launch names the installed plugin's versioned cache path, so
+        the guard's predicate answers None for every one of them and the bucket
+        would be a structural zero. Delete this test with the workaround.
+        """
+        cmd = 'bash "%s" 41' % WATCHER_PATH
+        self.assertIsNone(guard.watcher_launch_pr(cmd))
+        self.assertEqual("duplicate", fr.override_branch(cmd, True))
 
 
 # --- filters and output ------------------------------------------------------
