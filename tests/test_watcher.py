@@ -834,20 +834,30 @@ class WatcherCase(unittest.TestCase):
                       "(run 31274922338, 47815b6, success, 18h 23m ago)", out)
         self.assertNotIn("Base comparison:", out)
 
-    def test_the_four_silences_are_now_four_distinct_reports(self):
-        """The row's actual claim, which no single case above establishes. Four
-        situations shared one appearance; assert they no longer do, pairwise."""
+    def test_every_former_silence_now_names_itself_distinctly(self):
+        """The row's actual claim, which no single case above establishes.
+
+        An earlier version of this ran four situations and was named for four
+        silences, but only three of them were silences — the fourth entry was
+        the green control. A mutation blanking the no-Actions-run reason left it
+        green, because that case was never in the table. All four silences are
+        here now, and the name no longer implies a count the body has to keep
+        in step with.
+        """
         green = self._inherited(base_conclusion="success")
         no_run = self._inherited()
         del no_run["base_run.99"]
         bad_id = self._inherited()
         del bad_id["run_workflow.22"]
+        no_actions = self._inherited()
+        no_actions["pr_checks"] = "fail\tdoc-links\thttps://ci.example/build/7\n"
 
         lines = {}
         for name, files, env in (
             ("green", green, None),
             ("no base run", no_run, None),
             ("unreadable workflow id", bad_id, None),
+            ("no Actions run behind the check", no_actions, None),
             ("check off", green, {"PR_SENTINEL_BASE_CHECK": "0"}),
         ):
             _, out, _ = self.run_watcher(files, env=env)
