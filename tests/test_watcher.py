@@ -59,6 +59,33 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 WATCHER = REPO / "scripts" / "pr-sentinel-watch.sh"
 
+
+# A run that could not be measured is not a verdict about the watcher, and
+# both of its shapes used to arrive dressed as one. The wording follows
+# test_overlap.py's PROBE_TIMED_OUT: name the cause, then say whose defect it
+# is, because the reader is a session deciding whether its own diff broke this.
+UNMEASURABLE = (
+    "the watcher run could not be measured, so this is not a verdict about "
+    "the watcher: %s. Under concurrent load that is this suite losing a race "
+    "for the machine, not a defect in the code under test."
+)
+
+
+def timeout_scale():
+    """Multiplier on this file's subprocess budgets, from
+    `PR_SENTINEL_PROBE_TIMEOUT_SCALE`. Floored at 1; anything but a whole
+    number above 1 falls back to 1.
+
+    Spelled out here rather than imported: this suite drives the bash watcher
+    and loads no Python from `scripts/`. `ScaleKnob` pins it against the
+    shipped reader so the two cannot drift.
+    """
+    try:
+        scale = int(os.environ.get("PR_SENTINEL_PROBE_TIMEOUT_SCALE", ""))
+    except ValueError:
+        return 1
+    return scale if scale > 1 else 1
+
 GH_STUB = textwrap.dedent(
     """\
     #!/usr/bin/env bash
@@ -182,14 +209,80 @@ DATE_STUB = textwrap.dedent(
 )
 
 
+# A `sleep` that dies on SIGTERM. Under the watcher's `set -euo pipefail` a
+# foreground child killed by a signal ends the script with that child's
+# 128+N, which is the signature Q52 measured in the wild. Measured here
+# against the real watcher: rc 143, with stderr naming `sleep "$sleep_for"`.
+DYING_SLEEP = textwrap.dedent(
+    """\
+    #!/usr/bin/env bash
+    kill -TERM $$
+    """
+)
+
+# The same site failing WITHOUT a signal. errexit propagates this identically,
+# so it is what separates "the harness could not measure" from "the watcher
+# failed" — the two differ only by the status range.
+FAILING_SLEEP = textwrap.dedent(
+    """\
+    #!/usr/bin/env bash
+    exit 7
+    """
+)
+
+
 def sleeps(stderr):
     """The durations the watcher asked for, in order (virtual_clock runs only)."""
     return [int(m) for m in re.findall(r"^SLEEP (\d+)$", stderr, re.M)]
 
 
 class WatcherCase(unittest.TestCase):
-    def run_watcher(self, files, pr="123", env=None, timeout=20,
-                    virtual_clock=False, cwd_repo=None):
+    def _watch(self, pr, run_env, timeout):
+        """Run the watcher, refusing a result that is not a measurement (Q52).
+
+        Two ways a run comes back with nothing to assert on:
+
+        The harness cap expires. `subprocess.run(timeout=)` RAISES, so this
+        used to surface as a `TimeoutExpired` error attributed to whichever
+        case happened to be holding the machine.
+
+        A status above 128. A child of the watcher dies on a signal and
+        `set -euo pipefail` propagates 128+N as the script's own status, so
+        `assertEqual(rc, 0)` is correct and reports `143 != 0` — which reads
+        as "the watcher was killed", a claim about the code under test.
+        Python reports a child IT killed as a NEGATIVE returncode, so a
+        positive can only be a status bash itself returned: the signal
+        reached a child of the watcher, not the watcher. Who sends it is
+        unmeasured, and nothing here guesses.
+
+        The watcher exits 0 or 2 and nothing else, so no verdict of its own
+        is swallowed by the second rule.
+
+        Raising rather than skipping is deliberate. A skip is green, and a
+        loaded box would then report a run in which most of this suite
+        silently did not execute. The run still fails; what changes is that
+        it now says whose failure it is.
+        """
+        try:
+            proc = subprocess.run(
+                ["bash", str(WATCHER), pr],
+                capture_output=True, text=True, env=run_env, timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise AssertionError(UNMEASURABLE % (
+                "the %ss harness cap expired before the watch finished"
+                % timeout)) from None
+        if proc.returncode > 128:
+            raise AssertionError(UNMEASURABLE % (
+                "the watcher exited %d, which is 128+%d: a child of it died "
+                "on signal %d and errexit propagated that status"
+                % (proc.returncode, proc.returncode - 128,
+                   proc.returncode - 128)))
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def run_watcher(self, files, pr="123", env=None, timeout=None,
+                    virtual_clock=False, cwd_repo=None, extra_stubs=None):
         """Set up a stub-gh scenario dir, run the watcher, return (rc, stdout).
 
         virtual_clock also stubs `sleep` and `date`, so the watch costs no wall
@@ -198,6 +291,8 @@ class WatcherCase(unittest.TestCase):
         cwd_repo names the `<owner>_<repo>` a BARE PR number resolves against,
         standing in for the directory gh would resolve it in.
         """
+        if timeout is None:
+            timeout = 20 * timeout_scale()
         scen = tempfile.mkdtemp(prefix="pr-sentinel-test-")
         bindir = os.path.join(scen, "bin")
         os.makedirs(bindir)
@@ -205,6 +300,8 @@ class WatcherCase(unittest.TestCase):
         if virtual_clock:
             stubs["sleep"] = SLEEP_STUB
             stubs["date"] = DATE_STUB
+        if extra_stubs:
+            stubs.update(extra_stubs)
         for name, body in stubs.items():
             path = os.path.join(bindir, name)
             with open(path, "w", encoding="utf-8") as f:
@@ -233,12 +330,117 @@ class WatcherCase(unittest.TestCase):
         if env:
             run_env.update(env)
 
-        proc = subprocess.run(
-            ["bash", str(WATCHER), pr],
-            capture_output=True, text=True, env=run_env, timeout=timeout,
-            check=False,
-        )
-        return proc.returncode, proc.stdout, proc.stderr
+        return self._watch(pr, run_env, timeout)
+
+    def test_the_timeout_scale_reaches_the_subprocess_cap(self):
+        """The knob is worth nothing unless it reaches the bound that expires.
+
+        Reads the cap handed to `subprocess.run` rather than the helper's
+        return value, so a scale that is read and then dropped on the way
+        through fails here and passes everywhere else.
+        """
+        files = {"pr_view": "MERGED\tUNKNOWN\tmain\n"}
+        seen = []
+        real = subprocess.run
+
+        def spy(*args, **kwargs):
+            # Only the watcher's own call, so a later `subprocess.run` added
+            # inside run_watcher cannot break this as though it were a scale
+            # bug.
+            if args and args[0][:1] == ["bash"] and str(WATCHER) in args[0]:
+                seen.append(kwargs.get("timeout"))
+            return real(*args, **kwargs)
+
+        saved = os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
+
+        def restore():
+            subprocess.run = real
+            os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
+            if saved is not None:
+                os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = saved
+
+        self.addCleanup(restore)
+        subprocess.run = spy
+        self.run_watcher(files)
+        os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = "3"
+        self.run_watcher(files)
+        self.assertEqual(seen, [20, 60],
+                         "unset must cap at 20s and a scale of 3 must carry "
+                         "that to 60s")
+
+    # -- runs that could not be measured (Q52) -------------------------------
+
+    POLLING = {"pr_view": "OPEN\tBLOCKED\tmain\n",
+               "pr_checks": "pending\tbuild\tlink\n"}
+
+    def test_a_signalled_child_is_refused_rather_than_asserted_on(self):
+        """The 143. A child dies on SIGTERM, errexit hands its 128+15 back as
+        the watcher's own status, and `assertEqual(rc, 0)` then reports
+        `143 != 0` — a correct assertion whose verdict reads "the watcher was
+        killed", which is a claim about the code under test.
+
+        Reproduced deterministically by SIGTERMing the child that Q52 left
+        unmeasured. Measured against the real watcher: `gh` dying this way
+        does NOT produce it (the watch survives and runs to its own budget),
+        `sleep` does, at `sleep "$sleep_for"`.
+        """
+        with self.assertRaises(AssertionError) as caught:
+            self.run_watcher(self.POLLING, extra_stubs={"sleep": DYING_SLEEP})
+        msg = str(caught.exception)
+        self.assertIn("could not be measured", msg)
+        self.assertIn("128+15", msg)
+        self.assertNotIn("143 != 0", msg)
+
+    def test_an_ordinary_failure_at_that_site_is_still_a_verdict(self):
+        """The control, and the reason the rule keys on the range rather than
+        on non-zero. errexit propagates ANY status from the same statement —
+        measured, a `sleep` exiting 7 makes the watcher exit 7 — so a refusal
+        keyed on "not 0" would swallow real failures. 7 is handed back.
+        """
+        rc, _, _ = self.run_watcher(self.POLLING,
+                                    extra_stubs={"sleep": FAILING_SLEEP})
+        self.assertEqual(rc, 7)
+
+    def test_an_expired_harness_cap_is_refused_rather_than_raised(self):
+        """The other unmeasurable shape. `subprocess.run(timeout=)` RAISES, so
+        this used to surface as a `TimeoutExpired` error attributed to
+        whichever case happened to be holding the machine."""
+        with self.assertRaises(AssertionError) as caught:
+            self.run_watcher(self.POLLING, timeout=1)
+        msg = str(caught.exception)
+        self.assertIn("could not be measured", msg)
+        self.assertIn("harness cap expired", msg)
+
+    def test_the_refusal_begins_above_128(self):
+        """128 is bash's own "invalid exit argument"; 129 is the first
+        128+signal. Driven with a stubbed status rather than a real signal,
+        because the boundary is the subject here and not the mechanism — and
+        a real signal cannot produce 128 to test the low side with.
+
+        The watcher itself exits only 0 or 2, so nothing it can legitimately
+        return is inside the refused range.
+        """
+        real = subprocess.run
+
+        class Fake:
+            def __init__(self, rc):
+                self.returncode, self.stdout, self.stderr = rc, "", ""
+
+        def at(rc):
+            self.addCleanup(setattr, subprocess, "run", real)
+            subprocess.run = lambda *a, **k: Fake(rc)
+            try:
+                return self._watch("123", {}, 20)
+            finally:
+                subprocess.run = real
+
+        for rc in (0, 2, 128):
+            self.assertEqual(at(rc)[0], rc,
+                             "%d is a verdict and must pass through" % rc)
+        for rc in (129, 143, 137):
+            with self.assertRaises(AssertionError,
+                                   msg="%d must be refused" % rc):
+                at(rc)
 
     # -- exit conditions -----------------------------------------------------
 
@@ -1751,8 +1953,10 @@ class WatcherCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("PR-SENTINEL EVENT: check_failure", out)
 
-    def _run_with_gh(self, gh_body, pr="123", env=None, timeout=20):
+    def _run_with_gh(self, gh_body, pr="123", env=None, timeout=None):
         """Run the watcher against a bespoke gh stub script body."""
+        if timeout is None:
+            timeout = 20 * timeout_scale()
         scen = tempfile.mkdtemp(prefix="pr-sentinel-test-")
         bindir = os.path.join(scen, "bin")
         os.makedirs(bindir)
@@ -1768,12 +1972,7 @@ class WatcherCase(unittest.TestCase):
         run_env.setdefault("PR_SENTINEL_TIMEOUT", "30")
         if env:
             run_env.update(env)
-        proc = subprocess.run(
-            ["bash", str(WATCHER), pr],
-            capture_output=True, text=True, env=run_env, timeout=timeout,
-            check=False,
-        )
-        return proc.returncode, proc.stdout, proc.stderr
+        return self._watch(pr, run_env, timeout)
 
     def test_error_event_on_missing_credentials(self):
         """`gh auth status` saying there are no credentials at all is decided
@@ -2375,6 +2574,80 @@ def undisclosed_writes(script, privacy):
     if "PR_SENTINEL_STATE_DIR" not in privacy:
         missing.append("PR_SENTINEL_STATE_DIR")
     return missing
+
+
+# Values a scale knob meets in the wild, and the reading each must get. The
+# floor is the load-bearing half: a budget the environment can SHORTEN is a
+# guard the environment can make fail open more often.
+SCALE_CORPUS = {
+    None: 1, "": 1, "   ": 1, "0": 1, "1": 1, "-4": 1,
+    "2.5": 1, "abc": 1, "inf": 1, "nan": 1, "1e3": 1,
+    "2": 2, "3": 3, "10": 10,
+}
+
+
+class ScaleKnob(unittest.TestCase):
+    """`PR_SENTINEL_PROBE_TIMEOUT_SCALE` lets a loaded box buy time rather than
+    collect timeouts it then reads as failures (Q27)."""
+
+    def setUp(self):
+        saved = os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
+        self.addCleanup(self._restore, saved)
+
+    @staticmethod
+    def _restore(saved):
+        os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
+        if saved is not None:
+            os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = saved
+
+    @staticmethod
+    def _read(reader, raw):
+        os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
+        if raw is not None:
+            os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = raw
+        return reader()
+
+    @staticmethod
+    def _shipped_reader():
+        from importlib import util
+        path = REPO / "scripts" / "pr_sentinel_overlap.py"
+        spec = util.spec_from_file_location("pr_sentinel_overlap_scale", path)
+        mod = util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.timeout_scale
+
+    def test_the_corpus_reads_as_expected(self):
+        for raw, want in SCALE_CORPUS.items():
+            self.assertEqual(self._read(timeout_scale, raw), want,
+                             "scale %r" % (raw,))
+
+    def test_the_shipped_reader_agrees(self):
+        """Two readers, because this suite drives bash and loads no Python
+        from `scripts/`. They must not drift: a harness scaling differently
+        from the guard it runs is a budget nobody can reason about."""
+        shipped = self._shipped_reader()
+        for raw in SCALE_CORPUS:
+            self.assertEqual(self._read(timeout_scale, raw),
+                             self._read(shipped, raw),
+                             "readers disagree on scale %r" % (raw,))
+
+    def test_the_agreement_check_can_fail(self):
+        """A corpus the two happen to agree on proves nothing unless a
+        divergence would be caught. Swaps in a reader with the floor
+        removed — the one difference that matters — and demands the corpus
+        notice."""
+        def floorless():
+            try:
+                return int(
+                    os.environ.get("PR_SENTINEL_PROBE_TIMEOUT_SCALE", ""))
+            except ValueError:
+                return 1
+        caught = [raw for raw in SCALE_CORPUS
+                  if self._read(timeout_scale, raw)
+                  != self._read(floorless, raw)]
+        self.assertIn("0", caught,
+                      "a reader that lets the environment shorten a budget "
+                      "must not pass this corpus")
 
 
 class PrivacyDisclosure(unittest.TestCase):
