@@ -78,7 +78,22 @@ def ignore_patterns():
     return [p for p in (part.strip() for part in raw.split(',')) if p]
 
 
-def capture(argv, cwd, timeout=PROBE_TIMEOUT):
+def timeout_scale():
+    """Multiplier on the subprocess budget, from `PR_SENTINEL_TIMEOUT_SCALE`.
+
+    Floored at 1, so the knob can only ever buy time. A probe that answers is
+    worth more than one that fails open, and a floor means no value set here
+    can widen the fail-open beyond what the shipped default already allows.
+    Anything but a whole number above 1 falls back to 1.
+    """
+    try:
+        scale = int(os.environ.get('PR_SENTINEL_TIMEOUT_SCALE', ''))
+    except ValueError:
+        return 1
+    return scale if scale > 1 else 1
+
+
+def capture(argv, cwd, timeout=None):
     """(exit status, stdout) for a subprocess.
 
     Two ways to get no status: `None` for a probe that never ran, `TIMED_OUT`
@@ -87,8 +102,15 @@ def capture(argv, cwd, timeout=PROBE_TIMEOUT):
     evaluating" from "the check found nothing", which are the same silence to
     every caller below and to the session reading the transcript.
 
+    `timeout` defaults to `PROBE_TIMEOUT` scaled, resolved per call rather
+    than as a parameter default: a default binds at definition, so it would
+    read the environment once at import and never again. An explicit argument
+    is absolute and is not scaled.
+
     `TimeoutExpired` is caught first because it subclasses `SubprocessError`.
     """
+    if timeout is None:
+        timeout = PROBE_TIMEOUT * timeout_scale()
     try:
         proc = subprocess.run(argv, cwd=cwd or None, stdout=subprocess.PIPE,
                               stderr=subprocess.DEVNULL, timeout=timeout)
