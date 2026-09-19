@@ -160,13 +160,15 @@ EVENT_MARKER = 'PR-SENTINEL EVENT:'
 # case (#9); the heal events are the ones where a repeat is most reliably NOT
 # actionable — the session has usually already healed the branch on disk and is
 # waiting on its own gate before pushing, so the remote head cannot have moved
-# yet (#50). The non-terminal notices (`base_failure`, `repeat_failure`,
+# yet (#50). `base_fixed` is a heal event in that sense too: it asks for a
+# rebase and a push, so a second one at the same head says the branch was
+# never updated. The non-terminal notices (`base_failure`, `repeat_failure`,
 # `ready_watching`, `blocked_watching`, `unchecked_watching`) are excluded: the
 # watcher keeps polling past them, so they are not the report the session is
 # being blocked over. So are the concluded events, which already suppress the
 # block outright.
 DAMPENABLE_EVENT_RE = re.compile(
-    r'PR-SENTINEL EVENT:\s*(check_failure|conflict|behind|dequeued)(?![\w-])')
+    r'PR-SENTINEL EVENT:\s*(check_failure|conflict|behind|dequeued|base_fixed)(?![\w-])')
 
 # The opening words of the block message, which double as how a block this hook
 # ALREADY made is found on a later turn: the harness records the reason verbatim

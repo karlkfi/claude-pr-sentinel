@@ -96,6 +96,12 @@ GH_STUB = textwrap.dedent(
             *)                emit "base_run.$wf" || true ;;
           esac
           exit 0 ;;
+        # repos/<o>/<r>/compare/<base>...<head> -> the `compare` fixture, whose
+        # whole content is GitHub's `.status` word. No fixture means the
+        # endpoint was unreadable, which the watcher treats as undecidable.
+        */compare/*)
+          emit "compare" || true
+          exit 0 ;;
       esac
       # repos/<o>/<r>/actions/runs/<id> -> run_workflow.<id> for the
       # `-q .workflow_id` projection, run_conclusion.<id> otherwise. Absent =
@@ -713,6 +719,159 @@ class WatcherCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("PR-SENTINEL EVENT: check_failure", out)
         self.assertNotIn("Last main run:", out)
+
+    # -- a head that predates the base's fix (Q38) ---------------------------
+
+    # `_inherited(base_conclusion="success")` is the state this section starts
+    # from: the base run is green and this PR is still red. Whether that failure
+    # is the PR's own turns on one further fact — does this head have the green
+    # run's commit behind it — and `compare` is the fixture that answers it.
+    #
+    # The silence-asserting case below (an unreadable compare) is only worth
+    # anything because `compare` genuinely changes the verdict in the two cases
+    # above it. Without those, a stub that never reached the endpoint would pass
+    # it exactly as a working one does.
+
+    def _fixed_base(self, status=None):
+        """Base green, this PR still failing, `compare` reporting `status`."""
+        files = self._inherited(base_conclusion="success", base_age="120")
+        if status is not None:
+            files["compare"] = status + "\n"
+        return files
+
+    def test_a_head_behind_the_green_base_run_reports_base_fixed(self):
+        """The motivating misfire. The base went green, this head predates the
+        commit that proved it, and the old report called that "yours to fix" —
+        which sends the session to write a duplicate of someone else's landed
+        fix onto a branch that only needed updating."""
+        rc, out, _ = self.run_watcher(self._fixed_base("behind"))
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: base_fixed", out)
+        self.assertNotIn("EVENT: check_failure", out)
+        self.assertIn("Do NOT diagnose and fix it from here", out)
+        self.assertIn("duplicates landed work", out)
+        self.assertIn("Do NOT auto-merge", out)
+
+    def test_a_diverged_head_reports_base_fixed_too(self):
+        """`diverged` is `behind` plus commits of its own: the green commit is
+        still not an ancestor, so the evidence is still code this head lacks."""
+        rc, out, _ = self.run_watcher(self._fixed_base("diverged"))
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: base_fixed", out)
+        self.assertNotIn("EVENT: check_failure", out)
+
+    def test_a_head_carrying_the_green_commit_is_this_prs_own(self):
+        """The third state Q38 names, and the one the old code was right about:
+        the head HAS the fix and is still failing, so the failure is its own."""
+        rc, out, _ = self.run_watcher(self._fixed_base("ahead"))
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: base_fixed", out)
+
+    def test_a_head_identical_to_the_green_commit_is_this_prs_own(self):
+        """Same commit on both sides — nothing to rebase onto."""
+        rc, out, _ = self.run_watcher(self._fixed_base("identical"))
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: base_fixed", out)
+
+    def test_an_unreadable_compare_leaves_the_wake_as_it_was(self):
+        """Fail open, like every other uncertainty here: a compare endpoint that
+        answers nothing — an old `gh`, a token that cannot read the repo — must
+        not invent a rebase instruction. It leaves the pre-Q38 behaviour."""
+        rc, out, _ = self.run_watcher(self._fixed_base())
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: base_fixed", out)
+
+    def test_a_nonsense_compare_status_leaves_the_wake_as_it_was(self):
+        """Only the four words GitHub documents decide anything. An unexpected
+        one is an unknown, not a `behind`."""
+        rc, out, _ = self.run_watcher(self._fixed_base("sideways"))
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: base_fixed", out)
+
+    def test_a_red_base_still_reports_base_failure(self):
+        """State one is unchanged and comes first: while the base is ALSO red
+        there is no fix to be behind, and the notice stays non-terminal."""
+        files = self._inherited()
+        files["compare"] = "behind\n"
+        rc, out, _ = self.run_watcher(files, env={"PR_SENTINEL_TIMEOUT": "3"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: base_failure", out)
+        self.assertNotIn("EVENT: base_fixed", out)
+
+    def test_base_check_off_never_reports_base_fixed(self):
+        """PR_SENTINEL_BASE_CHECK=0 makes no base query, so nothing establishes
+        a green base run and the compare is never consulted."""
+        rc, out, _ = self.run_watcher(
+            self._fixed_base("behind"),
+            env={"PR_SENTINEL_BASE_CHECK": "0"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: base_fixed", out)
+
+    def test_base_fixed_names_the_green_run_it_is_behind(self):
+        """The verdict rests on one run, so the report names it — the same
+        reason check_failure names it, and the reader needs it more here."""
+        rc, out, _ = self.run_watcher(self._fixed_base("behind"))
+        self.assertIn("Last main run: doc-links.yml "
+                      "(run 31274922338, 47815b6, success, 2m ago)", out)
+        self.assertIn("Head SHA: abc1234def", out)
+        self.assertIn("Failed checks: doc-links (fail)", out)
+
+    def test_base_fixed_does_not_claim_the_failure_is_inherited(self):
+        """base_failures_only returns on the FIRST base run that is not red, so
+        a green one does not prove every failing check is green on the base.
+        Overclaiming "inherited" would be this defect mirrored — the report says
+        attribution is undecidable until the branch is updated."""
+        rc, out, _ = self.run_watcher(self._fixed_base("behind"))
+        self.assertIn("may be", out)
+        self.assertNotIn("none of them is this PR's to fix", out)
+        self.assertIn("let the next run decide", out)
+
+    def test_base_fixed_carries_no_ci_log_excerpt(self):
+        """Diagnosis is premature until the rebase has re-run the checks, and
+        the excerpt is semi-untrusted text with no job to do here."""
+        rc, out, _ = self.run_watcher(self._fixed_base("behind"))
+        self.assertNotIn("BEGIN CI LOG EXCERPT", out)
+
+    def test_base_fixed_gives_the_rebase_instruction_by_default(self):
+        rc, out, _ = self.run_watcher(self._fixed_base("behind"))
+        self.assertIn("git fetch origin main && git rebase origin/main", out)
+        self.assertIn("--force-with-lease", out)
+        # The stacked-branch caveat rides along, as it does on `behind`: a
+        # squash-merged parent makes the plain rebase the wrong move.
+        self.assertIn("check whether this branch is STACKED", out)
+
+    def test_base_fixed_honours_the_heal_knob(self):
+        """PR_SENTINEL_HEAL=merge exists because some repos require a
+        fast-forward push, and a report that ignored it would be unusable in
+        exactly those repos."""
+        rc, out, _ = self.run_watcher(
+            self._fixed_base("behind"), env={"PR_SENTINEL_HEAL": "merge"})
+        self.assertIn("git fetch origin main && git merge origin/main", out)
+        self.assertIn("Merge, NOT rebase", out)
+        self.assertNotIn("--force-with-lease", out)
+
+    def test_base_fixed_is_terminal(self):
+        """The session has something concrete to do, so this exits and wakes it
+        — unlike base_failure, where the wait is the instruction."""
+        rc, out, _ = self.run_watcher(
+            self._fixed_base("behind"), env={"PR_SENTINEL_TIMEOUT": "3"})
+        self.assertEqual(rc, 0)
+        self.assertNotIn("EVENT: timeout", out)
+        self.assertEqual(out.count("PR-SENTINEL EVENT: base_fixed"), 1)
+
+    def test_base_failure_notice_promises_the_right_successor(self):
+        """The notice's closing paragraph promised `check_failure` outright,
+        which is the promise this defect made good on wrongly. It now names
+        both successors and what separates them."""
+        rc, out, _ = self.run_watcher(
+            self._inherited(), env={"PR_SENTINEL_TIMEOUT": "3"})
+        self.assertIn("with check_failure once this head has the fix", out)
+        self.assertIn("with base_fixed while it still predates it", out)
 
     # -- a relaunch over a failure already reported (Q43) ---------------------
 
