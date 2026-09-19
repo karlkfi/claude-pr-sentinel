@@ -59,6 +59,22 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 WATCHER = REPO / "scripts" / "pr-sentinel-watch.sh"
 
+
+def timeout_scale():
+    """Multiplier on this file's subprocess budgets, from
+    `PR_SENTINEL_PROBE_TIMEOUT_SCALE`. Floored at 1; anything but a whole
+    number above 1 falls back to 1.
+
+    Spelled out here rather than imported: this suite drives the bash watcher
+    and loads no Python from `scripts/`. `ScaleKnob` pins it against the
+    shipped reader so the two cannot drift.
+    """
+    try:
+        scale = int(os.environ.get("PR_SENTINEL_PROBE_TIMEOUT_SCALE", ""))
+    except ValueError:
+        return 1
+    return scale if scale > 1 else 1
+
 GH_STUB = textwrap.dedent(
     """\
     #!/usr/bin/env bash
@@ -188,7 +204,7 @@ def sleeps(stderr):
 
 
 class WatcherCase(unittest.TestCase):
-    def run_watcher(self, files, pr="123", env=None, timeout=20,
+    def run_watcher(self, files, pr="123", env=None, timeout=None,
                     virtual_clock=False, cwd_repo=None):
         """Set up a stub-gh scenario dir, run the watcher, return (rc, stdout).
 
@@ -198,6 +214,8 @@ class WatcherCase(unittest.TestCase):
         cwd_repo names the `<owner>_<repo>` a BARE PR number resolves against,
         standing in for the directory gh would resolve it in.
         """
+        if timeout is None:
+            timeout = 20 * timeout_scale()
         scen = tempfile.mkdtemp(prefix="pr-sentinel-test-")
         bindir = os.path.join(scen, "bin")
         os.makedirs(bindir)
@@ -239,6 +257,42 @@ class WatcherCase(unittest.TestCase):
             check=False,
         )
         return proc.returncode, proc.stdout, proc.stderr
+
+    def test_the_timeout_scale_reaches_the_subprocess_cap(self):
+        """The knob is worth nothing unless it reaches the bound that expires.
+
+        Reads the cap handed to `subprocess.run` rather than the helper's
+        return value, so a scale that is read and then dropped on the way
+        through fails here and passes everywhere else.
+        """
+        files = {"pr_view": "MERGED\tUNKNOWN\tmain\n"}
+        seen = []
+        real = subprocess.run
+
+        def spy(*args, **kwargs):
+            # Only the watcher's own call, so a later `subprocess.run` added
+            # inside run_watcher cannot break this as though it were a scale
+            # bug.
+            if args and args[0][:1] == ["bash"] and str(WATCHER) in args[0]:
+                seen.append(kwargs.get("timeout"))
+            return real(*args, **kwargs)
+
+        saved = os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
+
+        def restore():
+            subprocess.run = real
+            os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
+            if saved is not None:
+                os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = saved
+
+        self.addCleanup(restore)
+        subprocess.run = spy
+        self.run_watcher(files)
+        os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = "3"
+        self.run_watcher(files)
+        self.assertEqual(seen, [20, 60],
+                         "unset must cap at 20s and a scale of 3 must carry "
+                         "that to 60s")
 
     # -- exit conditions -----------------------------------------------------
 
@@ -1751,8 +1805,10 @@ class WatcherCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("PR-SENTINEL EVENT: check_failure", out)
 
-    def _run_with_gh(self, gh_body, pr="123", env=None, timeout=20):
+    def _run_with_gh(self, gh_body, pr="123", env=None, timeout=None):
         """Run the watcher against a bespoke gh stub script body."""
+        if timeout is None:
+            timeout = 20 * timeout_scale()
         scen = tempfile.mkdtemp(prefix="pr-sentinel-test-")
         bindir = os.path.join(scen, "bin")
         os.makedirs(bindir)
@@ -2375,6 +2431,80 @@ def undisclosed_writes(script, privacy):
     if "PR_SENTINEL_STATE_DIR" not in privacy:
         missing.append("PR_SENTINEL_STATE_DIR")
     return missing
+
+
+# Values a scale knob meets in the wild, and the reading each must get. The
+# floor is the load-bearing half: a budget the environment can SHORTEN is a
+# guard the environment can make fail open more often.
+SCALE_CORPUS = {
+    None: 1, "": 1, "   ": 1, "0": 1, "1": 1, "-4": 1,
+    "2.5": 1, "abc": 1, "inf": 1, "nan": 1, "1e3": 1,
+    "2": 2, "3": 3, "10": 10,
+}
+
+
+class ScaleKnob(unittest.TestCase):
+    """`PR_SENTINEL_PROBE_TIMEOUT_SCALE` lets a loaded box buy time rather than
+    collect timeouts it then reads as failures (Q27)."""
+
+    def setUp(self):
+        saved = os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
+        self.addCleanup(self._restore, saved)
+
+    @staticmethod
+    def _restore(saved):
+        os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
+        if saved is not None:
+            os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = saved
+
+    @staticmethod
+    def _read(reader, raw):
+        os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
+        if raw is not None:
+            os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = raw
+        return reader()
+
+    @staticmethod
+    def _shipped_reader():
+        from importlib import util
+        path = REPO / "scripts" / "pr_sentinel_overlap.py"
+        spec = util.spec_from_file_location("pr_sentinel_overlap_scale", path)
+        mod = util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.timeout_scale
+
+    def test_the_corpus_reads_as_expected(self):
+        for raw, want in SCALE_CORPUS.items():
+            self.assertEqual(self._read(timeout_scale, raw), want,
+                             "scale %r" % (raw,))
+
+    def test_the_shipped_reader_agrees(self):
+        """Two readers, because this suite drives bash and loads no Python
+        from `scripts/`. They must not drift: a harness scaling differently
+        from the guard it runs is a budget nobody can reason about."""
+        shipped = self._shipped_reader()
+        for raw in SCALE_CORPUS:
+            self.assertEqual(self._read(timeout_scale, raw),
+                             self._read(shipped, raw),
+                             "readers disagree on scale %r" % (raw,))
+
+    def test_the_agreement_check_can_fail(self):
+        """A corpus the two happen to agree on proves nothing unless a
+        divergence would be caught. Swaps in a reader with the floor
+        removed — the one difference that matters — and demands the corpus
+        notice."""
+        def floorless():
+            try:
+                return int(
+                    os.environ.get("PR_SENTINEL_PROBE_TIMEOUT_SCALE", ""))
+            except ValueError:
+                return 1
+        caught = [raw for raw in SCALE_CORPUS
+                  if self._read(timeout_scale, raw)
+                  != self._read(floorless, raw)]
+        self.assertIn("0", caught,
+                      "a reader that lets the environment shorten a budget "
+                      "must not pass this corpus")
 
 
 class PrivacyDisclosure(unittest.TestCase):
