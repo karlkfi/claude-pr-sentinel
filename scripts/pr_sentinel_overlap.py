@@ -79,7 +79,8 @@ def ignore_patterns():
 
 
 def timeout_scale():
-    """Multiplier on the subprocess budget, from `PR_SENTINEL_TIMEOUT_SCALE`.
+    """Multiplier on the subprocess budget, read from
+    `PR_SENTINEL_PROBE_TIMEOUT_SCALE`.
 
     Floored at 1, so the knob can only ever buy time. A probe that answers is
     worth more than one that fails open, and a floor means no value set here
@@ -87,7 +88,7 @@ def timeout_scale():
     Anything but a whole number above 1 falls back to 1.
     """
     try:
-        scale = int(os.environ.get('PR_SENTINEL_TIMEOUT_SCALE', ''))
+        scale = int(os.environ.get('PR_SENTINEL_PROBE_TIMEOUT_SCALE', ''))
     except ValueError:
         return 1
     return scale if scale > 1 else 1

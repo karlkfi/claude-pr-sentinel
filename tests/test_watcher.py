@@ -62,15 +62,15 @@ WATCHER = REPO / "scripts" / "pr-sentinel-watch.sh"
 
 def timeout_scale():
     """Multiplier on this file's subprocess budgets, from
-    `PR_SENTINEL_TIMEOUT_SCALE`. Floored at 1; anything but a whole number
-    above 1 falls back to 1.
+    `PR_SENTINEL_PROBE_TIMEOUT_SCALE`. Floored at 1; anything but a whole
+    number above 1 falls back to 1.
 
     Spelled out here rather than imported: this suite drives the bash watcher
     and loads no Python from `scripts/`. `ScaleKnob` pins it against the
     shipped reader so the two cannot drift.
     """
     try:
-        scale = int(os.environ.get("PR_SENTINEL_TIMEOUT_SCALE", ""))
+        scale = int(os.environ.get("PR_SENTINEL_PROBE_TIMEOUT_SCALE", ""))
     except ValueError:
         return 1
     return scale if scale > 1 else 1
@@ -270,21 +270,25 @@ class WatcherCase(unittest.TestCase):
         real = subprocess.run
 
         def spy(*args, **kwargs):
-            seen.append(kwargs.get("timeout"))
+            # Only the watcher's own call, so a later `subprocess.run` added
+            # inside run_watcher cannot break this as though it were a scale
+            # bug.
+            if args and args[0][:1] == ["bash"] and str(WATCHER) in args[0]:
+                seen.append(kwargs.get("timeout"))
             return real(*args, **kwargs)
 
-        saved = os.environ.pop("PR_SENTINEL_TIMEOUT_SCALE", None)
+        saved = os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
 
         def restore():
             subprocess.run = real
-            os.environ.pop("PR_SENTINEL_TIMEOUT_SCALE", None)
+            os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
             if saved is not None:
-                os.environ["PR_SENTINEL_TIMEOUT_SCALE"] = saved
+                os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = saved
 
         self.addCleanup(restore)
         subprocess.run = spy
         self.run_watcher(files)
-        os.environ["PR_SENTINEL_TIMEOUT_SCALE"] = "3"
+        os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = "3"
         self.run_watcher(files)
         self.assertEqual(seen, [20, 60],
                          "unset must cap at 20s and a scale of 3 must carry "
@@ -2440,24 +2444,24 @@ SCALE_CORPUS = {
 
 
 class ScaleKnob(unittest.TestCase):
-    """`PR_SENTINEL_TIMEOUT_SCALE` lets a loaded box buy time rather than
+    """`PR_SENTINEL_PROBE_TIMEOUT_SCALE` lets a loaded box buy time rather than
     collect timeouts it then reads as failures (Q27)."""
 
     def setUp(self):
-        saved = os.environ.pop("PR_SENTINEL_TIMEOUT_SCALE", None)
+        saved = os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
         self.addCleanup(self._restore, saved)
 
     @staticmethod
     def _restore(saved):
-        os.environ.pop("PR_SENTINEL_TIMEOUT_SCALE", None)
+        os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
         if saved is not None:
-            os.environ["PR_SENTINEL_TIMEOUT_SCALE"] = saved
+            os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = saved
 
     @staticmethod
     def _read(reader, raw):
-        os.environ.pop("PR_SENTINEL_TIMEOUT_SCALE", None)
+        os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
         if raw is not None:
-            os.environ["PR_SENTINEL_TIMEOUT_SCALE"] = raw
+            os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = raw
         return reader()
 
     @staticmethod
@@ -2486,11 +2490,13 @@ class ScaleKnob(unittest.TestCase):
 
     def test_the_agreement_check_can_fail(self):
         """A corpus the two happen to agree on proves nothing unless a
-        divergence would be caught. Swaps in a reader with the floor removed —
-        the one difference that matters — and demands the corpus notice."""
+        divergence would be caught. Swaps in a reader with the floor
+        removed — the one difference that matters — and demands the corpus
+        notice."""
         def floorless():
             try:
-                return int(os.environ.get("PR_SENTINEL_TIMEOUT_SCALE", ""))
+                return int(
+                    os.environ.get("PR_SENTINEL_PROBE_TIMEOUT_SCALE", ""))
             except ValueError:
                 return 1
         caught = [raw for raw in SCALE_CORPUS

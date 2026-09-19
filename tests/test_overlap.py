@@ -131,10 +131,10 @@ def probe_cap():
     """The effective per-probe budget: `PROBE_TIMEOUT` as scaled for this run.
 
     Read through rather than pinned, so everything this file times against the
-    cap — the planted sleep, the outer subprocess bounds, the elapsed floor —
-    moves together when `PR_SENTINEL_TIMEOUT_SCALE` raises it. A fixed sleep
-    beside a raised cap is a planted timeout that no longer fires, which reads
-    as a passing test rather than as a disarmed one.
+    cap — the planted sleep, the outer bounds, the elapsed floor — moves
+    together when `PR_SENTINEL_PROBE_TIMEOUT_SCALE` raises it. A fixed sleep
+    beside a raised cap is a planted timeout that no longer fires, which
+    reads as a passing test rather than as a disarmed one.
     """
     return overlap.PROBE_TIMEOUT * overlap.timeout_scale()
 
@@ -345,7 +345,7 @@ class Capture(unittest.TestCase):
 
 
 class TimeoutScale(unittest.TestCase):
-    """`PR_SENTINEL_TIMEOUT_SCALE` buys a loaded box headroom (Q27).
+    """`PR_SENTINEL_PROBE_TIMEOUT_SCALE` buys a loaded box headroom (Q27).
 
     The knob raises the budget a probe gets. Everything this file times
     against that budget has to move with it, or raising the scale silently
@@ -355,12 +355,12 @@ class TimeoutScale(unittest.TestCase):
     """
 
     def setUp(self):
-        saved = os.environ.pop("PR_SENTINEL_TIMEOUT_SCALE", None)
+        saved = os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
 
         def restore():
-            os.environ.pop("PR_SENTINEL_TIMEOUT_SCALE", None)
+            os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
             if saved is not None:
-                os.environ["PR_SENTINEL_TIMEOUT_SCALE"] = saved
+                os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = saved
 
         self.addCleanup(restore)
 
@@ -379,7 +379,7 @@ class TimeoutScale(unittest.TestCase):
 
     def test_the_cap_tracks_the_scale(self):
         self.assertEqual(probe_cap(), overlap.PROBE_TIMEOUT)
-        os.environ["PR_SENTINEL_TIMEOUT_SCALE"] = "4"
+        os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = "4"
         self.assertEqual(probe_cap(), overlap.PROBE_TIMEOUT * 4)
 
     def test_a_planted_timeout_stays_armed_at_every_scale(self):
@@ -388,9 +388,9 @@ class TimeoutScale(unittest.TestCase):
         cases that plant one would then pass for the wrong reason."""
         s = self.scenario()
         for raw in (None, "2", "4"):
-            os.environ.pop("PR_SENTINEL_TIMEOUT_SCALE", None)
+            os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
             if raw is not None:
-                os.environ["PR_SENTINEL_TIMEOUT_SCALE"] = raw
+                os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = raw
             self.assertGreater(
                 self.planted_sleep(s), probe_cap(),
                 "at scale %r the planted sleep no longer crosses the cap, so "
@@ -400,13 +400,29 @@ class TimeoutScale(unittest.TestCase):
     def test_an_explicit_budget_is_not_scaled(self):
         """`capture`'s scaling is a default, not a multiplier on the argument:
         a caller that names a budget means that budget. `Capture.timed_out`
-        rests on this — a scaled 0.2s would just make the suite slower."""
-        os.environ["PR_SENTINEL_TIMEOUT_SCALE"] = "10"
-        started = time.monotonic()
-        self.assertEqual(overlap.capture(SLEEPER, "", timeout=0.2),
-                         (overlap.TIMED_OUT, ""))
-        self.assertLess(time.monotonic() - started, 2.0,
-                        "an explicit 0.2s budget was scaled by the knob")
+        rests on this — a scaled 0.2s would just make the suite slower.
+
+        Reads the budget handed to `subprocess.run` rather than timing the
+        call. An elapsed-time assertion would be the defect this row is
+        about: 0.2s scaled by 10 is 2.0s, so any threshold near it is a
+        wall-clock race on exactly the loaded machine that motivates the
+        knob, and it is the one assertion here that would not move with it.
+        """
+        os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = "10"
+        seen = []
+        real = subprocess.run
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs.get("timeout"))
+            return real(*args, **kwargs)
+
+        self.addCleanup(setattr, overlap.subprocess, "run", real)
+        overlap.subprocess.run = spy
+        overlap.capture(SLEEPER, "", timeout=0.2)
+        overlap.capture(("python3", "-c", "pass"), "")
+        self.assertEqual(seen, [0.2, overlap.PROBE_TIMEOUT * 10],
+                         "an explicit budget must pass through unscaled and "
+                         "an omitted one must arrive scaled")
 
 
 class HunkParsing(unittest.TestCase):
