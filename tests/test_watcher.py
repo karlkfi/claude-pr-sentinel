@@ -720,6 +720,167 @@ class WatcherCase(unittest.TestCase):
         self.assertIn("PR-SENTINEL EVENT: check_failure", out)
         self.assertNotIn("Last main run:", out)
 
+    # -- what the base comparison did, on the wake path (Q44) ----------------
+
+    # base_failures_only has four ways to return "not inherited" and only one of
+    # them — the green base run — used to leave any trace in the report. The
+    # other three, plus PR_SENTINEL_BASE_CHECK=0, produced identical silence, so
+    # a reader met one appearance with four causes behind it. The last case in
+    # this section is the one that actually encodes that: it asserts the four
+    # reports now differ from each other, which no single-case assertion does.
+
+    def _mixed(self):
+        """Two failing checks: doc-links red on the base, unit-test green."""
+        return {
+            "pr_view": "OPEN\tUNSTABLE\tmain\tabc1234def\n",
+            "pr_checks": (
+                "fail\tdoc-links\thttps://github.com/o/r/actions/runs/22/job/2\n"
+                "fail\tunit-test\thttps://github.com/o/r/actions/runs/33/job/3\n"
+            ),
+            "run_conclusion.22": "failure\n",
+            "run_conclusion.33": "failure\n",
+            "run_workflow.22": "99\n",
+            "run_workflow.33": "77\n",
+            "base_run.99": "failure\t31274922338\t47815b6a"
+                           "\t.github/workflows/doc-links.yml\t900\n",
+            "base_run.77": "success\t31274999999\te60000d0"
+                           "\t.github/workflows/tests.yml\t120\n",
+            "run_log": "boom\n",
+        }
+
+    def _comparison_line(self, out):
+        """The report's one line about what the base comparison established."""
+        for line in out.splitlines():
+            if line.startswith(("Base comparison:", "Last main run:")):
+                return line
+        return "(nothing)"
+
+    def test_a_mixed_set_names_the_members_that_are_inherited(self):
+        """All-or-nothing is the right verdict about the SET and leaves the
+        session to work out which members are its own. base_failures_only had
+        already assembled that and the wake path threw it away."""
+        rc, out, _ = self.run_watcher(self._mixed())
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertIn("Also failing on main: doc-links.yml "
+                      "(run 31274922338, 47815b6, failure, 15m ago)", out)
+        # The verdict itself is unchanged: both names still ride in the wake.
+        self.assertIn("doc-links (fail)", out)
+        self.assertIn("unit-test (fail)", out)
+
+    def test_the_inherited_list_says_it_is_partial(self):
+        """The comparison stops at the first check that is NOT red on the base,
+        so the list is what it had reached. A reader taking it for the whole set
+        would diagnose an inherited failure as their own — the exact defect this
+        area exists to prevent, reintroduced by a helpful-looking list."""
+        rc, out, _ = self.run_watcher(self._mixed())
+        self.assertIn("partial list", out)
+        self.assertIn("stops at the first check that", out)
+        self.assertIn("are not this PR's to fix", out)
+
+    def test_a_wake_with_nothing_inherited_carries_no_list(self):
+        """Silence control for the two cases above: a single failing check on a
+        green base has no inherited member, so no list and no partial caveat."""
+        rc, out, _ = self.run_watcher(
+            self._inherited(base_conclusion="success"))
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("Also failing on main", out)
+        self.assertNotIn("partial list", out)
+
+    def test_no_base_run_names_itself_as_the_reason(self):
+        """A workflow the base has never run — new, or path-gated on files the
+        base never touched. The wake is right; the silence about why was not."""
+        files = self._inherited()
+        del files["base_run.99"]
+        rc, out, _ = self.run_watcher(files)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertIn("Base comparison: did not settle — main has no completed "
+                      "run of that workflow", out)
+
+    def test_an_unreadable_workflow_id_names_itself_as_the_reason(self):
+        files = self._inherited()
+        del files["run_workflow.22"]
+        rc, out, _ = self.run_watcher(files)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertIn("Base comparison: did not settle — a failing check's "
+                      "workflow id could not be read", out)
+
+    def test_a_check_with_no_actions_run_names_itself_as_the_reason(self):
+        """A required check from something that is not GitHub Actions has no run
+        to compare, which is a different unknown from the two above."""
+        files = self._inherited()
+        files["pr_checks"] = "fail\tdoc-links\thttps://ci.example/build/7\n"
+        rc, out, _ = self.run_watcher(files)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertIn("Base comparison: did not settle — a failing check has no "
+                      "GitHub Actions run behind it", out)
+
+    def test_base_check_off_says_the_comparison_was_off(self):
+        """The knob is in the reader's environment, not in the report, so a
+        session reading the wake cannot otherwise tell this from a failed one."""
+        rc, out, _ = self.run_watcher(
+            self._inherited(base_conclusion="success"),
+            env={"PR_SENTINEL_BASE_CHECK": "0"})
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertIn("Base comparison: off (PR_SENTINEL_BASE_CHECK=0)", out)
+        self.assertNotIn("Last main run:", out)
+
+    def test_a_green_base_run_needs_no_comparison_note(self):
+        """The settled case already names its run and its age, which is strictly
+        more than the note would say. Adding one would be noise."""
+        rc, out, _ = self.run_watcher(
+            self._inherited(base_conclusion="success", base_age="66196"))
+        self.assertIn("Last main run: doc-links.yml "
+                      "(run 31274922338, 47815b6, success, 18h 23m ago)", out)
+        self.assertNotIn("Base comparison:", out)
+
+    def test_every_former_silence_now_names_itself_distinctly(self):
+        """The row's actual claim, which no single case above establishes.
+
+        An earlier version of this ran four situations and was named for four
+        silences, but only three of them were silences — the fourth entry was
+        the green control. A mutation blanking the no-Actions-run reason left it
+        green, because that case was never in the table. All four silences are
+        here now, and the name no longer implies a count the body has to keep
+        in step with.
+        """
+        green = self._inherited(base_conclusion="success")
+        no_run = self._inherited()
+        del no_run["base_run.99"]
+        bad_id = self._inherited()
+        del bad_id["run_workflow.22"]
+        no_actions = self._inherited()
+        no_actions["pr_checks"] = "fail\tdoc-links\thttps://ci.example/build/7\n"
+
+        lines = {}
+        for name, files, env in (
+            ("green", green, None),
+            ("no base run", no_run, None),
+            ("unreadable workflow id", bad_id, None),
+            ("no Actions run behind the check", no_actions, None),
+            ("check off", green, {"PR_SENTINEL_BASE_CHECK": "0"}),
+        ):
+            _, out, _ = self.run_watcher(files, env=env)
+            self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+            lines[name] = self._comparison_line(out)
+
+        # Every one of them says something, and no two say the same thing.
+        for name, line in lines.items():
+            self.assertNotEqual(line, "(nothing)",
+                                "%s still reports nothing" % name)
+        self.assertEqual(len(set(lines.values())), len(lines),
+                         "two situations still share a report: %r" % (lines,))
+
+    def test_base_fixed_also_names_the_inherited_members(self):
+        """base_fixed reaches the mixed set by the same route, and its own
+        comment says so — the report has to carry the same caveat."""
+        files = self._mixed()
+        files["compare"] = "behind\n"
+        rc, out, _ = self.run_watcher(files)
+        self.assertIn("PR-SENTINEL EVENT: base_fixed", out)
+        self.assertIn("Also failing on main: doc-links.yml", out)
+        self.assertIn("partial list", out)
+
     # -- a head that predates the base's fix (Q38) ---------------------------
 
     # `_inherited(base_conclusion="success")` is the state this section starts

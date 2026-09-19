@@ -209,6 +209,13 @@ BASE_FAILURE_REPORTED=""
 # base_failures_only runs.
 BASE_FAIL_DETAIL=""
 
+# Why the comparison did not settle on "inherited", when it did not and no green
+# base run is the reason. Silence used to cover four different situations —
+# BASE_CHECK off, a check with no Actions run behind it, an unreadable workflow
+# id, and a base with no completed run of that workflow — and a reader cannot
+# weigh a verdict whose absence has four possible causes.
+BASE_UNRESOLVED=""
+
 # The counterpart for the check that did NOT match: the base run whose green
 # ended the comparison, named in the `check_failure` report so the session can
 # see how old the evidence behind "this failure is yours" actually is.
@@ -578,15 +585,25 @@ base_failures_only() {
 	BASE_GREEN_DETAIL=""
 	BASE_GREEN_SHA=""
 	BASE_GREEN_REPO=""
+	BASE_UNRESOLVED=""
 	while IFS= read -r link; do
 		[[ -z "$link" ]] && continue
 		path=$(run_api_path_from_link "$link")
-		[[ -z "$path" ]] && return 1
+		if [[ -z "$path" ]]; then
+			BASE_UNRESOLVED="a failing check has no GitHub Actions run behind it"
+			return 1
+		fi
 		case " $seen " in *" $path "*) continue ;; esac
 		seen="$seen $path"
 		wf_id=$(gh api "$path" -q '.workflow_id' 2>/dev/null || true)
-		[[ "$wf_id" =~ ^[0-9]+$ ]] || return 1
-		state=$(base_run_state "${path%/actions/runs/*}" "$wf_id") || return 1
+		if [[ ! "$wf_id" =~ ^[0-9]+$ ]]; then
+			BASE_UNRESOLVED="a failing check's workflow id could not be read"
+			return 1
+		fi
+		if ! state=$(base_run_state "${path%/actions/runs/*}" "$wf_id"); then
+			BASE_UNRESOLVED="${BASE} has no completed run of that workflow"
+			return 1
+		fi
 		IFS=$'\t' read -r conclusion sha detail <<<"$state"
 		# `cancelled` is deliberately not red: a run someone stopped by hand says
 		# nothing about the base's health, and falling through to `check_failure`
@@ -770,6 +787,38 @@ report_header() {
 	echo "PR: ${PR}"
 }
 
+# What the base comparison did, on a report that is WAKING the session rather
+# than withholding. The green case names its run in BASE_GREEN_DETAIL and needs
+# nothing here; every other outcome used to print nothing at all, so a reader
+# met one silence with four causes behind it and no way to tell which.
+base_comparison_note() {
+	if (( BASE_CHECK == 0 )); then
+		echo "Base comparison: off (PR_SENTINEL_BASE_CHECK=0)"
+	elif [[ -n "$BASE_UNRESOLVED" ]]; then
+		echo "Base comparison: did not settle — ${BASE_UNRESOLVED}"
+	fi
+}
+
+# The inherited members of a MIXED failed set, which base_failures_only already
+# assembled and every wake path then discarded. All-or-nothing is the right
+# verdict — one failure the base does not share still has to wake the session —
+# but it is a verdict about the set, and the session still has to work out which
+# members are its own.
+#
+# Partial by construction: the comparison stops at the first check that is not
+# red on the base, so this is what it had reached. The note says so, because a
+# reader taking it for the whole list would diagnose an inherited failure as
+# their own, which is the defect this whole area exists to prevent.
+base_partial_inherited() {
+	[[ -n "$BASE_FAIL_DETAIL" ]] || return 0
+	echo
+	printf '%s' "$BASE_FAIL_DETAIL"
+	echo "At least the check(s) named above are already red on ${BASE}, so those"
+	echo "are not this PR's to fix. The comparison stops at the first check that"
+	echo "is NOT red there, so read that as a partial list rather than the whole"
+	echo "of what this PR inherited."
+}
+
 emit_check_failure() {
 	local failed="$1" links="$2"
 	report_header check_failure
@@ -778,6 +827,7 @@ emit_check_failure() {
 	echo "Head SHA: ${HEAD_SHA}"
 	echo "Failed checks: ${failed}"
 	printf '%s' "$BASE_GREEN_DETAIL"
+	base_comparison_note
 	echo
 	echo "Next action: diagnose and fix the failing check(s) below in this local"
 	echo "session, run the project's local gate (tests/lint), push, then relaunch"
@@ -792,6 +842,7 @@ emit_check_failure() {
 		echo "reproduces against the base tree it is inherited: leave it to a"
 		echo "standalone fix for ${BASE}."
 	fi
+	base_partial_inherited
 	echo
 	local link run_id emitted=0
 	# De-duplicate run ids across failed checks; emit at most a few excerpts.
@@ -871,6 +922,7 @@ emit_base_fixed() {
 	echo "only evidence that would attribute this failure to this PR is a run of"
 	echo "code this branch does not contain yet, and what is still red here may be"
 	echo "the base breakage that run fixed."
+	base_partial_inherited
 	echo
 	echo "Do NOT diagnose and fix it from here. If it is the base's, the fix is"
 	echo "already on ${BASE} and writing it again duplicates landed work and"
