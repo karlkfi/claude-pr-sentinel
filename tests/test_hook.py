@@ -365,6 +365,87 @@ class ClassificationUnit(unittest.TestCase):
                             "refs/tags/v0.9.0"], cwd=tmp, check=True)
             self.assertIsNone(hook.detect_action("git push", tmp))
 
+    def test_a_separated_option_value_is_not_read_as_the_remote(self):
+        # `-o ci.skip` put `ci.skip` where the remote belongs and slid every
+        # refspec one place right, so a release cut that skips CI nudged while
+        # the `=`-joined spelling of the same flag stayed silent (Q46).
+        with tempfile.TemporaryDirectory() as tmp:
+            make_repo_with_default(tmp, "main")
+            subprocess.run(["git", "remote", "add", "origin",
+                            "https://github.com/owner/repo.git"], cwd=tmp,
+                           check=True)
+            for flag in ("-o ci.skip", "--push-option ci.skip",
+                         "--recurse-submodules on-demand",
+                         "--repo git@github.com:owner/repo.git",
+                         "--exec /x/rp", "--receive-pack /x/rp"):
+                for ref in ("v0.9.0", "main"):
+                    cmd = "git push " + flag + " origin " + ref
+                    self.assertIsNone(hook.detect_action(cmd, tmp), cmd)
+                cmd = "git push " + flag + " origin claude/foo"
+                self.assertEqual(hook.detect_action(cmd, tmp), "git_push", cmd)
+
+    def test_an_optional_value_option_keeps_its_next_word(self):
+        # The control for the rule above, and it has to run: git reads the word
+        # after these as the repository rather than as the option's value
+        # (measured on git 2.55.0), so consuming it would lose the remote.
+        with tempfile.TemporaryDirectory() as tmp:
+            make_repo_with_default(tmp, "main")
+            subprocess.run(["git", "remote", "add", "origin",
+                            "https://github.com/owner/repo.git"], cwd=tmp,
+                           check=True)
+            for flag in ("--force-with-lease", "--signed",
+                         "--force-if-includes"):
+                cmd = "git push " + flag + " origin v0.9.0"
+                self.assertIsNone(hook.detect_action(cmd, tmp), cmd)
+                cmd = "git push " + flag + " origin claude/foo"
+                self.assertEqual(hook.detect_action(cmd, tmp), "git_push", cmd)
+
+    def test_a_git_level_option_does_not_hide_the_subcommand(self):
+        # `git -C <path> push` put the path where `push` belongs, so the
+        # subcommand was never seen and a real PR push went unwatched — the
+        # silent direction of the same defect (Q46).
+        with tempfile.TemporaryDirectory() as tmp:
+            make_repo_with_default(tmp, "main")
+            subprocess.run(["git", "remote", "add", "origin",
+                            "https://github.com/owner/repo.git"], cwd=tmp,
+                           check=True)
+            for flag in ("-C " + tmp, "-c push.default=current",
+                         "--git-dir " + tmp + "/.git", "--work-tree " + tmp,
+                         "--namespace ns"):
+                cmd = "git " + flag + " push origin claude/foo"
+                self.assertEqual(hook.detect_action(cmd, tmp), "git_push", cmd)
+                cmd = "git " + flag + " push origin v0.9.0"
+                self.assertIsNone(hook.detect_action(cmd, tmp), cmd)
+
+    def test_joined_option_values_are_unaffected(self):
+        # The `=`-joined spellings were already silent; they stay that way.
+        with tempfile.TemporaryDirectory() as tmp:
+            make_repo_with_default(tmp, "main")
+            subprocess.run(["git", "remote", "add", "origin",
+                            "https://github.com/owner/repo.git"], cwd=tmp,
+                           check=True)
+            for flag in ("-oci.skip", "--push-option=ci.skip",
+                         "--receive-pack=/x/rp", "--repo=/elsewhere.git",
+                         "--force-with-lease=refs/heads/x"):
+                cmd = "git push " + flag + " origin v0.9.0"
+                self.assertIsNone(hook.detect_action(cmd, tmp), cmd)
+
+    def test_positional_helper_consumes_only_a_listed_option(self):
+        self.assertEqual(
+            hook._positional(["push", "-o", "ci.skip", "origin", "main"],
+                             hook.PUSH_VALUE_FLAGS),
+            ["push", "origin", "main"])
+        self.assertEqual(
+            hook._positional(["push", "--force-with-lease", "origin", "main"],
+                             hook.PUSH_VALUE_FLAGS),
+            ["push", "origin", "main"])
+        # A bare `-` is an argument, not an option, and must survive.
+        self.assertEqual(hook._positional(["push", "-"], hook.PUSH_VALUE_FLAGS),
+                         ["push", "-"])
+        # A listed option at the end has no value to eat and must not loop.
+        self.assertEqual(hook._positional(["push", "-o"], hook.PUSH_VALUE_FLAGS),
+                         ["push"])
+
     def test_local_push_url_helper(self):
         for url in ("/tmp/scratch/remote.git", "../remote.git",
                     "~/scratch/remote.git", "file:///tmp/r.git",
