@@ -127,6 +127,18 @@ PROBE = textwrap.dedent(
 )
 
 
+def probe_cap():
+    """The effective per-probe budget: `PROBE_TIMEOUT` as scaled for this run.
+
+    Read through rather than pinned, so everything this file times against the
+    cap — the planted sleep, the outer bounds, the elapsed floor — moves
+    together when `PR_SENTINEL_PROBE_TIMEOUT_SCALE` raises it. A fixed sleep
+    beside a raised cap is a planted timeout that no longer fires, which
+    reads as a passing test rather than as a disarmed one.
+    """
+    return overlap.PROBE_TIMEOUT * overlap.timeout_scale()
+
+
 def git(root, *args):
     subprocess.run(("git", "-C", str(root)) + args, check=True,
                    capture_output=True)
@@ -238,14 +250,16 @@ class Scenario:
             env.update(extra)
         return env
 
-    def slow_git(self, seconds=6):
-        """Put a `git` that sleeps past `PROBE_TIMEOUT` ahead of the real one,
+    def slow_git(self, seconds=None):
+        """Put a `git` that sleeps past the probe cap ahead of the real one,
         so exactly one probe crosses the cap and does so deterministically.
 
         Only `hits` and `guard` see it — `env` is what prepends this
         directory, and the repository setup above shells out to git with the
         ambient environment instead, so the fixture is built at full speed.
         """
+        if seconds is None:
+            seconds = probe_cap() + 1
         real = shutil.which("git")
         assert real, "no real git on PATH to hand over to"
         shim = self.bin_dir / "git"
@@ -266,7 +280,8 @@ class Scenario:
         code = PROBE.format(scripts=str(REPO / "scripts"),
                             cwd=str(self.root), base=base)
         proc = subprocess.run(["python3", "-c", code], capture_output=True,
-                              text=True, env=self.env(extra_env), timeout=60,
+                              text=True, env=self.env(extra_env),
+                              timeout=60 * overlap.timeout_scale(),
                               check=False)
         if proc.returncode != 0:
             raise AssertionError("probe failed: " + proc.stderr)
@@ -288,7 +303,7 @@ class Scenario:
         proc = subprocess.run(
             ["python3", str(GUARD)], input=json.dumps(payload),
             capture_output=True, text=True, env=self.env(extra_env),
-            timeout=60, check=False)
+            timeout=60 * overlap.timeout_scale(), check=False)
         return proc.returncode, proc.stdout
 
     def guard(self, command, extra_env=None, background=False):
@@ -327,6 +342,87 @@ class Capture(unittest.TestCase):
         timed, _ = self.timed_out()
         self.assertIsNot(timed, never)
         self.assertNotEqual(timed, never)
+
+
+class TimeoutScale(unittest.TestCase):
+    """`PR_SENTINEL_PROBE_TIMEOUT_SCALE` buys a loaded box headroom (Q27).
+
+    The knob raises the budget a probe gets. Everything this file times
+    against that budget has to move with it, or raising the scale silently
+    disarms the two cases that plant a timeout on purpose — they would stop
+    timing out and start passing, which is the shape a harness change must
+    never take.
+    """
+
+    def setUp(self):
+        saved = os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
+
+        def restore():
+            os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
+            if saved is not None:
+                os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = saved
+
+        self.addCleanup(restore)
+
+    def scenario(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", tmp])
+        return Scenario(tmp, {"app.py": numbered(8)}, {"app.py": numbered(8)})
+
+    def planted_sleep(self, scenario):
+        """The seconds `slow_git`'s shim actually sleeps, read back off it."""
+        shim = scenario.slow_git()
+        for line in shim.read_text(encoding="utf-8").splitlines():
+            if line.startswith("sleep "):
+                return float(line.split()[1])
+        self.fail("slow_git planted no sleep")
+
+    def test_the_cap_tracks_the_scale(self):
+        self.assertEqual(probe_cap(), overlap.PROBE_TIMEOUT)
+        os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = "4"
+        self.assertEqual(probe_cap(), overlap.PROBE_TIMEOUT * 4)
+
+    def test_a_planted_timeout_stays_armed_at_every_scale(self):
+        """The one that would go quiet rather than red. A sleep fixed at 6s
+        against a cap raised to 20s is a timeout that never fires, and the two
+        cases that plant one would then pass for the wrong reason."""
+        s = self.scenario()
+        for raw in (None, "2", "4"):
+            os.environ.pop("PR_SENTINEL_PROBE_TIMEOUT_SCALE", None)
+            if raw is not None:
+                os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = raw
+            self.assertGreater(
+                self.planted_sleep(s), probe_cap(),
+                "at scale %r the planted sleep no longer crosses the cap, so "
+                "every deliberately timed-out case passes without timing out"
+                % (raw,))
+
+    def test_an_explicit_budget_is_not_scaled(self):
+        """`capture`'s scaling is a default, not a multiplier on the argument:
+        a caller that names a budget means that budget. `Capture.timed_out`
+        rests on this — a scaled 0.2s would just make the suite slower.
+
+        Reads the budget handed to `subprocess.run` rather than timing the
+        call. An elapsed-time assertion would be the defect this row is
+        about: 0.2s scaled by 10 is 2.0s, so any threshold near it is a
+        wall-clock race on exactly the loaded machine that motivates the
+        knob, and it is the one assertion here that would not move with it.
+        """
+        os.environ["PR_SENTINEL_PROBE_TIMEOUT_SCALE"] = "10"
+        seen = []
+        real = subprocess.run
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs.get("timeout"))
+            return real(*args, **kwargs)
+
+        self.addCleanup(setattr, overlap.subprocess, "run", real)
+        overlap.subprocess.run = spy
+        overlap.capture(SLEEPER, "", timeout=0.2)
+        overlap.capture(("python3", "-c", "pass"), "")
+        self.assertEqual(seen, [0.2, overlap.PROBE_TIMEOUT * 10],
+                         "an explicit budget must pass through unscaled and "
+                         "an omitted one must arrive scaled")
 
 
 class HunkParsing(unittest.TestCase):
@@ -830,10 +926,10 @@ class GuardDeny(unittest.TestCase):
         self.assertEqual(out, "", "a probe that timed out must not deny")
         self.assertEqual(status, 0, "the guard must exit clean, not crash")
         self.assertGreaterEqual(
-            elapsed, overlap.PROBE_TIMEOUT,
+            elapsed, probe_cap(),
             "returned in %.2fs, under the %ss cap: the probe never ran rather "
             "than timing out, so this silence is not the one under test"
-            % (elapsed, overlap.PROBE_TIMEOUT))
+            % (elapsed, probe_cap()))
 
     def test_the_poll_deny_still_fires(self):
         """The new branch must not have displaced the one already there."""

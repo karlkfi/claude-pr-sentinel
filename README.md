@@ -521,7 +521,7 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_MAX_INTERVAL` | `300` | poll-interval ceiling, seconds |
 | `PR_SENTINEL_POLL_AGE_DIVISOR` | `10` | while checks are pending, poll every *age ÷ this* seconds — floored at `PR_SENTINEL_INTERVAL`, capped at `PR_SENTINEL_MAX_INTERVAL` (see [How often it polls](#how-often-it-polls)); anything but a positive integer falls back to `10` |
 | `PR_SENTINEL_POLL_CLAMP` | (on) | also hold a pending poll inside the run's expected finish, measured from the base branch's last green run of the same workflow; `0`/`false`/empty paces on check age alone and makes no such query (see [How often it polls](#how-often-it-polls)) |
-| `PR_SENTINEL_TIMEOUT` | `3600` | overall watch budget before a `timeout` event, seconds |
+| `PR_SENTINEL_TIMEOUT` | `3600` | overall watch budget before a `timeout` event, seconds. Unrelated to `PR_SENTINEL_PROBE_TIMEOUT_SCALE`, which bounds a single subprocess rather than the whole watch |
 | `PR_SENTINEL_LOG_MAX_BYTES` | `8192` | CI log excerpt cap (tail kept), bytes |
 | `PR_SENTINEL_GH_RETRY_HORIZON` | `900` | how long (seconds) to retry *transient* `gh` failures with backoff before an `error` event; permanent failures (no credentials, unresolvable PR) exit at once |
 | `PR_SENTINEL_HEAL` | `rebase` | conflict/behind heal the report recommends: `rebase` or `merge` (see below); unrecognised values fall back to `rebase` |
@@ -538,6 +538,7 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_OVERLAP_ENABLED` | (on) | deny a `gh pr create` whose branch edits lines an open PR already changes; `false`/`0`/empty turns the check off, and with it the only GitHub query any hook makes (see [Overlapping pull requests](#overlapping-pull-requests)) |
 | `PR_SENTINEL_OVERLAP_IGNORE` | (unset) | comma-separated glob patterns the overlap check discounts — for a file every branch edits by construction, e.g. `CHANGELOG.md,docs/roadmap.md` |
 | `PR_SENTINEL_BASE_REF` | (`origin/HEAD`, else `origin/main`) | the ref the overlap check forks this branch from when computing its changed lines. One value for every branch in the repo, so a `--base` on the `gh pr create` itself wins over it — that is the only place a [stack](#overlapping-pull-requests) is written down |
+| `PR_SENTINEL_PROBE_TIMEOUT_SCALE` | `1` | whole-number multiplier on the overlap check's per-probe subprocess budget (5s). Raise it on a machine loaded enough that probes blow the cap and the check silently fails open. **Floored at 1**: no value set here can shorten a budget, because a shorter one only widens that fail-open. Anything but a whole number above 1 falls back to `1`, and the test suite reads the same knob for its own subprocess bounds. Unrelated to `PR_SENTINEL_TIMEOUT`, which is the whole watch's budget |
 | `PR_SENTINEL_DISABLE` | (unset) | `1` disables the PostToolUse nudge, the Stop backstop, and the watcher-launch auto-allow |
 | `PR_SENTINEL_SESSIONS_ROOT` | (platform default) | overrides the session-store path the [migration helper](#migrating-from-desktop-auto-fix) scans (same as its `--root`) |
 | `PR_SENTINEL_ASSUME_APP_QUIT` | (unset) | `1` asserts the desktop app is quit, so the migration helper's `--apply` skips live-app detection (use only after quitting it) |
