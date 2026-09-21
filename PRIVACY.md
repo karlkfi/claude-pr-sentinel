@@ -37,11 +37,13 @@ report).
 - Processes these **in memory** to decide whether to emit an advisory nudge,
   then writes that nudge (or nothing) to standard output.
 - Writes nothing to disk. On a `git push` it may run `git rev-parse`,
-  `git symbolic-ref`, `git config --get` and `git remote get-url` in your
-  working directory, to tell a tag from a branch, to learn which branch the
-  remote calls its default, and to see whether the push target is a forge or a
-  filesystem path — reads of your local repo's refs and remote configuration,
-  nothing else. A remote's URL is used to classify the push and is never
+  `git symbolic-ref`, `git config --get` / `--get-all` and `git remote get-url`
+  in your working directory, to tell a tag from a branch, to learn which branch
+  the remote calls its default, to see whether the push target is a forge or a
+  filesystem path, and (on a push naming no refspec) to read which ref your
+  `remote.<name>.push`, `push.default` and `branch.<name>.merge` settings send
+  it to — reads of your local repo's refs and remote configuration, nothing
+  else. A remote's URL is used to classify the push and is never
   emitted. The only PR data it handles is a PR URL that the
   command itself already printed, which it echoes back in the nudge.
 - Reads your Claude Code **session transcript** (the harness supplies the path)
