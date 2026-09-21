@@ -18,6 +18,14 @@ REPO = Path(__file__).resolve().parent.parent
 MAX_HOOK_TIMEOUT_SECONDS = 60
 
 README = REPO / "README.md"
+CLAUDE = REPO / "CLAUDE.md"
+
+# CLAUDE.md spells the suite count as a word — "Twelve suites:" — so the gate
+# compares words. Extend if the tree ever outgrows it.
+COUNT_WORDS = ("Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven",
+               "Eight", "Nine", "Ten", "Eleven", "Twelve", "Thirteen",
+               "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen",
+               "Nineteen", "Twenty")
 
 # The one script every hook event runs. See test_every_event_runs_the_same_script.
 ENTRY_POINT = REPO / "scripts" / "pr-sentinel.py"
@@ -61,6 +69,34 @@ def undocumented_env_vars(readme):
         if line.startswith("|"):
             documented |= set(re.findall(r"PR_SENTINEL_\w+", line.split("|")[1]))
     return sorted(env_vars_read() - documented)
+
+
+def suite_files():
+    """Every `tests/test_*.py` suite in the tree."""
+    return {path.name for path in (REPO / "tests").glob("test_*.py")}
+
+
+def testing_section(claude):
+    """CLAUDE.md's Testing section.
+
+    Scoped to that section for the reason the Configuration gate scopes to its
+    table: `tests/test_watcher.py` is cited in the security rules above as
+    well, and a passing mention is not an entry.
+    """
+    return claude.split("\n## Testing\n")[1].split("\n## ")[0]
+
+
+def listed_suites(section):
+    """The suites the Testing section names."""
+    return set(re.findall(r"`tests/(test_\w+\.py)`", section))
+
+
+def listed_suite_count(section):
+    """The count word in the section's lead-in, or None if it carries no
+    number. Q20 had to change "Four suites:" alongside the entries, so the
+    count in prose drifts the same way the list does."""
+    match = re.search(r"^([A-Z][a-z]+) suites:$", section, re.M)
+    return match.group(1) if match else None
 
 
 class Wiring(unittest.TestCase):
@@ -201,6 +237,61 @@ class Configuration(unittest.TestCase):
         readme = README.read_text(encoding="utf-8").replace(
             "`PR_SENTINEL_INTERVAL` | `30`", "")
         self.assertIn("PR_SENTINEL_INTERVAL", undocumented_env_vars(readme))
+
+
+class TestingSection(unittest.TestCase):
+    """CLAUDE.md's Testing list against `tests/`, both directions and the count.
+
+    Q20 found the list at four-listed-of-eight and it had drifted to
+    four-of-eleven by the time it was worked eleven days later. Both gaps were
+    found by a human reading the file, which was the only detector there was.
+    """
+
+    def setUp(self):
+        self.section = testing_section(CLAUDE.read_text(encoding="utf-8"))
+
+    def test_every_suite_is_listed(self):
+        missing = sorted(suite_files() - listed_suites(self.section))
+        self.assertEqual(missing, [], "CLAUDE.md's Testing section does not "
+                         "list: " + ", ".join(missing))
+
+    def test_every_listed_suite_exists(self):
+        """The mirror of the gap above: a deleted suite leaves a line behind,
+        which reads as coverage that is gone."""
+        stale = sorted(listed_suites(self.section) - suite_files())
+        self.assertEqual(stale, [], "CLAUDE.md's Testing section lists suites "
+                         "that are not in tests/: " + ", ".join(stale))
+
+    def test_the_lead_in_counts_the_suites(self):
+        count = len(suite_files())
+        self.assertLess(count, len(COUNT_WORDS),
+                        "extend COUNT_WORDS to cover tests/")
+        self.assertEqual(listed_suite_count(self.section), COUNT_WORDS[count],
+                         "the Testing section's lead-in miscounts tests/")
+
+    def test_the_checks_can_fail(self):
+        """All three pass on a correct tree whatever they assert, so each is
+        fired at a defect whose answer is known."""
+        lead = listed_suite_count(self.section) + " suites:"
+        dropped = sorted(suite_files())[0]
+
+        unlisted = self.section.replace("`tests/%s`" % dropped, "(dropped)", 1)
+        self.assertIn(dropped, suite_files() - listed_suites(unlisted))
+
+        invented = self.section.replace(
+            lead, lead + "\n- `tests/test_no_such_suite.py` — invented", 1)
+        self.assertIn("test_no_such_suite.py",
+                      listed_suites(invented) - suite_files())
+
+        # Undercounting by one is Q20's own drift: a suite added, the prose
+        # left. Asserted as an equality — `assertNotEqual` against the right
+        # word also passes when the extraction returns None, so a regex that
+        # stopped generalising past today's count word would read as a
+        # discriminating control.
+        miscounted = self.section.replace(
+            lead, COUNT_WORDS[len(suite_files()) - 1] + " suites:", 1)
+        self.assertEqual(COUNT_WORDS[len(suite_files()) - 1],
+                         listed_suite_count(miscounted))
 
 
 if __name__ == "__main__":

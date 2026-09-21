@@ -57,6 +57,8 @@ response.
    - **New configuration or env var** → the Configuration table in `README.md`
      (`test_every_env_var_is_in_the_configuration_table` fails otherwise)
      and `.claude-plugin/plugin.json` keywords/description.
+   - **New or deleted test suite** → the Testing list and its count in
+     this file (`test_every_suite_is_listed` fails otherwise).
    - Delete the completed item: `git rm docs/queue/QN.md`.
 5. **Commit when done** — small, focused, Conventional Commits. A pre-commit
    gate lints the backlog store (one-time `git config core.hooksPath .githooks`
@@ -147,8 +149,9 @@ Twelve suites:
   are text rather than commands, and the guard and the hook agree on a
   shared corpus so the two callers cannot drift apart again.
 - `tests/test_wiring.py` — the manifests/hook registration are valid and agree
-  on version, the scripts exist and are executable, and every
-  `PR_SENTINEL_*` var the scripts read has a README Configuration row.
+  on version, the scripts exist and are executable, every `PR_SENTINEL_*` var
+  the scripts read has a README Configuration row, and this list and its count
+  match `tests/`.
 
 **Never use real PR URLs, hostnames, or credential paths in fixtures.**
 Synthetic `owner/repo`, run ids, and PR numbers exercise identical code paths.
