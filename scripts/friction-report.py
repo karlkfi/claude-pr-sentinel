@@ -65,6 +65,14 @@ import os
 import re
 import sys
 
+# The guard's own branch predicates, so the override split below is decided by
+# the code the deny would have run rather than by a second opinion that can
+# drift from it. The path insert makes the sibling import work whether this
+# file is run as a script or loaded by path, as the tests load it — the same
+# shape pr_sentinel_guard.py uses for its own siblings.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pr_sentinel_guard as guard   # noqa: E402
+
 # The watcher emits exactly one header line per event, `report_header <name>`.
 # Grouping them by what the event asks of the session is what turns a raw tally
 # into "where does the time go": `work` events are the ones the plugin exists to
@@ -430,6 +438,53 @@ def inline_override(command):
     return False
 
 
+# What each override bucket means. `none` is not a residue: an override on a
+# command no branch would have denied is the escape hatch spent on nothing,
+# which is worth seeing separately from one spent on a deny.
+OVERRIDE_BRANCH_HINT = {
+    'poll':      'a foreground poll the guard would have denied',
+    'duplicate': 'a watcher launch, which is denied only when one is live',
+    'overlap':   'a `gh pr create`, which is denied only when it overlaps',
+    'none':      'no deny branch was reachable — the prefix bought nothing',
+}
+
+
+def override_branch(command, background):
+    """Which deny branch this overridden command was headed for, or 'none'.
+
+    Walks `pr_sentinel_guard.run()`'s own order with the override condition
+    forced off: duplicate, then overlap, then the backgrounded early return,
+    then the poll deny. The prefix is left on the command — the guard's
+    predicates strip leading assignments themselves, and the guard saw the
+    prefix too, so stripping it here would be the less faithful reading.
+
+    This is the branch a command is **shaped for**, not the verdict it would
+    have drawn. Two of the three also test state no transcript holds: the
+    duplicate deny needs a live watcher on that PR, and the overlap deny needs
+    a create whose lines an open PR also changes. So `duplicate` and `overlap`
+    are ceilings, `poll` is exact, and the split cannot under-report any of
+    them.
+
+    `poll` is exact because the guard's own poll branch reads nothing but the
+    command and `run_in_background`, both of which the transcript records.
+
+    The duplicate shape is read with this report's `LAUNCH` rather than the
+    guard's `watcher_launch_pr`, which realpath-compares `argv[1]` against the
+    watcher sitting beside *it*. Imported here that resolves to this checkout,
+    while a recorded launch names the installed plugin's versioned cache path,
+    so every one of them comes back None and the bucket would be a structural
+    zero rather than a measurement.
+    """
+    m = LAUNCH.search(command)
+    if m is not None and target_pr(m.group(2)) is not None:
+        return 'duplicate'
+    if guard.is_pr_create(command):
+        return 'overlap'
+    if background:
+        return 'none'   # the guard returns above the poll deny
+    return 'poll' if guard.classify_poll(command) else 'none'
+
+
 def stop_block_count(rec):
     """How many pr-sentinel backstop blocks this stop_hook_summary carries."""
     if rec.get('subtype') != 'stop_hook_summary':
@@ -495,8 +550,11 @@ def scan(path):
                     if b.get('id'):
                         bash_cmds[b['id']] = command
                     if inline_override(command):
-                        out['overrides'].append({'command': command,
-                                                 'ts': ts, 'cwd': cwd})
+                        out['overrides'].append({
+                            'command': command,
+                            'branch': override_branch(
+                                command, guard.is_backgrounded(inp)),
+                            'ts': ts, 'cwd': cwd})
                     m = LAUNCH.search(command)
                     if not m:
                         continue
@@ -586,6 +644,7 @@ def build_report(c):
         d['category'] for d in c['decisions'] if d['decision'] == 'error')
     override_cmds = collections.Counter(
         redact_env(o['command'])[:100] for o in c['overrides'])
+    override_branches = collections.Counter(o['branch'] for o in c['overrides'])
     return {
         'sessions': c['sessions'],
         'nudges': nudges,
@@ -608,6 +667,7 @@ def build_report(c):
         'guard_errors': guard_errors,
         'overrides': len(c['overrides']),
         'override_commands': override_cmds,
+        'override_branches': override_branches,
         'denies': verdicts.get('deny', 0),
     }
 
@@ -635,6 +695,20 @@ def print_guard(r, top):
     if r['overrides'] and r['denies']:
         print("  %5.0f%%  as many as the %d denies the guard did make"
               % (100.0 * r['overrides'] / r['denies'], r['denies']))
+    if r['override_branches']:
+        # The total says a deny was routed around; it does not say WHICH, and
+        # the three branches do not offer equally good rewrites. A `poll` count
+        # near the total means the fix-it text is not landing, since that deny
+        # names the exact background launch to run instead. An `overlap` count
+        # near the total is the guard working: deciding whether two branches
+        # should be one PR has no mechanical rewrite to comply with.
+        print("  by the branch that would have fired:")
+        for name, n in r['override_branches'].most_common():
+            print("  %5d  %-10s %s" % (n, name,
+                                       OVERRIDE_BRANCH_HINT.get(name, '')))
+        print("         shapes, not verdicts: duplicate and overlap also turn")
+        print("         on a live watcher and a real overlap, neither of which")
+        print("         the transcript records, so both are ceilings")
     if r['override_commands']:
         print("  Top overridden commands (top %d):" % top)
         for cmd, n in r['override_commands'].most_common(top):
@@ -743,6 +817,7 @@ def main():
             'guard_categories': dict(report['guard_categories']),
             'guard_errors': dict(report['guard_errors']),
             'overrides': report['overrides'],
+            'override_branches': dict(report['override_branches']),
             'top_overridden_commands':
                 report['override_commands'].most_common(args.top),
             'top_repos': report['repos'].most_common(args.top),
