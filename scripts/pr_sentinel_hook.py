@@ -150,10 +150,9 @@ def _looks_like_location(target):
             or ':' in target.partition('/')[0])
 
 
-def _push_url(non_flags, cwd):
-    """The URL a push would go to, resolved against the local repo. None when
-    the repo can't answer — no such remote, not a repo, no git."""
-    target = _push_remote(non_flags, cwd)
+def _push_url(target, cwd):
+    """The URL a push to `target` would go to, resolved against the local repo.
+    None when the repo can't answer — no such remote, not a repo, no git."""
     url = _git_out(['remote', 'get-url', '--push', target], cwd)
     if url:
         return url
@@ -193,6 +192,35 @@ def _is_tag_ref(ref, cwd):
         return False   # can't tell: treat it as a branch and nudge, as before
 
 
+def _implied_refspecs(remote, cwd):
+    """The refspecs a `git push` naming none would send, read from local config.
+    Git takes `remote.<name>.push` when it is set and otherwise follows
+    `push.default`, whose default is `simple`.
+
+    Empty when the repo can't name one ref: `matching` sends every branch that
+    already exists on both ends and `nothing` sends none, and neither is a
+    release-cut shape. #82's fallback applies to an empty answer — treat the
+    push as branch work and nudge, as before.
+    """
+    configured = _git_out(['config', '--get-all', 'remote.' + remote + '.push'],
+                          cwd)
+    if configured:
+        return configured.splitlines()
+    branch = _git_out(['symbolic-ref', '--short', '--quiet', 'HEAD'], cwd)
+    if not branch:
+        return []   # detached HEAD: no branch to imply
+    mode = _git_out(['config', '--get', 'push.default'], cwd) or 'simple'
+    if mode in ('simple', 'current'):
+        # Both send the current branch under its own name. `simple` refuses the
+        # push outright when the upstream is named differently rather than
+        # sending the upstream's name — measured on git 2.55.0.
+        return [branch]
+    if mode in ('upstream', 'tracking'):
+        merge = _git_out(['config', '--get', 'branch.' + branch + '.merge'], cwd)
+        return [merge] if merge else []
+    return []
+
+
 def classify_command(argv, cwd=None):
     """Return 'pr_create', 'git_push', or None for one simple command's argv."""
     argv = _strip_env_prefix(argv)
@@ -212,16 +240,18 @@ def classify_command(argv, cwd=None):
             # Skip tag/branch deletions — not PR-babysitting shapes.
             if '--delete' in rest or '-d' in rest or '--tags' in rest:
                 return None
+            remote = _push_remote(non_flags, cwd)
             # A push to a filesystem path is a scratch or bare repo, not PR
             # work — nothing on the other end can hold a pull request (#106).
-            if _is_local_push_url(_push_url(non_flags, cwd)):
+            if _is_local_push_url(_push_url(remote, cwd)):
                 return None
             # A push whose every refspec is a tag or the default branch is a
             # release cut, not PR work — neither ever has a PR of its own.
-            # non_flags[1] is the remote, so refspecs start at [2].
-            refspecs = non_flags[2:]
+            # non_flags[1] is the remote, so refspecs start at [2]; a push that
+            # names none sends whatever local config implies (Q14).
+            refspecs = non_flags[2:] or _implied_refspecs(remote, cwd)
             if refspecs:
-                default = _default_branch(non_flags[1], cwd)
+                default = _default_branch(remote, cwd)
                 if all(_is_tag_ref(r, cwd) or _is_default_branch_ref(r, default, cwd)
                        for r in refspecs):
                     return None

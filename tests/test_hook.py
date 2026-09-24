@@ -272,6 +272,99 @@ class ClassificationUnit(unittest.TestCase):
                             "scratch"], cwd=work, check=True)
             self.assertIsNone(hook.detect_action("git push", work))
 
+    def test_bare_push_from_the_default_branch_is_silent(self):
+        # A refspec-less push carries no refspec to read, so #82's rule saw
+        # nothing to suppress and a release cut from `main` still nudged (Q14).
+        with tempfile.TemporaryDirectory() as tmp:
+            make_repo_with_default(tmp, "main")
+            subprocess.run(["git", "checkout", "-q", "-b", "main"], cwd=tmp,
+                           check=True)
+            self.assertIsNone(hook.detect_action("git push", tmp))
+            self.assertIsNone(hook.detect_action("git push -u", tmp))
+            subprocess.run(["git", "checkout", "-q", "work"], cwd=tmp, check=True)
+            self.assertEqual(hook.detect_action("git push", tmp), "git_push")
+
+    def test_bare_push_under_push_default_upstream(self):
+        # `upstream` sends `branch.<cur>.merge`, so the local branch name is
+        # the wrong answer in both directions.
+        with tempfile.TemporaryDirectory() as tmp:
+            make_repo_with_default(tmp, "main")
+            subprocess.run(["git", "config", "push.default", "upstream"],
+                           cwd=tmp, check=True)
+            subprocess.run(["git", "config", "branch.work.merge",
+                            "refs/heads/main"], cwd=tmp, check=True)
+            self.assertIsNone(hook.detect_action("git push", tmp))
+            subprocess.run(["git", "config", "branch.work.merge",
+                            "refs/heads/work"], cwd=tmp, check=True)
+            self.assertEqual(hook.detect_action("git push", tmp), "git_push")
+
+    def test_bare_push_is_triangular_under_simple(self):
+        # Triangular is where `simple` and `upstream` disagree about what a
+        # bare push even means: `simple` sends the current branch's own name to
+        # the push remote, and `upstream` refuses the push outright. Measured
+        # on git 2.55.0.
+        with tempfile.TemporaryDirectory() as tmp:
+            make_repo_with_default(tmp, "main")
+            for key, value in (("remote.pushDefault", "other"),
+                               ("branch.work.remote", "origin"),
+                               ("branch.work.merge", "refs/heads/main")):
+                subprocess.run(["git", "config", key, value], cwd=tmp, check=True)
+            subprocess.run(["git", "symbolic-ref", "refs/remotes/other/HEAD",
+                            "refs/remotes/other/work"], cwd=tmp, check=True)
+            # `simple` reads the branch name `work`, which is `other`'s default.
+            self.assertIsNone(hook.detect_action("git push", tmp))
+            # `upstream` would read `refs/heads/main`, which is not.
+            subprocess.run(["git", "config", "push.default", "upstream"],
+                           cwd=tmp, check=True)
+            self.assertEqual(hook.detect_action("git push", tmp), "git_push")
+
+    def test_bare_push_reads_a_configured_push_refspec(self):
+        # `remote.<name>.push` beats `push.default` — measured on git 2.55.0.
+        with tempfile.TemporaryDirectory() as tmp:
+            make_repo_with_default(tmp, "main")
+            # A URL, because `get-url` on a section that has none echoes the
+            # remote's own name back and the filesystem rule then fires.
+            subprocess.run(["git", "remote", "add", "origin",
+                            "https://github.com/owner/repo.git"], cwd=tmp,
+                           check=True)
+            subprocess.run(["git", "config", "remote.origin.push",
+                            "refs/heads/work:refs/heads/main"], cwd=tmp,
+                           check=True)
+            self.assertIsNone(hook.detect_action("git push", tmp))
+            subprocess.run(["git", "config", "--add", "remote.origin.push",
+                            "refs/heads/work:refs/heads/claude/foo"], cwd=tmp,
+                           check=True)
+            self.assertEqual(hook.detect_action("git push", tmp), "git_push")
+
+    def test_bare_push_that_names_no_single_ref_still_nudges(self):
+        # `matching` sends every branch already on both ends and `nothing`
+        # sends none; a detached HEAD has no branch to imply. Fail toward the
+        # old behaviour in all three.
+        with tempfile.TemporaryDirectory() as tmp:
+            make_repo_with_default(tmp, "main")
+            subprocess.run(["git", "checkout", "-q", "-b", "main"], cwd=tmp,
+                           check=True)
+            for mode in ("matching", "nothing", "unheard-of"):
+                subprocess.run(["git", "config", "push.default", mode],
+                               cwd=tmp, check=True)
+                self.assertEqual(hook.detect_action("git push", tmp),
+                                 "git_push", mode)
+            subprocess.run(["git", "config", "push.default", "simple"],
+                           cwd=tmp, check=True)
+            subprocess.run(["git", "checkout", "-q", "--detach"], cwd=tmp,
+                           check=True)
+            self.assertEqual(hook.detect_action("git push", tmp), "git_push")
+
+    def test_bare_push_tag_refspec_from_config_is_silent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            make_repo_with_default(tmp, "main")
+            subprocess.run(["git", "remote", "add", "origin",
+                            "https://github.com/owner/repo.git"], cwd=tmp,
+                           check=True)
+            subprocess.run(["git", "config", "remote.origin.push",
+                            "refs/tags/v0.9.0"], cwd=tmp, check=True)
+            self.assertIsNone(hook.detect_action("git push", tmp))
+
     def test_local_push_url_helper(self):
         for url in ("/tmp/scratch/remote.git", "../remote.git",
                     "~/scratch/remote.git", "file:///tmp/r.git",
