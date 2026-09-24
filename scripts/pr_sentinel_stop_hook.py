@@ -60,9 +60,15 @@ process table, writes nothing, and never touches the PR body or comment stream
     a Bash `cat`/`tail` of it counts, not only the Read tool (issue #14). A
     concluded marker is trusted only in the report's header region, above
     the first embedded CI-log excerpt: a report embeds semi-untrusted CI logs, so
-    a marker below that banner could be a forged log line. If the file is gone,
-    we fall back to a transcript Read of it. A launch that redirected the
-    watcher's own output — `… pr-sentinel-watch.sh 42 > w42.log 2>&1` — leaves
+    a marker below that banner could be a forged log line. The file is a temp
+    file the plugin cannot keep — it is reaped while long sessions are still
+    running — so when it is gone the report is recovered from the transcript:
+    the Read tool's result for that path, or the result of the `cat`/`tail`
+    that read it, keyed on the command naming a path the hook already knows is
+    that launch's output file. Without that second route a session resumed
+    after a gap re-blocks over a PR its watcher concluded days earlier.
+    A launch that redirected the watcher's own output —
+    `… pr-sentinel-watch.sh 42 > w42.log 2>&1` — leaves
     that task output file holding only the echoed exit code, so the report is
     read from the redirect target instead; the path comes from the launch's own
     command string, the same model-authored source the create route reads, and
@@ -536,6 +542,69 @@ def _outfile_text(path, fallback_by_path, not_before=None):
         return fallback_by_path.get(path, '')
 
 
+def _transcript_report_texts(path, wanted):
+    """Report text recovered from the TRANSCRIPT for watcher output files that
+    are no longer on disk, as `{path: text}`.
+
+    The task output file is a temp file the plugin neither owns nor can keep: it
+    can be reaped while the session that launched the watcher is still going, and
+    a session resumed after a long gap routinely finds it gone. The direct read
+    (issue #14) then yields nothing, and the Read-tool fallback beside it only
+    sees the Read tool — so a session that inspected the report with Bash
+    (`cat`/`tail`, which #14 exists to support, and which a harness running in
+    auto mode asks for by default) leaves the terminal event sitting verbatim in
+    the transcript with nothing willing to read it. That is a PR the hook
+    re-blocks over days after its watcher concluded it.
+
+    The trust anchor is unchanged: text counts only because the command named a
+    path the hook independently knows is that launch's output file — from the
+    harness's own task-notification, or the launch's command string. A
+    report-shaped blob from any other command resolves nothing, and the
+    header-region rule still decides what the recovered text is allowed to say.
+    A command naming two known output files is skipped rather than guessed at:
+    `cat a b` yields one blob whose header belongs to the first, so attributing
+    it to the second would conclude a PR on another PR's report."""
+    texts = {}
+    if not wanted:
+        return texts
+    path_by_toolid = {}
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            for raw in fh:
+                # A tool_use names the path; its result does not, so the result
+                # is found by the id instead. Both checks are substring tests
+                # over a handful of needles, so the extra pass stays cheap — and
+                # it only runs when a file has actually gone missing.
+                if not any(w in raw for w in wanted) \
+                        and not any(t in raw for t in path_by_toolid):
+                    continue
+                try:
+                    obj = json.loads(raw)
+                except ValueError:
+                    continue
+                msg = obj.get('message') if isinstance(obj.get('message'), dict) \
+                    else obj
+                content = msg.get('content') if isinstance(msg, dict) else None
+                if not isinstance(content, list):
+                    continue
+                for b in content:
+                    if not isinstance(b, dict):
+                        continue
+                    if b.get('type') == 'tool_use' and b.get('name') == 'Bash':
+                        cmd = (b.get('input') or {}).get('command') or ''
+                        named = [w for w in wanted if w in cmd]
+                        if len(named) == 1:
+                            path_by_toolid[b.get('id')] = named[0]
+                    elif b.get('type') == 'tool_result':
+                        fp = path_by_toolid.get(b.get('tool_use_id'))
+                        if fp:
+                            texts[fp] = texts.get(fp, '') + '\n' \
+                                + _entry_text(obj, content)
+    except OSError:
+        return {}
+    return texts
+
+
 def _launch_report_text(candidates, fallback_by_path):
     """The watcher report one launch produced, from its candidate files in
     preference order (`(path, not_before)` each). Picking on the MARKER rather
@@ -719,6 +788,15 @@ def _analyze(path):
         if fp in known_paths:
             read_text_by_path[fp] = \
                 read_text_by_path.get(fp, '') + '\n' + text
+
+    # A report file that is GONE and was never surfaced with the Read tool: the
+    # text can still be in the transcript, as the result of the `cat`/`tail`
+    # that read it. Recovering it costs a second pass, so it runs only for the
+    # paths that have nothing left to read.
+    missing = {p for p in known_paths
+               if p not in read_text_by_path and not os.path.exists(p)}
+    for fp, text in _transcript_report_texts(path, missing).items():
+        read_text_by_path[fp] = read_text_by_path.get(fp, '') + '\n' + text
 
     # Handed off / dampening: read each completed watcher's OWN report file
     # DIRECTLY (issue #14 — no longer hostage to the session's read method), and

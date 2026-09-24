@@ -180,6 +180,14 @@ report).
   is), and a file older than the launch is ignored for the same reason. Either
   path may be written through a shell variable, which resolves only against a
   literal that same command assigned — never against the hook's own environment.
+- A watcher's output file is a temp file this plugin does not own, and it can
+  be reaped while the session is still running. When one is gone, the report is
+  recovered **from that same transcript**: the Read tool's result for that path,
+  or the **`Bash` command** that read it (`cat`/`tail`) together with that
+  command's own result. No new file and no new path — a result counts only when
+  its command names an output-file path the hook already learned from the
+  harness's completion notification or the launch's own command string, so a
+  command reading anything else contributes nothing.
 - Also reads, from that same transcript, the harness's own record of an
   **earlier block by this hook**, so it asks about a PR once rather than on
   every turn end. From the same background-launch records it already reads, it
