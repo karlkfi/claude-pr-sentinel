@@ -68,6 +68,36 @@ def simple_commands(command):
     return tokenize.simple_commands(command, lenient=True)
 
 
+# Options whose value can be a separate word, so dropping only the `-`-prefixed
+# token leaves the value standing where a positional should be. Measured on git
+# 2.55.0 by running each form: everything here consumes the next argv entry, and
+# the optional-value options are deliberately absent — `--force-with-lease`,
+# `--signed` and `--force-if-includes` read the next word as the repository, so
+# consuming it would lose the remote we are trying to find.
+GIT_VALUE_FLAGS = frozenset((
+    '-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path',
+))
+PUSH_VALUE_FLAGS = frozenset((
+    '-o', '--push-option', '--repo', '--exec', '--receive-pack',
+    '--recurse-submodules',
+))
+
+
+def _positional(argv, value_flags):
+    """`argv` with the options removed — and with the value of an option that
+    takes a separate word removed alongside it, so what is left is positional."""
+    out = []
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if len(token) > 1 and token.startswith('-'):
+            i += 2 if token in value_flags else 1
+            continue
+        out.append(token)
+        i += 1
+    return out
+
+
 def _strip_env_prefix(argv):
     """Drop leading NAME=VALUE assignments so `GH_TOKEN=x gh pr create` still
     resolves to `gh`."""
@@ -235,7 +265,10 @@ def classify_command(argv, cwd=None):
             return 'pr_create'
         return None
     if head == 'git':
-        non_flags = [a for a in rest if not a.startswith('-')]
+        # A separated option value otherwise sits where a positional should:
+        # `git -C <path> push` hides the subcommand and `git push -o ci.skip
+        # origin <ref>` reads `ci.skip` as the remote (Q46).
+        non_flags = _positional(rest, GIT_VALUE_FLAGS | PUSH_VALUE_FLAGS)
         if non_flags[:1] == ['push']:
             # Skip tag/branch deletions — not PR-babysitting shapes.
             if '--delete' in rest or '-d' in rest or '--tags' in rest:
