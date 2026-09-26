@@ -268,7 +268,7 @@ earlier watcher was launched with. The relaunch command then names that URL
 rather than a bare number, which is what sends the watcher to the right repo; a
 bare number is what a launch falls back to when no route resolved one. It
 treats a watcher as live when its background-task launch has no completion
-notification yet, and reads the watcher's output file directly to see whether the
+notification yet and was not stopped with `TaskStop`, and reads the watcher's output file directly to see whether the
 PR was handed off — so that signal holds whether the session surfaced the output
 with the `Read` tool or a Bash `cat`/`tail`. A launch that redirected the
 watcher's output away from that file — `… pr-sentinel-watch.sh 42 > w42.log

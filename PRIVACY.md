@@ -48,9 +48,9 @@ report).
   command itself already printed, which it echoes back in the nudge.
 - Reads your Claude Code **session transcript** (the harness supplies the path)
   for one thing only: the watchers this session launched and which of them have
-  reported completion, so it does not ask for a second watcher on a pull
-  request one is already watching. It extracts the PR number, the background
-  task id, and nothing else.
+  reported completion or been stopped with `TaskStop`, so it does not ask for
+  a second watcher on a pull request one is already watching. It extracts the
+  PR number, the background task id, and nothing else.
 
 ## The PreToolUse handler (`scripts/pr_sentinel_guard.py`)
 

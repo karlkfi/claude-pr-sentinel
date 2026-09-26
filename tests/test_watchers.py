@@ -61,6 +61,26 @@ def completion(tool_id="toolu_w", task_id="bk1", status="completed"):
     return {"type": "queue-operation", "operation": "enqueue", "content": content}
 
 
+def task_stop(tool_id="toolu_s", task_id="bk1"):
+    return {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": tool_id, "name": "TaskStop",
+         "input": {"task_id": task_id}}]}}
+
+
+def task_stop_result(tool_id="toolu_s", task_id="bk1", is_error=False):
+    """TaskStop's answer. The harness writes no `<task-notification>` for a
+    task it stopped this way, so this result is the only record of the stop."""
+    if is_error:
+        return {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "is_error": True,
+             "content": f"No task found with ID: {task_id}"}]}}
+    body = {"message": f"Successfully stopped task: {task_id}",
+            "task_id": task_id, "task_type": "local_bash"}
+    return {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": tool_id,
+         "content": json.dumps(body)}]}, "toolUseResult": body}
+
+
 class LiveWatchers(unittest.TestCase):
     def live(self, entries, exclude=()):
         with tempfile.NamedTemporaryFile("w", suffix=".jsonl",
@@ -151,6 +171,41 @@ class LiveWatchers(unittest.TestCase):
         self.assertEqual(
             self.live([launch("42"), launch_result(),
                        completion(status="killed")]), {})
+
+    def test_a_task_stopped_with_taskstop_is_not_live(self):
+        # The deny names TaskStop-then-relaunch as the way to restart a watch,
+        # so the stop has to close the launch without a notification.
+        self.assertEqual(
+            self.live([launch("42"), launch_result(),
+                       task_stop(), task_stop_result()]), {})
+
+    def test_taskstop_s_deprecated_shell_id_also_stops_it(self):
+        stop = task_stop()
+        stop["message"]["content"][0]["input"] = {"shell_id": "bk1"}
+        self.assertEqual(
+            self.live([launch("42"), launch_result(),
+                       stop, task_stop_result()]), {})
+
+    def test_a_failed_taskstop_leaves_the_watcher_live(self):
+        self.assertEqual(
+            self.live([launch("42"), launch_result(),
+                       task_stop(), task_stop_result(is_error=True)]),
+            {"42": ["bk1"]})
+
+    def test_stopping_another_task_leaves_the_watcher_live(self):
+        self.assertEqual(
+            self.live([launch("42"), launch_result(),
+                       task_stop(task_id="bk9"),
+                       task_stop_result(task_id="bk9")]),
+            {"42": ["bk1"]})
+
+    def test_relaunch_after_taskstop_reports_only_the_new_task(self):
+        self.assertEqual(
+            self.live([launch("42"), launch_result(),
+                       task_stop(), task_stop_result(),
+                       launch("42", tool_id="toolu_w2"),
+                       launch_result(tool_id="toolu_w2", task_id="bk2")]),
+            {"42": ["bk2"]})
 
 
 class FailOpen(unittest.TestCase):
