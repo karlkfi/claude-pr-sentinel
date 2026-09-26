@@ -722,7 +722,10 @@ PR body or comments**:
   records a `<task-notification>` carrying the same `tool_use` id. A watcher is
   *live* only while its launch has a task id and no completion notification —
   so a watcher that already exited (delivered its event) reads as *not live*,
-  and a session that stopped mid-fix without relaunching is nudged too. The
+  and a session that stopped mid-fix without relaunching is nudged too. A task
+  ended with `TaskStop` never gets a notification, so a successful `TaskStop`
+  result naming the task id closes the launch as well; without it, the
+  stop-then-relaunch the deny prescribes was itself denied. The
   task id is load-bearing rather than cosmetic: the harness writes the Bash
   `tool_use` entry *before* running the PreToolUse hook, so a scan taken from
   inside that hook already sees the launch it is deciding. That entry has no
@@ -865,7 +868,8 @@ through. 160 of the duplicate launches followed a nudge.
 Two harness records make the fix local and cheap. A backgrounded launch's own
 tool result carries a **background task id**, and when the task exits the
 harness records a **completion notification** naming the launch. So a watcher is
-live exactly when its launch has no notification yet — the same derivation the
+live exactly when its launch has no notification yet (or a `TaskStop` result
+naming its task, since a stopped task gets none) — the same derivation the
 Stop hook already used to decide a PR was covered. It lives in
 `scripts/pr_sentinel_watchers.py` and all three hooks read it, which is the
 point: the Stop hook asks "does this PR still need a watcher" and the other two

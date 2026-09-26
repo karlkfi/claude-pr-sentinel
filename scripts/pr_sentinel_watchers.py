@@ -4,9 +4,11 @@ running, and the background task id that would stop one.
 
 A launch is a `run_in_background` Bash call naming `pr-sentinel-watch.sh <PR>`.
 The harness answers it with a background task id, and when that task exits it
-records a `<task-notification>` carrying the launch's `tool_use` id. A watcher
-is LIVE iff its launch got a task id and has no notification yet. Both records
-are harness-generated, so untrusted CI-log text cannot forge one.
+records a `<task-notification>` carrying the launch's `tool_use` id. A task
+stopped with TaskStop gets no notification; the TaskStop result is the only
+record. A watcher is LIVE iff its launch got a task id, has no notification
+yet, and was not stopped by a TaskStop that succeeded. All of these are
+harness-generated records, so untrusted CI-log text cannot forge one.
 
 The task id is what separates a watcher that started from one that never did.
 The harness writes a Bash `tool_use` entry BEFORE running the PreToolUse hook,
@@ -86,8 +88,11 @@ BG_TASK_ID_RE = re.compile(r'running in background with ID:\s*(\S+?)[.\s]')
 # narrower literal common to every `*watch*.py`/`*watch*.sh`. It parses more
 # lines than the old needle did; the filter is an optimisation, and a launch it
 # skips is one the scan cannot see at all.
-SCAN_NEEDLES = ('watch', 'task-notification',
-                'backgroundTaskId', 'running in background')
+#
+# A TaskStop call line is caught by its tool name, and its result line by the
+# `"task_id"` key; neither carries anything else a needle here would match.
+SCAN_NEEDLES = ('watch', 'task-notification', 'backgroundTaskId',
+                'running in background', 'TaskStop', '"task_id"')
 
 
 def pr_number(token):
@@ -160,6 +165,8 @@ class WatcherScan(object):
         self.task_by_toolid = {}     # launch tool_use_id -> background task id
         self.outfile_by_toolid = {}  # completed launch id -> its output file
         self.completed = set()       # launch ids whose task reported completion
+        self.stop_by_toolid = {}     # TaskStop tool_use_id -> task id it names
+        self.stopped = set()         # task ids a TaskStop reported stopped
         # A foreign watcher's launch, kept apart from `pr_by_toolid` because it
         # is NOT an ownership signal: a session watching someone else's PR with
         # another tool must not start being blocked over it.
@@ -187,9 +194,14 @@ class WatcherScan(object):
             if not isinstance(b, dict):
                 continue
             if b.get('type') == 'tool_use':
+                inp = b.get('input') or {}
+                if b.get('name') == 'TaskStop':
+                    # `shell_id` is the deprecated spelling TaskStop still takes.
+                    self.stop_by_toolid[b.get('id')] = \
+                        inp.get('task_id') or inp.get('shell_id')
+                    continue
                 if b.get('name') != 'Bash':
                     continue
-                inp = b.get('input') or {}
                 if not inp.get('run_in_background'):
                     continue   # a foreground run is not a watcher this can stop
                 cmd = inp.get('command') or ''
@@ -204,7 +216,10 @@ class WatcherScan(object):
                         self.foreign_script_by_toolid[b.get('id')] = hit[1]
             elif b.get('type') == 'tool_result':
                 tid = b.get('tool_use_id')
-                if tid is not None:
+                if tid in self.stop_by_toolid:
+                    if not b.get('is_error') and self.stop_by_toolid[tid]:
+                        self.stopped.add(self.stop_by_toolid[tid])
+                elif tid is not None:
                     task = _background_task_id(obj, b)
                     if task:
                         self.task_by_toolid[tid] = task
@@ -235,14 +250,15 @@ class WatcherScan(object):
 
     def _live_launches(self, pr_by_toolid, exclude):
         """{PR number: [launch tool_use id, ...]} for the launches in
-        `pr_by_toolid` that started and have not reported completion, launch
-        order preserved."""
+        `pr_by_toolid` that started and have neither reported completion nor
+        been stopped, launch order preserved."""
         skip = {t for t in exclude if t}
         out = {}
         for tid, pr in pr_by_toolid.items():
             if tid in self.completed or tid in skip:
                 continue
-            if not self.task_by_toolid.get(tid, ''):
+            task = self.task_by_toolid.get(tid, '')
+            if not task or task in self.stopped:
                 continue
             out.setdefault(pr, []).append(tid)
         return out
