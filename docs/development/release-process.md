@@ -21,18 +21,19 @@ bumping:
 grep -rn '"version"' .claude-plugin/
 ```
 
-## Run the release in an interactive permission mode
+## Expect a prompt for the push to `main`
 
 Steps 6 and 7 are the only place this repo touches `main` directly, and
-[branch-guard](https://github.com/karlkfi/claude-branch-guard) classifies both
-the commit and the push as `ask`. In a **non-interactive** permission mode
-(`auto`, `dontAsk`, `bypassPermissions`) branch-guard converts that `ask` into a
-hard **deny** so the guard fails safe with no human at the prompt — no dialog
-reaches you, and approving in chat cannot unblock it. The release stalls with
-the version bump committed but unpushed.
+[branch-guard](https://github.com/karlkfi/claude-bouncer) classifies both the
+commit and the push as `ask`. Any mode with a human at the prompt shows it —
+the default, **Accepts edits** (`acceptEdits`), and `auto` — so approve it and
+the release goes through. v0.12.0's push to `main` went through from `auto` on
+branch-guard 1.11.0, with no mode switch.
 
-Switch to an interactive mode — **Accepts edits** (`acceptEdits`) or the default
-— before step 6, and approve the two prompts.
+Only `dontAsk` and `bypassPermissions` have no one to ask, and there
+branch-guard converts the `ask` into a hard **deny**: approving in chat cannot
+unblock it, and the release stalls with the bump committed but unpushed. Switch
+to an interactive mode before step 6 if the session is in either.
 
 Do **not** reach for `BRANCH_GUARD_PUSH_POLICY` to get around this. Its
 protected-target check runs before the policy branch, so `strict` and
