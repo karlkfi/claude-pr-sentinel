@@ -1256,11 +1256,11 @@ Shipped since the MVP:
 pr-sentinel watches the **post-PR CI/merge** axis. Three sibling plugins guard
 different axes with the same secure-by-default design, and all run side by side:
 
-- [**workspace-guard**](https://github.com/karlkfi/claude-workspace-guard) —
+- [**workspace-guard**](https://github.com/karlkfi/claude-bouncer/tree/main/plugins/workspace-guard) —
   the **filesystem** boundary.
-- [**prod-guard**](https://github.com/karlkfi/claude-prod-guard) — the
+- [**prod-guard**](https://github.com/karlkfi/claude-bouncer/tree/main/plugins/prod-guard) — the
   **infrastructure blast-radius** boundary.
-- [**branch-guard**](https://github.com/karlkfi/claude-branch-guard) — the
+- [**branch-guard**](https://github.com/karlkfi/claude-bouncer/tree/main/plugins/branch-guard) — the
   **git history** boundary (pauses pushes to `main`, blocks force-push — the
   guard that makes "merge, not rebase" matter).
 
