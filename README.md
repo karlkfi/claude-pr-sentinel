@@ -195,13 +195,13 @@ the session to launch the watcher before stopping:
 | Session state at end of turn (Stop) | Hook action |
 | --- | --- |
 | opened a PR this session (or watched one), **no** live watcher, PR not handed off | **block once** — launch the watcher for `#N` |
-| the watcher has reported the **same** terminal event twice (`check_failure`, `conflict`, `behind`, or `dequeued` at the same head commit) | **allow + warn** — nothing has been pushed, so stop nagging; a non-blocking notice naming the event keeps the PR visible |
+| the watcher has reported the **same** terminal event twice (`check_failure`, `conflict`, `behind`, `dequeued`, or `base_fixed` at the same head commit — or a `timeout` that followed a `base_failure` notice, with the same failed set) | **allow + warn** — nothing has been pushed, so stop nagging; a non-blocking notice naming the event keeps the PR visible |
 | the hook already blocked over this PR once and **no watcher has been launched since** | **allow + warn** — the ask was made and not acted on; repeating it cannot help a session that has no move here |
 | a launched watcher hasn't reported completion yet (still running) | silent (already covered) |
 | another tool's PR watch is running, **no** live pr-sentinel watcher | **block once** — a foreign watch covers merge state and need not report check conclusions at all, so the ask stands; the block names the script it found rather than saying nothing is watching |
 | a launch the harness never answered with a task id (it never started) | **block once** — nothing is watching, so the pull request still needs a watcher |
 | PR handed off (watcher **terminal** `ready`/`closed`/`blocked`/`unchecked`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
-| the watcher's output ends on a `base_failure`, `repeat_failure`, `ready_watching`, `blocked_watching`, or `unchecked_watching` **notice** (a watch that exited without a terminal event) | **block once** — a notice isn't a handoff; the PR is still open and unwatched |
+| the watcher's last report is a `timeout`, or a `base_failure`, `repeat_failure`, `ready_watching`, `blocked_watching`, or `unchecked_watching` **notice** | **block once** — neither is a handoff; the PR is still open and unwatched |
 | no PR opened or watched this session | silent (a PR merely viewed or commented on is not yours) |
 | `stop_hook_active` already set (a prior block) | silent — **never loops** |
 | unreadable transcript / any uncertainty | silent (fail-open) |
@@ -236,6 +236,9 @@ The shapes that reach it differ, and the notice says which one it is:
   already healed the branch and committed it, and is waiting on the project's
   local gate before pushing, so the remote head *cannot* have moved yet. A
   relaunch here has no move available at all.
+- **`base_failure` then `timeout`** — the failure is inherited from the base
+  branch and stayed red there for the whole watch budget, twice. Nothing here is
+  the session's to fix; a relaunch would wait out another identical budget.
 - **no watcher launched since the ask** — either the PR is still open and yours
   and the watcher is the move, or another session has already concluded it and
   there is nothing to do.
