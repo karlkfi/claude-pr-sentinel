@@ -171,10 +171,19 @@ EVENT_MARKER = 'PR-SENTINEL EVENT:'
 # never updated. The non-terminal notices (`base_failure`, `repeat_failure`,
 # `ready_watching`, `blocked_watching`, `unchecked_watching`) are excluded: the
 # watcher keeps polling past them, so they are not the report the session is
-# being blocked over. So are the concluded events, which already suppress the
+# being blocked over — except a `timeout` that ended a watch carrying a
+# `base_failure` notice, which `_report_signature` signs as `base_failure`.
+# So are the concluded events, which already suppress the
 # block outright.
 DAMPENABLE_EVENT_RE = re.compile(
     r'PR-SENTINEL EVENT:\s*(check_failure|conflict|behind|dequeued|base_fixed)(?![\w-])')
+
+# Any watcher event marker, terminal or notice. Used only to tell which event
+# ENDED a report, for the one non-dampenable terminal that still gets dampened:
+# a `timeout` after a `base_failure` notice. That watch spent its whole budget
+# waiting on someone else's branch, so a relaunch at the same head waits out
+# another identical hour and the session has nothing to push in between.
+ANY_EVENT_RE = re.compile(r'PR-SENTINEL EVENT:\s*([\w-]+)')
 
 # The opening words of the block message, which double as how a block this hook
 # ALREADY made is found on a later turn: the harness records the reason verbatim
@@ -446,10 +455,22 @@ def _report_signature(text):
     excerpt, so all markers sit in the header region in emission order."""
     header = _report_header_region(text)
     marks = list(DAMPENABLE_EVENT_RE.finditer(header))
-    if not marks:
-        return None
-    event = marks[-1].group(1)
-    header = header[marks[-1].end():]
+    if marks:
+        event = marks[-1].group(1)
+        header = header[marks[-1].end():]
+    else:
+        # A base_failure notice that ran into the watch budget. The failed set
+        # is the notice's; the head is the timeout's, which is the later read.
+        events = list(ANY_EVENT_RE.finditer(header))
+        if (len(events) < 2 or events[-1].group(1) != 'timeout'
+                or events[-2].group(1) != 'base_failure'):
+            return None
+        event = 'base_failure'
+        fm = FAILED_CHECKS_RE.search(header, events[-2].end(), events[-1].start())
+        sm = HEAD_SHA_RE.search(header, events[-1].end())
+        if not (fm and sm):
+            return None
+        return (event, _failed_set(fm.group(1)), sm.group(1))
     sm = HEAD_SHA_RE.search(header)
     if not sm:
         return None
@@ -932,6 +953,11 @@ _DAMPEN_DETAIL = {
         'a merge-queue removal still reported at the same commit across '
         'repeated watcher reports — re-enqueueing is a human\'s call, so there '
         'is nothing further to do here',
+    'base_failure':
+        'a failure inherited from the base branch, still red there through '
+        'repeated full watcher runs at the same commit — nothing here is this '
+        'session\'s to fix, and it clears only when the base does; relaunch the '
+        'watcher once the base branch has a fix',
     REPEAT_ASK:
         'no watcher launched since this hook asked for one — it asks once per '
         'pull request, so this is a notice rather than a second block; launch '

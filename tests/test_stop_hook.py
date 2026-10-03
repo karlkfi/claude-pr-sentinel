@@ -1319,6 +1319,60 @@ class NeedsWatcherLogic(unittest.TestCase):
         self.assertEqual(b, {"42"})
         self.assertEqual(d, {})
 
+    # -- a base_failure notice that ran out the watch budget -----------------
+    #
+    # Measured on a stacked PR whose parent branch stayed red: each watcher run
+    # printed the base_failure notice, polled for its full 3600s, and exited
+    # `timeout` with the notice still at the top of its output. Neither event
+    # was dampenable, so every relaunch re-blocked the stop.
+
+    def _base_failure_timeout(self, sha="ad170d0", failed="mutation (fail)"):
+        return (
+            "PR-SENTINEL EVENT: base_failure\n"
+            "PR: 42\n"
+            "State: OPEN\n"
+            "mergeStateStatus: UNSTABLE\n"
+            f"Head SHA: {sha}\n"
+            f"Failed checks: {failed}\n"
+            "Also failing on parent: tests.yml (run 1, e6f4916, failure, 6m ago)\n\n"
+            "This is a NOTICE, not a wake-up.\n"
+            "PR-SENTINEL EVENT: timeout\n"
+            "PR: 42\n"
+            "State: OPEN\n"
+            "mergeStateStatus: UNSTABLE\n"
+            f"Head SHA: {sha}\n\n"
+            "The watch budget (3600s) elapsed without a terminal event.\n")
+
+    def test_dampens_repeated_timeout_after_base_failure(self):
+        b, d = analyze(self._two_reports(
+            self._base_failure_timeout(), self._base_failure_timeout()))
+        self.assertEqual(b, set())
+        self.assertEqual(d, {"42": "base_failure"})
+
+    def test_single_timeout_after_base_failure_still_blocks(self):
+        self.assertEqual(needs([
+            *created_pr(42),
+            *launch_watcher(42, "toolu_w"),
+            task_notification("toolu_w", outfile=OUTFILE),
+            read_file(OUTFILE, self._base_failure_timeout(), "toolu_r"),
+        ]), {"42"})
+
+    def test_no_dampen_when_base_failure_timeout_head_moves(self):
+        b, d = analyze(self._two_reports(
+            self._base_failure_timeout(sha="aaa"),
+            self._base_failure_timeout(sha="bbb")))
+        self.assertEqual(b, {"42"})
+        self.assertEqual(d, {})
+
+    def test_bare_timeout_is_not_dampened(self):
+        # A timeout with no base_failure behind it can be a slow suite still
+        # pending, whose result the session has not seen yet.
+        timeout = ("PR-SENTINEL EVENT: timeout\nPR: 42\nState: OPEN\n"
+                   "Head SHA: aaa\n\nThe watch budget (3600s) elapsed.\n")
+        b, d = analyze(self._two_reports(timeout, timeout))
+        self.assertEqual(b, {"42"})
+        self.assertEqual(d, {})
+
     def test_single_check_failure_still_blocks(self):
         # One block to try a fix; dampening needs a second, identical report.
         self.assertEqual(needs([

@@ -806,7 +806,14 @@ Two shapes reach it, and they mean opposite things:
 
 The non-terminal notices (`base_failure`, `ready_watching`, `blocked_watching`)
 are deliberately outside the set: the watcher keeps polling past them, so they
-are never the report a stop is being blocked over.
+are never the report a stop is being blocked over. One combination is the
+exception. A `base_failure` notice followed by `timeout` means the base stayed
+red for the whole watch budget, and the session has nothing to push while it
+does, so that report signs as `base_failure` with the notice's failed set and
+the timeout's head. Two of them at one head dampen like any other repeat.
+Without it, a PR stacked on a red parent re-blocked the stop once per budget
+for as long as the parent stayed red. A bare `timeout` stays undampened: it can
+be a slow suite still pending, whose result the session has not seen.
 
 ### The ask the session cannot act on
 
