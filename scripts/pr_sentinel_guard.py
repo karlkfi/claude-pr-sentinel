@@ -341,6 +341,65 @@ def pr_create_base(command):
     return ''
 
 
+def _pr_create_head(group):
+    """The `--head` this create declares, or ''. Same four spellings as
+    `--base`. A fork's `owner:branch` is cut to the branch, the part that can
+    name a ref here."""
+    rest = _strip_env_prefix(list(group))[1:]
+    head = ''
+    for i, arg in enumerate(rest):
+        if arg.startswith('--head='):
+            head = arg[len('--head='):]
+        elif arg.startswith('-H') and not arg.startswith('--') and len(arg) > 2:
+            head = arg[2:]
+        elif arg in ('--head', '-H'):
+            nxt = rest[i + 1] if i + 1 < len(rest) else ''
+            head = '' if nxt.startswith('-') else nxt
+        else:
+            continue
+        break
+    return head.rsplit(':', 1)[-1]
+
+
+# Flags that leave `git checkout <x>` / `git switch <x>` meaning "go to branch
+# x". Anything else — `-b`, `-c`, `--detach`, `--orphan` — is a different
+# operation, and the checked-out branch stays the better guess.
+_SWITCH_QUIET_FLAGS = frozenset({'-q', '--quiet', '-f', '--force',
+                                 '--progress', '--no-progress'})
+
+
+def _switch_target(group):
+    """The branch a `git checkout <branch>` or `git switch <branch>` moves to,
+    or ''. A path checkout (`-- path`, two operands) is not a move."""
+    argv = _strip_env_prefix(list(group))
+    if (len(argv) < 3 or os.path.basename(argv[0]) != 'git'
+            or argv[1] not in ('checkout', 'switch')):
+        return ''
+    operands = []
+    for arg in argv[2:]:
+        if arg.startswith('-') and arg not in _SWITCH_QUIET_FLAGS:
+            return ''
+        if not arg.startswith('-'):
+            operands.append(arg)
+    return operands[0] if len(operands) == 1 else ''
+
+
+def pr_create_head(command):
+    """The branch a `gh pr create` opens, or '' for the checked-out one.
+
+    The hook runs before the command does, so in `git checkout x && gh pr
+    create` HEAD is still the previous branch. A `--head` on the create wins;
+    otherwise the last checkout or switch ahead of it in the chain names the
+    branch.
+    """
+    moved = ''
+    for group in simple_commands(command):
+        if _is_gh_pr_create(group):
+            return _pr_create_head(group) or moved
+        moved = _switch_target(group) or moved
+    return ''
+
+
 # `gh` in command position: at the start, after whitespace or a shell operator,
 # or opening a substitution (`$(gh …)`, `` `gh …` ``) — which the tokenizer
 # hands back as one opaque token, so this is matched on the raw string. An
@@ -500,7 +559,8 @@ def run(data):
     # yields no hits and the create proceeds.
     if overlap.enabled() and not overridden and is_pr_create(command):
         hits = overlap.overlapping_prs(data.get('cwd'),
-                                       pr_create_base(command))
+                                       pr_create_base(command),
+                                       pr_create_head(command))
         if hits:
             print(json.dumps({'hookSpecificOutput': {
                 'hookEventName': 'PreToolUse',

@@ -165,6 +165,14 @@ rebased and you have not restacked onto it, the two sides are numbered in
 different pre-images and no comparison between them means anything, so the
 check declines outright rather than guess.
 
+**The branch checked is the one the create opens.** The hook runs before any of
+the command does, so in `git checkout topic && gh pr create` the checked-out
+branch is still the previous one. A `--head` on the create names the branch,
+and failing that, the last `git checkout <branch>` or `git switch <branch>`
+earlier in the same command does; otherwise it is the checked-out branch. A
+named head that is no branch here, locally or on `origin`, leaves nothing to
+compare and the check declines.
+
 This is the one part of the hooks that **talks to GitHub**: `gh pr list` for the
 open PRs and their paths, then `gh pr diff` for at most three of them, and only
 ones already sharing a path. It reads code, never prose — no PR body, no

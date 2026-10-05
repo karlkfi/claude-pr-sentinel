@@ -32,6 +32,12 @@ the default branch, so the parent's hunks are not counted as this branch's own
 duplicated. Once that parent is rebased and this branch is not restacked onto
 it, the two sides are numbered in different pre-images and nothing comparable
 is left, so the check declines rather than guess.
+
+**The branch judged is the one the create opens.** A create that names `--head`,
+or follows a `git checkout`/`git switch` in the same command, is judged on that
+branch rather than on whatever HEAD is when the hook runs — the hook runs before
+any of the command does, so a chained checkout has not happened yet. A head that
+resolves to no commit here leaves nothing to compare, and the check declines.
 """
 import fnmatch
 import json
@@ -134,10 +140,10 @@ def resolves(root, rev):
     return bool(out and out.strip())
 
 
-def contains(root, rev):
-    """Whether HEAD already carries `rev` — this branch is built on top of it."""
+def contains(root, rev, tip='HEAD'):
+    """Whether `tip` already carries `rev` — this branch is built on top of it."""
     status, _ = capture(('git', '-C', root, 'merge-base', '--is-ancestor',
-                         rev, 'HEAD'), root)
+                         rev, tip), root)
     return status == 0
 
 
@@ -251,6 +257,16 @@ def current_branch(root):
     return out.strip() if out else ''
 
 
+def head_ref(root, name):
+    """The ref a named head branch resolves to here, or None. The local branch
+    first — it is what a chained checkout lands on, and what a session pushes
+    from — then the remote's, for a branch only ever fetched."""
+    for ref in ('refs/heads/' + name, 'refs/remotes/origin/' + name):
+        if resolves(root, ref):
+            return ref
+    return None
+
+
 def open_prs(root):
     """Open PRs with the paths each one touches, or None.
 
@@ -285,8 +301,11 @@ def pr_ranges(root, number):
     return None if status != 0 else parse_hunks(out, widen=False)
 
 
-def overlapping_prs(cwd, declared_base=''):
+def overlapping_prs(cwd, declared_base='', head=''):
     """[(number, paths, precise)] for open PRs on this branch's own lines, or [].
+
+    `head` is the branch the create opens, when the command names one; empty
+    means the checked-out branch.
 
     `precise` is False when the PR's diff was not fetched — the cap was reached,
     or the call failed — and the entry rests on a shared path alone. The deny
@@ -295,14 +314,20 @@ def overlapping_prs(cwd, declared_base=''):
     root = repo_root(cwd)
     if root is None:
         return []
-    branch = current_branch(root)
-    if not branch:
-        return []                        # detached HEAD: nothing to compare
+    branch = (head or '').strip()
+    if branch:
+        tip = head_ref(root, branch)
+        if tip is None:
+            return []                    # not a branch here: nothing to compare
+    else:
+        branch, tip = current_branch(root), 'HEAD'
+        if not branch:
+            return []                    # detached HEAD: nothing to compare
     base = base_ref(root, declared_base)
-    fork = git(root, 'merge-base', 'HEAD', base)
+    fork = git(root, 'merge-base', tip, base)
     if fork is None or not fork.strip():
         return []
-    mine = changed_ranges(root, fork.strip(), 'HEAD')
+    mine = changed_ranges(root, fork.strip(), tip)
     if not mine:
         return []                        # nothing committed yet, or git said no
     prs = open_prs(root)
@@ -311,7 +336,7 @@ def overlapping_prs(cwd, declared_base=''):
     parent = (declared_base or '').strip()
     stacked = bool(parent) and any(pr.get('headRefName') == parent
                                    for pr in prs)
-    if stacked and not contains(root, base):
+    if stacked and not contains(root, base, tip):
         return []                        # stale stack: nothing comparable left
     patterns = ignore_patterns()
     hits, fetched = [], 0
