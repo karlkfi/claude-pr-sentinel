@@ -203,6 +203,16 @@ class Scenario:
             "refs/remotes/origin/" + self.parent_branch, "HEAD")
         git(self.root, "checkout", "-q", branch)
 
+    def branch_off(self, name, files):
+        """A second branch forked from `main` with its own commit, leaving the
+        scenario's branch checked out."""
+        branch = self.current_branch()
+        git(self.root, "checkout", "-q", "-b", name, "main")
+        self._write(files)
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-qm", name)
+        git(self.root, "checkout", "-q", branch)
+
     def current_branch(self):
         proc = subprocess.run(
             ("git", "-C", str(self.root), "symbolic-ref", "--short", "HEAD"),
@@ -935,6 +945,116 @@ class GuardDeny(unittest.TestCase):
         """The new branch must not have displaced the one already there."""
         reason = self.deny_reason(self.s.guard("gh run watch 5"))
         self.assertIn("pr-sentinel-watch.sh", reason)
+
+
+class DeclaredHead(unittest.TestCase):
+    """Reading the branch a create opens off the command: `--head` in its four
+    spellings, else a checkout or switch earlier in the chain."""
+
+    def head(self, command):
+        return guard.pr_create_head(command)
+
+    def test_long_flag(self):
+        self.assertEqual(self.head("gh pr create --head topic"), "topic")
+
+    def test_long_flag_with_equals(self):
+        self.assertEqual(self.head("gh pr create --head=topic"), "topic")
+
+    def test_short_flag(self):
+        self.assertEqual(self.head("gh pr create -H topic"), "topic")
+
+    def test_short_flag_glued(self):
+        self.assertEqual(self.head("gh pr create -Htopic"), "topic")
+
+    def test_a_fork_head_is_cut_to_the_branch(self):
+        self.assertEqual(self.head("gh pr create --head owner:topic"), "topic")
+
+    def test_no_head_declared(self):
+        self.assertEqual(self.head("gh pr create --fill"), "")
+
+    def test_a_chained_checkout_names_the_branch(self):
+        self.assertEqual(
+            self.head("git checkout topic && gh pr create --fill"), "topic")
+
+    def test_a_chained_switch_names_the_branch(self):
+        self.assertEqual(
+            self.head("git switch -q topic && gh pr create --fill"), "topic")
+
+    def test_the_last_move_wins(self):
+        self.assertEqual(
+            self.head("git checkout a && git checkout b && gh pr create"), "b")
+
+    def test_head_beats_a_chained_checkout(self):
+        self.assertEqual(
+            self.head("git checkout a && gh pr create --head b"), "b")
+
+    def test_a_new_branch_is_not_a_move(self):
+        """`-b` forks from HEAD, so HEAD is still what is being judged — and the
+        new name resolves to nothing until the command runs."""
+        for cmd in ("git checkout -b topic && gh pr create",
+                    "git switch -c topic && gh pr create"):
+            self.assertEqual(self.head(cmd), "", cmd)
+
+    def test_a_path_checkout_is_not_a_move(self):
+        self.assertEqual(
+            self.head("git checkout -- app.py && gh pr create"), "")
+        self.assertEqual(
+            self.head("git checkout main app.py && gh pr create"), "")
+
+    def test_a_checkout_after_the_create_is_not_borrowed(self):
+        self.assertEqual(
+            self.head("gh pr create --fill && git checkout main"), "")
+
+
+class NamedHead(unittest.TestCase):
+    """The hook runs before the command it judges, so in `git checkout x && gh
+    pr create` HEAD is still the previous branch. The create must be judged on
+    the branch it opens, not the one checked out."""
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", tmp])
+        # `feature` (checked out) collides with #7 at line 40; `clean` edits
+        # line 70, well clear of it.
+        self.s = Scenario(tmp, {"app.py": numbered(80)},
+                          {"app.py": numbered(80, 40, "OURS")})
+        self.s.branch_off("clean", {"app.py": numbered(80, 70, "CLEAN")})
+        self.s.pr_list([(7, "other", ["app.py"])])
+        self.s.pr_diff(7, "app.py", 40)
+
+    deny_reason = GuardDeny.deny_reason
+
+    def test_a_chained_checkout_of_a_clean_branch_is_not_denied(self):
+        """The control first: from `feature` itself the create is denied, so
+        the silence after it is a verdict on `clean` and not a dead probe."""
+        self.deny_reason(self.s.guard("gh pr create --fill"))
+        for cmd in ("git checkout clean && gh pr create --head clean --fill",
+                    "git checkout clean && gh pr create --fill",
+                    "git switch clean && gh pr create --fill"):
+            self.assertEqual(self.s.guard(cmd), "", cmd)
+
+    def test_a_head_naming_the_overlapping_branch_is_denied(self):
+        git(self.s.root, "checkout", "-q", "clean")
+        self.assertEqual(self.s.guard("gh pr create --fill"), "")
+        self.assertIn("#7", self.deny_reason(
+            self.s.guard("gh pr create --head feature --fill")))
+
+    def test_a_head_known_only_on_the_remote_is_judged(self):
+        git(self.s.root, "update-ref", "refs/remotes/origin/pushed", "feature")
+        git(self.s.root, "checkout", "-q", "clean")
+        self.deny_reason(self.s.guard("gh pr create --head pushed --fill"))
+
+    def test_the_named_heads_own_pr_is_not_an_overlap(self):
+        git(self.s.root, "checkout", "-q", "clean")
+        self.s.pr_list([(7, "feature", ["app.py"])])
+        self.assertEqual(
+            self.s.guard("gh pr create --head feature --fill"), "")
+
+    def test_a_head_that_is_no_branch_here_declines(self):
+        """Nothing to compare, so no opinion — rather than judging HEAD, which
+        is the branch the create does not open."""
+        self.assertEqual(
+            self.s.guard("gh pr create --head nowhere --fill"), "")
 
 
 class ReadDisclosure(unittest.TestCase):
