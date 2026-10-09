@@ -111,6 +111,7 @@ and calls `run()` with it; this module emits a block decision on stdout (or
 nothing).
 """
 import calendar
+import collections
 import json
 import os
 import re
@@ -494,6 +495,28 @@ def _failed_set(line):
     return tuple(sorted(p for p in line.strip().split(', ') if p))
 
 
+def _repeated_event(sigs):
+    """The event a later run repeated from an earlier one, given one report
+    signature per launch in launch order, or None.
+
+    A repeat is the same event at the same head with no failure dropped: the
+    later failed set may have GROWN. A watcher wakes on the first failure while
+    slower jobs are still running, so each relaunch over one unchanged head can
+    report a larger set as those jobs finish (measured: three runs, one head,
+    `govulncheck` then `+ trivy (proxy, 1)` then three more `trivy` rows).
+    Requiring equality re-blocked every one of them. A set that lost a member
+    is not a repeat — a re-run cleared something, and that is new state.
+
+    The containment test runs over `_failed_set`'s fragments, not parsed check
+    names; a set contained in another has its fragments contained too."""
+    for j, (event, failed, head) in enumerate(sigs):
+        later = collections.Counter(failed)
+        for e, f, h in sigs[:j]:
+            if e == event and h == head and not collections.Counter(f) - later:
+                return event
+    return None
+
+
 def _prior_block_prs(obj):
     """PR numbers a PREVIOUS run of this hook already blocked this session over,
     from the harness's own record of that block. Three shapes carry it — a
@@ -647,9 +670,10 @@ def _analyze(path):
                    unconcluded AND have no live watcher AND are not dampened:
                    the stop is blocked over these.
       * dampened — `{PR: event}` for PRs that WOULD block, but whose watcher has
-                   now reported the identical terminal event (same event +
-                   failed-set + head SHA) on two separate reads. The session
-                   pushed nothing between them, so the report is one it cannot
+                   now reported the same terminal event at the same head SHA on
+                   two separate runs, no failure gone from the later set
+                   (`_repeated_event`). The session pushed nothing between
+                   them, so the report is one it cannot
                    clear in-session (or has already cleared locally and cannot
                    push yet); we stop blocking and let `main` warn instead of
                    nagging forever.
@@ -823,7 +847,7 @@ def _analyze(path):
     # DIRECTLY (issue #14 — no longer hostage to the session's read method), and
     # judge only its header region so an embedded CI-log excerpt cannot forge the
     # marker or the signature.
-    sig_launches = {}   # PR -> {report signature -> set of launch ids}
+    sigs_by_pr = {}     # PR -> report signatures, one per launch, in launch order
     for tid, candidates in report_files.items():
         pr = scan.pr_by_toolid[tid]
         text = _launch_report_text(candidates, read_text_by_path)
@@ -833,7 +857,7 @@ def _analyze(path):
             concluded.add(pr)
         sig = _report_signature(text)
         if sig is not None:
-            sig_launches.setdefault(pr, {}).setdefault(sig, set()).add(tid)
+            sigs_by_pr.setdefault(pr, []).append(sig)
 
     # Live: a watcher launch whose task has not reported completion.
     live = set(scan.live())
@@ -846,15 +870,14 @@ def _analyze(path):
     owned = created | set(scan.pr_by_toolid.values())
 
     block = owned - concluded - live
-    # Dampen: an unresolved-and-unwatched PR whose identical terminal event was
-    # reported by two separate watcher runs (two distinct launches, same
-    # event + failed-set + SHA -> nothing pushed between them).
+    # Dampen: an unresolved-and-unwatched PR whose terminal event was reported
+    # by two separate watcher runs at one SHA (nothing pushed between them),
+    # every failure of the earlier run still in the later one.
     # A PR this hook already asked about once, with nothing launched since, is
     # dampened too: the ask cannot be satisfied by repeating it (#77).
     dampened = {}
     for pr in block:
-        repeated = next((sig[0] for sig, runs in sig_launches.get(pr, {}).items()
-                         if len(runs) >= 2), None)
+        repeated = _repeated_event(sigs_by_pr.get(pr, []))
         if repeated:
             dampened[pr] = repeated
         elif pr in asked and pr not in launched_since_ask:
@@ -935,8 +958,8 @@ def build_reason(prs, urls=None, foreign=None):
 # describing every case as a stuck check.
 _DAMPEN_DETAIL = {
     'check_failure':
-        'a failing check that has not changed across repeated watcher reports '
-        '(same failed checks, same commit) — it looks like one this session '
+        'a failing check that has not cleared across repeated watcher reports '
+        '(no failure gone, same commit) — it looks like one this session '
         'cannot fix (e.g. inherited from the base branch, out-of-scope, or '
         'external)',
     'conflict':
