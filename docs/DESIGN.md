@@ -768,8 +768,9 @@ reads each terminal report's signature — the event name, the head commit
 (`Head SHA:`), and the failed-check set where there is one, all from the report's
 header region so a forged copy in a CI-log excerpt can't drive it, and from the
 event marker *forward* so an earlier `base_failure` notice in the same file can't
-lend it stale fields — and once two reports carry the identical signature (any
-real progress would have moved the SHA), it allows the stop, emitting a
+lend it stale fields — and once two runs report the same event at the same SHA
+with no failure gone from the later set (any real progress would have moved the
+SHA), it allows the stop, emitting a
 non-blocking `systemMessage` so the PR stays visible. One block to try; no
 livelock; never a *silent* walk-away.
 
@@ -786,8 +787,15 @@ watchers already wrote into a live transcript.
 Splitting that line on `, ` does not recover the individual checks — a check can
 be named `trivy (agc, 1)`, separator and all. It does not need to. Two renderings
 of one set yield the same fragments in a different order, so comparing them as a
-sorted multiset answers the equality question the signature asks, which is the
-only question it asks.
+sorted multiset answers the question the signature asks, which is the only
+question it asks: whether one set is contained in the other.
+
+Containment rather than equality, because the watcher wakes on the first failure
+while slower jobs are still running. A relaunch over the same head then sees
+more of them finish red, so a session declining an inherited failure got a
+larger set on every run and was re-blocked on each — three relaunches at one
+head in the case that motivated it. A set that *lost* a member still blocks: a
+re-run cleared something, and that is new state.
 
 Two shapes reach it, and they mean opposite things:
 
