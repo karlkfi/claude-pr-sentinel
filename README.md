@@ -203,7 +203,7 @@ the session to launch the watcher before stopping:
 | Session state at end of turn (Stop) | Hook action |
 | --- | --- |
 | opened a PR this session (or watched one), **no** live watcher, PR not handed off | **block once** — launch the watcher for `#N` |
-| the watcher has reported the **same** terminal event twice (`check_failure`, `conflict`, `behind`, `dequeued`, or `base_fixed` at the same head commit — or a `timeout` that followed a `base_failure` notice, with the same failed set) | **allow + warn** — nothing has been pushed, so stop nagging; a non-blocking notice naming the event keeps the PR visible |
+| the watcher has reported the **same** terminal event twice (`check_failure`, `conflict`, `behind`, `dequeued`, or `base_fixed` at the same head commit — or a `timeout` that followed a `base_failure` notice), with no failed check gone from the later report (one that only *grew* still counts) | **allow + warn** — nothing has been pushed, so stop nagging; a non-blocking notice naming the event keeps the PR visible |
 | the hook already blocked over this PR once and **no watcher has been launched since** | **allow + warn** — the ask was made and not acted on; repeating it cannot help a session that has no move here |
 | a launched watcher hasn't reported completion yet (still running) | silent (already covered) |
 | another tool's PR watch is running, **no** live pr-sentinel watcher | **block once** — a foreign watch covers merge state and need not report check conclusions at all, so the ask stands; the block names the script it found rather than saying nothing is watching |

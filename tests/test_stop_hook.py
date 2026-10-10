@@ -1262,13 +1262,44 @@ class NeedsWatcherLogic(unittest.TestCase):
         self.assertEqual(b, set())
         self.assertEqual(d, {"42": "check_failure"})
 
-    def test_a_reordered_set_is_still_not_a_changed_set(self):
-        # The control for the test above: run 1 differs by MEMBERSHIP
-        # (security-scan-gate had not failed yet), which is a real change and
-        # must still block. Without this, "dampen" could just mean "always".
+    def test_a_grown_set_at_one_head_dampens(self):
+        # Run 1 differs by MEMBERSHIP: security-scan-gate had not failed yet.
+        # The watcher wakes on the first failure while slower jobs still run,
+        # so a relaunch over the same head sees more of them. Nothing was
+        # pushed and nothing cleared, so this is the same state, reported later.
         b, d = analyze(self._two_reports(
             check_failure_report(failed=self.RUN1, sha="aaa"),
             check_failure_report(failed=self.RUN2, sha="aaa")))
+        self.assertEqual(b, set())
+        self.assertEqual(d, {"42": "check_failure"})
+
+    def test_a_shrunk_set_is_a_changed_set(self):
+        # The control for the test above: a failure that cleared at the same
+        # head (a re-run passed) is new state and must still block. Without
+        # this, "dampen" could just mean "always".
+        b, d = analyze(self._two_reports(
+            check_failure_report(failed=self.RUN2, sha="aaa"),
+            check_failure_report(failed=self.RUN1, sha="aaa")))
+        self.assertEqual(b, {"42"})
+        self.assertEqual(d, {})
+
+    def test_the_reported_loop_ends_at_the_second_run(self):
+        # The reported loop: one head, each relaunch's failed set larger than
+        # the last, and every stop re-blocked under exact-set matching. The
+        # second run is the first time the session declined a failure it had
+        # already seen, so the stop after it must not ask for a third.
+        b, d = analyze(self._two_reports(
+            check_failure_report(failed="govulncheck (fail)", sha="aaa"),
+            check_failure_report(
+                failed="govulncheck (fail), trivy (proxy, 1) (fail)",
+                sha="aaa")))
+        self.assertEqual(b, set())
+        self.assertEqual(d, {"42": "check_failure"})
+
+    def test_a_grown_set_still_blocks_when_the_head_moves(self):
+        b, d = analyze(self._two_reports(
+            check_failure_report(failed=self.RUN1, sha="aaa"),
+            check_failure_report(failed=self.RUN2, sha="bbb")))
         self.assertEqual(b, {"42"})
         self.assertEqual(d, {})
 
