@@ -61,6 +61,15 @@ def completion(tool_id="toolu_w", task_id="bk1", status="completed"):
     return {"type": "queue-operation", "operation": "enqueue", "content": content}
 
 
+def resumed_completion(tool_id="toolu_w", task_id="bk1", status="completed"):
+    """The same notification after a session resume. The harness copies the
+    conversation into the new transcript but not its `queue-operation` lines,
+    so the record survives only as the user turn it was delivered as."""
+    content = completion(tool_id, task_id, status)["content"]
+    return {"type": "user", "message": {"role": "user", "content": content},
+            "origin": {"kind": "task-notification"}, "promptSource": "system"}
+
+
 def task_stop(tool_id="toolu_s", task_id="bk1"):
     return {"type": "assistant", "message": {"role": "assistant", "content": [
         {"type": "tool_use", "id": tool_id, "name": "TaskStop",
@@ -97,6 +106,23 @@ class LiveWatchers(unittest.TestCase):
     def test_completed_launch_is_not_live(self):
         self.assertEqual(
             self.live([launch("42"), launch_result(), completion()]), {})
+
+    def test_completion_copied_into_a_resumed_transcript_is_not_live(self):
+        # A resumed session's transcript keeps the notification only as a
+        # user turn. Missing it read a watcher that exited `ready` an hour
+        # earlier as live, and the guard refused the PR's only real watcher.
+        self.assertEqual(
+            self.live([launch("42"), launch_result(), resumed_completion()]),
+            {})
+
+    def test_a_user_turn_merely_quoting_a_notification_is_not_one(self):
+        # The record has to BE the turn, not appear somewhere inside it.
+        quoted = resumed_completion()
+        quoted["message"]["content"] = "why did this say " + \
+            quoted["message"]["content"]
+        self.assertEqual(
+            self.live([launch("42"), launch_result(), quoted]),
+            {"42": ["bk1"]})
 
     def test_task_id_recovered_from_the_result_text_alone(self):
         self.assertEqual(

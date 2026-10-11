@@ -140,11 +140,20 @@ def _pr_operand(tokens):
 
 
 def notification_text(obj):
-    """The `<task-notification>` payload of an entry, from either a
-    `queue-operation` (.content) or an `attachment` (.attachment.prompt)."""
+    """The `<task-notification>` payload of an entry, from a `queue-operation`
+    (.content), an `attachment` (.attachment.prompt), or the user turn it was
+    delivered as (.message.content). A resumed session's transcript copies the
+    conversation but not its `queue-operation` lines, so for a task that
+    finished before the resume the user turn is the only record left."""
     if obj.get('type') == 'queue-operation':
         c = obj.get('content')
         return c if isinstance(c, str) and '<task-notification>' in c else ''
+    if obj.get('type') == 'user':
+        msg = obj.get('message')
+        c = msg.get('content') if isinstance(msg, dict) else None
+        if isinstance(c, str) and c.lstrip().startswith('<task-notification>'):
+            return c
+        return ''
     att = obj.get('attachment')
     if isinstance(att, dict):
         p = att.get('prompt')
