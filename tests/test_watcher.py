@@ -18,6 +18,9 @@ scenario is a directory of small fixture files:
                  against the calling directory (run_watcher's `cwd_repo`) — so
                  one scenario can hold the same PR number in two repos.
   pr_checks    -> lines "bucket\\tname\\tlink" for `gh pr checks`
+  <key>.stderr -> printed to stderr beside fixture <key>, and the stub then
+                 exits 1. Pairs with whichever file was selected: pr_checks.3
+                 with pr_checks.3.stderr, pr_checks with pr_checks.stderr
   run_log      -> raw --log-failed output for `gh run view`
   run_conclusion.<id> -> conclusion of run <id> for `gh api repos/.../runs/<id>`
                  (absent = the API call fails, as an unreadable run would)
@@ -95,16 +98,20 @@ GH_STUB = textwrap.dedent(
     dir="$GH_STUB_DIR"
 
     # Print fixture <key>, preferring the per-call file key.N (N = this key's
-    # own call count). Returns 1 when neither key.N nor key exists.
+    # own call count). Returns 1 when neither key.N nor key exists. A
+    # <file>.stderr beside the chosen file goes to stderr and sets stub_rc=1.
+    stub_rc=0
     emit() {
-      local key="$1" cfile n
+      local key="$1" cfile n f
       cfile="$dir/.count.$key"
       n=0; [[ -f "$cfile" ]] && n=$(cat "$cfile")
       n=$((n + 1)); echo "$n" > "$cfile"
-      if [[ -f "$dir/$key.$n" ]]; then cat "$dir/$key.$n"
-      elif [[ -f "$dir/$key" ]]; then cat "$dir/$key"
+      if [[ -f "$dir/$key.$n" ]]; then f="$dir/$key.$n"
+      elif [[ -f "$dir/$key" ]]; then f="$dir/$key"
       else return 1
       fi
+      cat "$f"
+      if [[ -f "$f.stderr" ]]; then cat "$f.stderr" >&2; stub_rc=1; fi
     }
 
     # `gh api` REST paths. (`gh api graphql` is the merge-queue query and
@@ -174,7 +181,7 @@ GH_STUB = textwrap.dedent(
     if ! emit "$key"; then
       [[ "$key" == "queue_entry" || "$key" == "dequeue_actor" ]] && exit 1
     fi
-    exit 0
+    exit "$stub_rc"
     """
 )
 
@@ -229,6 +236,12 @@ FAILING_SLEEP = textwrap.dedent(
     exit 7
     """
 )
+
+
+# gh's stderr for a head with no checks, and for a request that never landed.
+NO_CHECKS = "no checks reported on the 'feature' branch\n"
+NETWORK_DOWN = ('Get "https://api.example.invalid/graphql": dial tcp: '
+                'lookup api.example.invalid: no such host\n')
 
 
 def sleeps(stderr):
@@ -1554,11 +1567,66 @@ class WatcherCase(unittest.TestCase):
     def _unchecked(self):
         """A head no check has reported on: no rows, CLEAN merge state. The
         counts are all zero because nothing ran, which is indistinguishable
-        from every check passing if you only count buckets."""
+        from every check passing if you only count buckets. Shaped as real gh
+        answers it, measured on gh 2.101.0: exit 1, nothing on stdout."""
         return {
             "pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
             "pr_checks": "",
+            "pr_checks.stderr": NO_CHECKS,
         }
+
+    def test_an_empty_read_that_exits_zero_is_still_unchecked(self):
+        files = {"pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
+                 "pr_checks": ""}
+        _, out, _ = self.run_watcher(
+            files, env={"PR_SENTINEL_UNCHECKED_GRACE": "0"})
+        self.assertIn("PR-SENTINEL EVENT: unchecked", out)
+
+    # -- a failed checks read (2026-10-12) ------------------------------------
+
+    def _flaky(self, polls):
+        """Green checks on a CLEAN head, with the read failing on every other
+        poll the way it did while the Mac slept between maintenance wakes."""
+        files = {"pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n"}
+        for n in range(1, polls + 1):
+            if n % 2:
+                files["pr_checks.%d" % n] = ""
+                files["pr_checks.%d.stderr" % n] = NETWORK_DOWN
+            else:
+                files["pr_checks.%d" % n] = "pass\tbuild\tlink\n"
+        return files
+
+    def test_a_failed_read_between_green_polls_still_reaches_ready(self):
+        """The incident: read as `no checks`, each failed poll reset the green
+        streak and each good one reset the unchecked clock, so a green PR
+        timed out an hour later reporting that no check had ever run."""
+        rc, out, err = self.run_watcher(
+            self._flaky(40), env={"PR_SENTINEL_UNCHECKED_GRACE": "0"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: ready", out)
+        self.assertIn("gh pr checks failed", err)
+
+    def test_a_read_that_keeps_failing_is_not_reported_as_unchecked(self):
+        files = {"pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
+                 "pr_checks": "", "pr_checks.stderr": NETWORK_DOWN}
+        _, out, _ = self.run_watcher(
+            files, env={"PR_SENTINEL_UNCHECKED_GRACE": "0",
+                        "PR_SENTINEL_TIMEOUT": "3"})
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+        self.assertNotIn("EVENT: unchecked", out)
+        self.assertNotIn("No check ever reported", out)
+        self.assertIn("could not be read", out)
+        # gh's message is data from outside; it stays in the task log.
+        self.assertNotIn(NETWORK_DOWN.strip(), out)
+
+    def test_failing_rows_with_a_non_zero_exit_are_rows(self):
+        """gh exits non-zero whenever a check fails or is pending, so the
+        status alone must not mark the read as failed."""
+        files = {"pr_view": "OPEN\tCLEAN\tmain\tabc1234def\n",
+                 "pr_checks": "fail\tbuild\tlink\n",
+                 "pr_checks.stderr": ""}
+        _, out, _ = self.run_watcher(files)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
 
     def test_empty_check_set_never_fires_ready(self):
         """The defect: `pass_count == 0 && pending_count == 0` is exactly `no
@@ -1619,6 +1687,7 @@ class WatcherCase(unittest.TestCase):
         the normal path, and the bare polls cost nothing."""
         files = dict(self._unchecked())
         files["pr_checks.1"] = ""
+        files["pr_checks.1.stderr"] = files.pop("pr_checks.stderr")
         files["pr_checks.2"] = "pending\tbuild\tlink\n"
         files["pr_checks"] = "pass\tbuild\tlink\n"
         rc, out, _ = self.run_watcher(files)
