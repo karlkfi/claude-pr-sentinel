@@ -725,7 +725,12 @@ PR body or comments**:
   and a session that stopped mid-fix without relaunching is nudged too. A task
   ended with `TaskStop` never gets a notification, so a successful `TaskStop`
   result naming the task id closes the launch as well; without it, the
-  stop-then-relaunch the deny prescribes was itself denied. The
+  stop-then-relaunch the deny prescribes was itself denied. A resumed session
+  starts a new transcript that copies the conversation but not the harness's
+  `queue-operation` lines, so a notification from before the resume survives
+  only as the user turn it was delivered as — that turn closes the launch too,
+  or a watcher that reported `ready` before a restart reads as live forever
+  after it. The
   task id is load-bearing rather than cosmetic: the harness writes the Bash
   `tool_use` entry *before* running the PreToolUse hook, so a scan taken from
   inside that hook already sees the launch it is deciding. That entry has no
