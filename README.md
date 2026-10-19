@@ -315,6 +315,7 @@ needed:
 | the same, **and** `PR_SENTINEL_WATCH_UNTIL=closed` | *(notice: **blocked_watching**, keep polling)* | nothing — the watch continues |
 | **no check row at all** on the head, for `PR_SENTINEL_UNCHECKED_GRACE` seconds | **unchecked** | never green — nothing was tested. Run `gh run list --commit <head>`: runs queued means relaunch, no runs means say so when handing back (see [A head no check reported on](#a-head-no-check-reported-on)) |
 | the same, **and** `PR_SENTINEL_WATCH_UNTIL=closed` | *(notice: **unchecked_watching**, keep polling)* | nothing — the watch continues |
+| `gh pr checks` itself fails (network down, API error) | *(keep polling; the poll decides nothing)* | nothing — a `timeout` that ends on failed reads says so (see [A head no check reported on](#a-head-no-check-reported-on)) |
 | PR merged or closed | **closed** | done; stop watching |
 | watch budget elapsed | **timeout** | re-check and relaunch if still open |
 | no `gh` credentials, PR unresolvable, or transient failures past the retry horizon | **error** | check `gh auth status`, relaunch |
@@ -735,7 +736,11 @@ incident, against a confirmation window of two polls. No number of polls tells
 that apart from a repository that runs no CI on this PR at all.
 
 So an empty check set is never green. `ready` needs at least one row that
-reported, whatever the merge state says. When the head keeps carrying none for
+reported, whatever the merge state says. It also has to be a set gh actually
+returned: for a head with no checks, gh exits non-zero and prints `no checks
+reported`, and any other failure with no rows (a dropped connection, an API
+error) is a read that failed. A failed read moves no streak or clock, so a
+flaky network delays `ready` rather than turning a green PR into `unchecked`. When the head keeps carrying none for
 `PR_SENTINEL_UNCHECKED_GRACE` seconds (default 600), the watcher reports
 **`unchecked`** instead, naming the head commit and both causes:
 

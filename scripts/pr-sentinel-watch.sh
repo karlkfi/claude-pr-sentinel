@@ -170,6 +170,10 @@ UNCHECKED_SINCE=0
 # once per run like the other two (WATCH_UNTIL=closed only).
 UNCHECKED_REPORTED=0
 
+# Consecutive polls whose `gh pr checks` read failed. Such a poll knows nothing
+# about the checks, so it leaves every streak and clock above as it found them.
+CHECKS_UNREAD=0
+
 # When the current run of pending checks was first seen, or 0 when the last poll
 # saw nothing pending. This is what paces a pending poll; clearing it on a poll
 # with no pending checks is what makes a push restart the clock.
@@ -426,6 +430,25 @@ gh_state_fetch() {
 gh_pr_checks() {
 	gh pr checks "$PR" --json name,bucket,link \
 		-q 'sort_by(.name, .bucket) | .[] | [.bucket, .name, .link] | @tsv'
+}
+
+# Fetch the check rows into `checks`, returning 1 when the read itself failed.
+# A head with no checks and a failed request both leave stdout empty and exit
+# non-zero; only gh's message tells them apart, so stderr is kept for this
+# test and never reaches the report. Read as "no checks", a failure that
+# alternates with good reads resets the green streak and the unchecked clock
+# in turn, and the watch reaches neither `ready` nor `unchecked`.
+gh_checks_fetch() {
+	local rc=0 row_re=$'(^|\n)(pass|fail|pending|skipping|cancel)\t'
+	checks=$(gh_pr_checks 2>&1) || rc=$?
+	(( rc == 0 )) && return 0
+	# Pending and failing checks exit non-zero too, with their rows printed.
+	[[ "$checks" =~ $row_re ]] && return 0
+	case "$checks" in
+		*"no checks reported"*) checks="" ; return 0 ;;
+	esac
+	warn "gh pr checks failed (exit ${rc}); this poll decides nothing about the checks"
+	return 1
 }
 
 # Extract a GitHub Actions run id from a check link like
@@ -1264,6 +1287,11 @@ emit_timeout() {
 		echo "(mergeStateStatus stayed UNKNOWN), so 'ready' was withheld — an"
 		echo "uncomputed state can still resolve to a conflict."
 	fi
+	if (( CHECKS_UNREAD > 0 )); then
+		echo "Its checks could not be read on the last ${CHECKS_UNREAD} poll(s):"
+		echo "'gh pr checks' failed rather than reporting rows, so their state at"
+		echo "the end of the watch is unknown. Check them with 'gh pr checks'."
+	fi
 	if (( UNCHECKED_REPORTED == 1 )) || (( UNCHECKED_SINCE > 0 )); then
 		echo "No check ever reported on its head: the counts were empty because"
 		echo "nothing ran, so 'ready' was withheld — it would have claimed checks"
@@ -1391,6 +1419,7 @@ main() {
 			(( DEQUEUE_SEEN >= DEQUEUED_POLLS )) && emit_dequeued
 		fi
 
+		local checks=""
 		if (( QUEUED_SEEN == 1 )); then
 			# The queue owns the PR — it is queued now, or its entry just
 			# vanished and the dequeue awaits confirmation. Branch-state
@@ -1405,17 +1434,23 @@ main() {
 			# idle backoff rather than a check age this poll never read.
 			PENDING_SINCE=0
 			UNCHECKED_SINCE=0
+			CHECKS_UNREAD=0
+			local confirmed_green=0 unchecked=0
+		# (b) conflicting
+		elif [[ "$MERGE" == "DIRTY" ]]; then emit_conflict
+		# branch behind base — same merge-from-base fix as a conflict
+		elif [[ "$MERGE" == "BEHIND" ]]; then emit_behind
+		# --- fetch check buckets (gh exits non-zero when failing/pending) ---
+		elif ! gh_checks_fetch; then
+			# The read failed, so this poll knows nothing about the checks.
+			# Everything in the branch below either acts on the counts or
+			# resets a streak or clock because of them, so none of it runs.
+			CHECKS_UNREAD=$(( CHECKS_UNREAD + 1 ))
 			local confirmed_green=0 unchecked=0
 		else
-			# (b) conflicting
-			if [[ "$MERGE" == "DIRTY" ]]; then emit_conflict; fi
-			# branch behind base — same merge-from-base fix as a conflict
-			if [[ "$MERGE" == "BEHIND" ]]; then emit_behind; fi
-
-			# --- fetch check buckets (gh exits non-zero when failing/pending) ---
-			local checks fail_count=0 pending_count=0 pass_count=0
+			CHECKS_UNREAD=0
+			local fail_count=0 pending_count=0 pass_count=0
 			local failed_names="" failed_links="" pending_links=""
-			checks=$(gh_pr_checks 2>/dev/null || true)
 			if [[ -n "$checks" ]]; then
 				local bucket name link
 				while IFS=$'\t' read -r bucket name link; do
