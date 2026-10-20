@@ -278,6 +278,12 @@ class ClassifierUnit(unittest.TestCase):
         self.assertTrue(hook._is_pr_create("gh pr create --fill"))
         self.assertTrue(hook._is_pr_create("GH_TOKEN=x gh pr create -t a -b b"))
         self.assertFalse(hook._is_pr_create("gh pr view 3"))
+        self.assertFalse(hook._is_pr_create(
+            "cat > s.py <<'EOF'\nCREATE = 'gh pr create'\nEOF\npython3 s.py"))
+        self.assertFalse(hook._is_pr_create('git commit -m "run gh pr create"'))
+        # An apostrophe shlex cannot balance does not cost the real create.
+        self.assertTrue(hook._is_pr_create(
+            "gh pr create --title \"it's --fill"))
 
     def test_pr_close_targets(self):
         self.assertEqual(hook._pr_close_targets("gh pr merge 42 --squash"), {"42"})
@@ -738,6 +744,34 @@ class NeedsWatcherLogic(unittest.TestCase):
             assistant_bash("gh pr create --fill", "toolu_c"),
             tool_result("https://github.com/o/r/pull/55\n", "toolu_c"),
         ]), {"55"})
+
+    def test_a_script_written_through_a_heredoc_creates_nothing(self):
+        # A session measuring other repos' PRs wrote a transcript scanner whose
+        # source names `gh pr create`, then printed sixteen PR URLs it had only
+        # read. The heredoc body is text, so none of them is the session's.
+        script = ("cat > s.py <<'EOF'\n"
+                  "CREATE = re.compile(r'gh pr create')\n"
+                  "EOF\n"
+                  "python3 s.py")
+        self.assertEqual(needs([
+            assistant_bash(script, "toolu_s"),
+            tool_result("https://github.com/o/r/pull/2058\n"
+                        "https://github.com/o/r/pull/1999\n", "toolu_s"),
+        ]), set())
+
+    def test_reading_a_pr_creates_nothing(self):
+        self.assertEqual(needs([
+            assistant_bash("gh pr view 2058 -R o/r --json files", "toolu_v"),
+            tool_result("https://github.com/o/r/pull/2058\n", "toolu_v"),
+            pr_link(2058),
+        ]), set())
+
+    def test_a_create_after_a_heredoc_body_file_still_counts(self):
+        self.assertEqual(needs([
+            assistant_bash("cat > body.md <<'EOF'\nIt's a fix.\nEOF\n"
+                           "gh pr create --body-file body.md", "toolu_c"),
+            tool_result("https://github.com/o/r/pull/56\n", "toolu_c"),
+        ]), {"56"})
 
     def test_live_watcher_no_notification_allows(self):
         # Launched, no task-notification yet -> still running -> not a block.

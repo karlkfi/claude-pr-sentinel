@@ -301,12 +301,13 @@ def _is_gh_pr_create(group):
     return _PR_CREATE_PROBE_FLAGS.isdisjoint(rest)
 
 
-def is_pr_create(command):
+def is_pr_create(command, lenient=False):
     """Whether `command` opens a pull request. Matched on a simple command's
-    own leading word, so a `gh pr create` inside a quoted commit message is not
-    one. A heredoc body is not tracked, so a line inside one that leads with
-    `gh pr create` does read as a simple command — that errs toward denying."""
-    return any(_is_gh_pr_create(group) for group in simple_commands(command))
+    own leading word, so a `gh pr create` inside a quoted commit message or a
+    heredoc body is not one. `lenient` is the tokenizer's: the Stop hook passes
+    it so an apostrophe in a PR body does not cost it the create beside it."""
+    return any(_is_gh_pr_create(group)
+               for group in tokenize.simple_commands(command, lenient))
 
 
 def _pr_create_base(group):
