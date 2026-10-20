@@ -124,6 +124,7 @@ import time
 # script or loaded by path (as the tests load it).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pr_sentinel_watchers as watchers   # noqa: E402
+import pr_sentinel_guard as guard         # noqa: E402
 
 PR_URL_RE = watchers.PR_URL_RE
 WATCH_ARG_RE = watchers.WATCH_ARG_RE
@@ -384,9 +385,11 @@ def _redirected_pr_urls(path, created_after=None):
 
 
 def _is_pr_create(command):
-    """True if a command string runs `gh pr create` (env prefixes / flags may
-    sit anywhere before the subcommands)."""
-    return bool(re.search(r'\bgh\b(?:\s+\S+)*?\s+pr\s+create\b', command))
+    """True if a command string runs `gh pr create`. The guard's classifier,
+    because the create's output is what this hook credits as the session's own
+    PRs: a script written through a heredoc that merely names `gh pr create`
+    once claimed every PR URL that script went on to print."""
+    return guard.is_pr_create(command, lenient=True)
 
 
 def _pr_close_targets(command):

@@ -211,6 +211,7 @@ the session to launch the watcher before stopping:
 | PR handed off (watcher **terminal** `ready`/`closed`/`blocked`/`unchecked`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
 | the watcher's last report is a `timeout`, or a `base_failure`, `repeat_failure`, `ready_watching`, `blocked_watching`, or `unchecked_watching` **notice** | **block once** — neither is a handoff; the PR is still open and unwatched |
 | no PR opened or watched this session | silent (a PR merely viewed or commented on is not yours) |
+| a heredoc body that *names* `gh pr create` — a script or fixture the session writes — and PR URLs the command went on to print | silent (the body is text, not a create, so those PRs are not yours) |
 | `stop_hook_active` already set (a prior block) | silent — **never loops** |
 | unreadable transcript / any uncertainty | silent (fail-open) |
 | `PR_SENTINEL_DISABLE=1` set | silent (disabled) |
