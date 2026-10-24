@@ -76,21 +76,143 @@ ROUTE_RE = re.compile(r"\*\*(Settles|Measure|Ask):")
 # declared by the row rather than guessed at from a neighbouring paragraph.
 ANSWERED_MARK = "(answered)"
 
+# Marks a citation the row is *about* rather than one it relies on, and `lint`
+# then reads none of it. A row quoting a pointer as its subject — a stale one
+# kept as an exhibit, most of all — is the case where reporting drift is worse
+# than missing it: the note for a resolvable pointer names the line the fragment
+# moved to, so the checker hands a sweeping session a one-character repair that
+# deletes the exhibit and passes every gate. Nothing else separates the two
+# populations here. `check-positional-citations.py` tells its own exhibits apart
+# by whether the match sits inside a code span, which cannot work for a citation
+# that always does. The prefix goes inside the span, immediately before the
+# path, so it travels when the citation is copied into another row.
+EXHIBIT_PREFIX = "exhibit:"
+
 # A citation into the tree, in `grep -n` output order: the path, the line, and
 # optionally the line's own text. The third field is what makes rot detectable —
 # a line number alone is checkable only for resolving, and a file that grew
 # moves the line under a pointer that keeps on resolving. It is terminated by a
 # backtick rather than by end of line, because in prose nothing says where the
-# quoted text stops; that is also why the fragment may not open with a space,
-# which `grep -n` never emits either.
+# quoted text stops.
+#
+# The fragment may open on a space or a tab: `grep -n` prints the matched line
+# verbatim, and most lines in a source file are indented. Requiring a non-space
+# there dropped those citations *silently*, because the group is optional — the
+# match degrades to a bare `path:N`, which is checked for resolving and never
+# for drift, so the pointer went on resolving while the line moved under it at
+# every window including 0, and `--strict stale-citation` cannot promote a note
+# that was never raised. A dropped fragment is indistinguishable from a
+# citation that never carried one.
+#
+# It must still carry one non-space character, and it is captured raw. An empty
+# fragment — `path:N:` against the closing backtick — pins nothing, and
+# a substring test is true of every line for the empty string, so
+# capturing one would make a citation that holds the checker to nothing read as
+# one it checks. Raw because that same test runs against the file's own line,
+# indentation included, and the note echoes the fragment back for a reader to
+# find in the row.
 #
 # A lookbehind rather than `\b`, because a path can open on a character the
 # class accepts and the boundary does not: `.github/…` and `../…` both start on
 # a dot, so the match begins after it, and the truncated path resolves from
 # neither base below — the note then names a path nobody wrote.
+#
+# The second arm is the same citation with no line number — `path:fragment`.
+# A number is the better address wherever it can be kept current, and this
+# pattern used to see nothing else: de-numbering a citation moved it from
+# checked to unseen, and no reading of the store could tell that from a row
+# that never cited anything. The fragment alone is still decidable — the file
+# either carries the text or it does not — so the form is recognised rather
+# than left to degrade. What it cannot say is drift, there being no number to
+# drift from, which is why the window below does not reach it.
+#
+# It is the one arm that requires a code span, because it has no digits to
+# make it distinctive. `notes` is every line of the body joined into one
+# string, so `[^`\n]*` stops at a backtick and nothing else, and an ordinary
+# sentence naming a file and running on to the next code span matches it
+# exactly. The opening backtick has to sit immediately before the path, or
+# immediately before an `exhibit:` on it; each lookbehind is fixed-width on its
+# own, which is what lets the two be written as an alternation that compiles.
+#
+# The path takes any extension or none, so the pattern alone over-matches —
+# `Q92:1` and `localhost:8080` fit it — and `split_citations` decides what is a
+# citation. A source extension is distinctive enough to count unresolved, which
+# is what lets a pointer whose file was renamed be reported rather than lost.
+# Anything else counts only where it names a file in the tree: `Makefile:85`,
+# `.gitattributes:4` and `hook.cmd:40` were invisible under a fixed extension
+# list, and widening the list would only have moved the next one outside it.
+# The cost is that an extensionless pointer whose file goes away stops being a
+# citation instead of being reported.
+_CITED_PATH = r"[\w./-]+"
+_CITED_EXT = re.compile(r"\.(?:go|py|sh|md|ya?ml|json|ts|js|rs|java)$")
+_CITED_FRAGMENT = r"[ \t]*\S[^`\n]*"
 CITATION_RE = re.compile(
-    r"(?<![\w./-])([\w./-]+\.(?:go|py|sh|md|ya?ml|json|ts|js|rs|java)):(\d+)"
-    r"(?::(\S[^`\n]*)(?=`))?")
+    rf"(?<![\w./-])({_CITED_PATH}):(\d+)(?::({_CITED_FRAGMENT})(?=`))?"
+    rf"|(?:(?<=`)|(?<=`{EXHIBIT_PREFIX}))({_CITED_PATH}):"
+    rf"({_CITED_FRAGMENT})(?=`)")
+
+
+def cited_file(store, path):
+    """The file a citation names, from either base a row is written against."""
+    return next((base / path for base in (Path(store).parent, Path(store).parent.parent)
+                 if (base / path).is_file()), None)
+
+
+def citation_fields(m):
+    """(path, line or None, fragment or None), whichever arm matched.
+
+    The numbered arm is tried first, so a citation that carries a number is
+    never read as a numberless one whose fragment opens on digits.
+    """
+    if m.group(1):
+        return m.group(1), int(m.group(2)), m.group(3)
+    return m.group(4), None, m.group(5)
+
+
+def carries(text, fragment):
+    """Whether a line holds a fragment, indentation counted as the whole of it.
+
+    A fragment opening on whitespace is a substring of the same statement
+    indented deeper, so a bare `in` finds every nested copy of the line it
+    names. Such a fragment counts only where the line's start or a non-space
+    precedes it. So a space typed after the citation's colon is indentation
+    too, and fails to match; copy from `grep -n`, which prints none.
+    """
+    if not fragment[0].isspace():
+        return fragment in text
+    at = text.find(fragment)
+    while at != -1:
+        if at == 0 or not text[at - 1].isspace():
+            return True
+        at = text.find(fragment, at + 1)
+    return False
+
+
+def split_citations(notes, store):
+    """(checked, marked) — the citations `lint` reads, and the ones exempted.
+
+    One predicate for both, because the checked list is also what a coverage
+    count is taken from: a count that disagreed with the checks it claims to
+    count would report a row as covered on the strength of a citation nothing
+    read.
+
+    A match that is not a citation consumes nothing: the scan resumes one
+    character in rather than past it. Otherwise `exhibit:` in front of a path
+    reads as an extensionless numberless citation and swallows the one after it.
+    """
+    checked, marked = [], []
+    pos = 0
+    while m := CITATION_RE.search(notes, pos):
+        path = citation_fields(m)[0]
+        if not (_CITED_EXT.search(path) or cited_file(store, path)):
+            pos = m.start() + 1
+            continue
+        pos = m.end()
+        target = marked if notes[:m.start()].endswith(EXHIBIT_PREFIX) else checked
+        target.append(m)
+    return checked, marked
+
+
 # How far the fragment may have drifted before the line number stops doing its
 # job. A number is worth writing because it lands a reader within a screen of
 # the thing, so a fragment still visible from the cited line is a citation that
@@ -104,18 +226,6 @@ CITATION_RE = re.compile(
 # fragment that moved nine lines — and a clean run under that gate means *no
 # citation has drifted more than this*, not *citations are exact*.
 CITATION_WINDOW = 10
-# Marks a citation the row is *about* rather than one it relies on, and `lint`
-# then reads none of it. A row quoting a pointer as its subject — a stale one
-# kept as an exhibit, most of all — is the case where reporting drift is worse
-# than missing it: the note for a resolvable pointer names the line the fragment
-# moved to, so the checker hands a sweeping session a one-character repair that
-# deletes the exhibit and passes every gate. Nothing else separates the two
-# populations here. `check-positional-citations.py` tells its own exhibits apart
-# by whether the match sits inside a code span, which cannot work for a citation
-# that always does. The prefix goes inside the span, immediately before the
-# path, so it travels when the citation is copied into another row.
-EXHIBIT_PREFIX = "exhibit:"
-
 # What `lint` reports rather than fails on, one name per class. A note is
 # advisory because the store alone cannot settle what it found: a link at an
 # absent item is a shipped blocker and a typo at once, indistinguishable from
@@ -136,11 +246,14 @@ NOTE_CLASSES = (
     "deferred-trigger",  # a deferred item names no condition that revives it
     "question-route",    # an open-question item names no route to an answer
     "orphan-route",      # a route marker outlived the label that justified it
-    "stale-citation",    # a `file.ext:N` pointer that no longer finds its line
+    "stale-citation",    # a `path:N` pointer that no longer finds its line
+    "ambiguous-citation",  # a cited fragment that occurs on more than one line
     "wikilink-ref",      # an item referenced as `[[QN]]`, a form nothing renders
     "empty-store",       # no items loaded, the usual cause being a wrong --store
     "untracked-item",    # a row on disk that no commit would carry
     "index-unread",      # git could not say what the store's commit would ship
+    "citation-loss",     # a row's citations stopped parsing, so nothing reads them
+    "coverage-unread",   # git could not say what a row cited at the merge base
 )
 
 # The bottom of the space: head 'A' takes 26 digits after it. It is reserved
@@ -410,11 +523,15 @@ def _parse_frontmatter(text, path):
     return data, body, problems
 
 
-def read_item(path):
-    text = path.read_text(encoding="utf-8")
-    data, body, problems = _parse_frontmatter(text, path.name)
-    if data is None:
-        return None, problems
+def _body_fields(body):
+    """(title, notes, prose) from an item body.
+
+    Factored out of `read_item` because a row is also read from a git blob,
+    and a second walk written there would be a second answer to what `notes`
+    is — which is the string every citation check runs over, so the two
+    disagreeing would compare a row against a differently-parsed copy of
+    itself.
+    """
     # `prose` is `notes` with the code taken out, and it has to be built here
     # rather than by a pass over `notes` afterwards. A backtick span opens and
     # closes on one line; `notes` is every line joined into one string, so by
@@ -439,13 +556,22 @@ def read_item(path):
                 bare = CODE_SPAN_RE.sub("", line).strip()
                 if bare:
                     prose += (" " if prose else "") + bare
+    return title, notes.strip(), prose.strip()
+
+
+def read_item(path):
+    text = path.read_text(encoding="utf-8")
+    data, body, problems = _parse_frontmatter(text, path.name)
+    if data is None:
+        return None, problems
+    title, notes, prose = _body_fields(body)
     labels = data.get("labels") or []
     if isinstance(labels, str):
         labels = [labels]
     item = Item(id=data.get("id"), rank=data.get("rank"), labels=labels,
                 status=data.get("status"), size=data.get("size"),
                 target=data.get("target") or None, title=title,
-                notes=notes.strip(), prose=prose.strip(), path=path)
+                notes=notes, prose=prose, path=path)
     return item, problems
 
 
@@ -596,6 +722,11 @@ def cmd_lint(args):
             print(f"queue: note: {msg}", file=sys.stderr)
 
     seen_id = {}
+    # Checked citations per row, which is the reading the merge-base
+    # comparison below needs and no single run can supply: zero is the same
+    # number for a row that cites nothing and a row whose citations stopped
+    # parsing.
+    covered = {}
     # Every citation the marker exempted. The exemption is a waiver, and one
     # nothing counts is one a session can reach for to silence real drift,
     # since the legitimate use and the abuse both report nothing.
@@ -726,23 +857,27 @@ def cmd_lint(args):
                  f"record of where the answer came from. If the route is still "
                  f"open, put the label back. If it was retired rather than "
                  f"taken, span it")
-        # A `file.ext:N` pointer rots silently as the code moves, and which of
-        # the four things below went wrong decides what a reader has to do about
-        # it, so each says so. All four warn rather than fail: a bare filename is
+        # A `path:N` pointer rots silently as the code moves, and which of the
+        # things below went wrong decides what a reader has to do about it, so
+        # each says so. All of them warn rather than fail: a bare filename is
         # genuinely ambiguous about which directory it was written against, and
         # a fragment is the row author's judgement about what was distinctive.
         notes = i.notes or ""
-        for m in CITATION_RE.finditer(notes):
-            # Marked as an exhibit, so every check below would report a defect
-            # the row is deliberately showing — and hand over the repair.
-            if notes[:m.start()].endswith(EXHIBIT_PREFIX):
-                exhibits.append(
-                    f"{where} holds {EXHIBIT_PREFIX}{m.group(0)} "
-                    f"(marked exhibit, not checked)")
-                continue
-            path, line, fragment = m.group(1), int(m.group(2)), m.group(3)
-            target = next((base / path for base in (store.parent, store.parent.parent)
-                           if (base / path).exists()), None)
+        checked, marked = split_citations(notes, store)
+        # Marked as an exhibit, so every check below would report a defect the
+        # row is deliberately showing — and hand over the repair.
+        for m in marked:
+            exhibits.append(
+                f"{where} holds {EXHIBIT_PREFIX}{m.group(0)} "
+                f"(marked exhibit, not checked)")
+        # What the coverage comparison further down is taken from. An exhibit
+        # is a waiver rather than a check, so it does not count: a row whose
+        # pointers all became exhibits has lost its coverage as completely as
+        # one whose pointers were deleted.
+        covered[where] = len(checked)
+        for m in checked:
+            path, line, fragment = citation_fields(m)
+            target = cited_file(store, path)
             if target is None:
                 note("stale-citation",
                      f"{where} cites {path}:{line}, which does not resolve from "
@@ -752,29 +887,47 @@ def cmd_lint(args):
             # source file ends with would otherwise add a phantom last line, and
             # a citation landing on it would read as resolving.
             body = target.read_text(encoding="utf-8", errors="replace").splitlines()
-            if line > len(body):
+            if line is not None and line > len(body):
                 note("stale-citation",
                      f"{where} cites {path}:{line}, which is past the end of a "
                      f"{len(body)}-line file; re-point or drop it")
                 continue
             if fragment is None:
                 continue
-            lo = max(0, line - 1 - window)
-            if any(fragment in text for text in body[lo:line + window]):
+            cited = f"{path}:{line}:{fragment}" if line is not None else f"{path}:{fragment}"
+            hits = [n for n, text in enumerate(body, 1) if carries(text, fragment)]
+            if not hits:
+                note("stale-citation",
+                     f"{where} cites {cited}, which {path} no longer carries; "
+                     + ("re-derive it, or re-point the path" if line is None
+                        else "re-derive it or drop the fragment"))
                 continue
-            # Where the text still exists the note carries the new number, so a
-            # drifted citation is a copy rather than a re-derivation. Reporting
-            # the first match only: a fragment matching several lines is one
-            # that was never distinctive, and naming them all buries that.
-            at = next((n for n, text in enumerate(body, 1) if fragment in text), None)
-            if at:
-                note("stale-citation",
-                     f"{where} cites {path}:{line}:{fragment}, which is now at "
-                     f"line {at}; re-point it")
-            else:
-                note("stale-citation",
-                     f"{where} cites {path}:{line}:{fragment}, which {path} no "
-                     f"longer carries; re-derive it or drop the fragment")
+            # One invariant rather than a check per way a fragment goes vague.
+            # A fragment cut short at an inline backtick, a common line, a
+            # repeated statement: each passes a window that holds any of its
+            # matches, and each asserts nothing about which line was meant. A
+            # new number is not the repair — the note below would name the
+            # first match, and the citation would still pin all of them.
+            #
+            # Its own class, so a caller binding drift need not bind this. A row
+            # naming every site of a repeated statement cites each one correctly
+            # and fails it.
+            if len(hits) > 1:
+                shown = ", ".join(map(str, hits[:5])) + (", …" if len(hits) > 5 else "")
+                note("ambiguous-citation",
+                     f"{where} cites {cited}, which occurs on {len(hits)} lines "
+                     f"of {path} ({shown}); quote text that occurs once")
+                continue
+            # No number, so nothing to drift: the window measures distance from
+            # a line this form never named, and applying it to line 0 would
+            # pass every fragment in the first ten lines of any file.
+            if line is None or abs(hits[0] - line) <= window:
+                continue
+            # The note carries the new number, so a drifted citation is a copy
+            # rather than a re-derivation.
+            note("stale-citation",
+                 f"{where} cites {cited}, which is now at line {hits[0]}; "
+                 f"re-point it")
     # An empty store is legal — every item may have shipped — so this is a note
     # rather than a failure. It is worth saying because the usual cause is a
     # --store pointed somewhere with no items in it, a table directory being the
@@ -824,6 +977,39 @@ def cmd_lint(args):
                  f"{name} is on disk and git does not list it, so it is "
                  f"ignored and no commit carries it; the checks above graded a "
                  f"row the store will not ship")
+    # A row that cites nothing and a row whose citations stopped parsing print
+    # the same thing — nothing — so no single run can tell them apart. The
+    # merge base can: it holds the same row before the edit, and a count that
+    # was positive there and is zero here is coverage that went away.
+    #
+    # A note rather than a failure, because the two repairs are opposite and
+    # the files cannot say which. A row may legitimately drop its pointers —
+    # the text it cited was deleted, or the row was rewritten around something
+    # else — and the reformatting this exists to catch looks identical from
+    # here. What is not legitimate is nobody being told.
+    if items:
+        before, base, why = _coverage_at(store, args.base)
+        if before is None and why:
+            # Not silence: a comparison that could not be taken has to read
+            # differently from one that came back clean, or the run that
+            # checked nothing is indistinguishable from the run that found
+            # nothing.
+            note("coverage-unread",
+                 f"{why}, so no row was checked for citations it carried "
+                 f"before and does not carry now")
+        elif before is not None:
+            # Only rows this run actually read. A row present at the base and
+            # absent from `covered` was completed on this branch, and its
+            # deletion is the point rather than a loss of coverage.
+            for name in sorted(before):
+                if before[name] and name in covered and not covered[name]:
+                    note("citation-loss",
+                         f"{name} carried {before[name]} checked citation(s) "
+                         f"at {base[:12]} and carries none now. A citation "
+                         f"`lint` cannot parse is one nobody checks: write it "
+                         f"back as `path:N:text`, or as `path:fragment` where "
+                         f"the line is about to move, or drop the pointers "
+                         f"deliberately")
     # On request rather than by default: the count below raises the question
     # and this answers it, at a length an ordinary run does not want. A `grep`
     # for the prefix is not the same reading — it finds prose *about* the
@@ -945,8 +1131,15 @@ def cmd_metrics(args):
     store = Path(args.store or store_dir()).resolve()
     root = Path(_git(["rev-parse", "--show-toplevel"], store).strip()).resolve()
     rel = store.relative_to(root)
+    sha, where = _walked(root, args.rev)
+    if sha is None:
+        print(f"queue: metrics: {where}", file=sys.stderr)
+        return 2
+    # Ahead of the numbers, and on stderr under `--events`, whose stdout is a
+    # table something may be parsing.
+    print(where, file=sys.stderr if args.events else sys.stdout)
     if args.labels:
-        return _label_flow(root, rel)
+        return _label_flow(root, rel, sha)
     # --no-renames, or the identity below is not one. `--diff-filter=AD` drops
     # an `R`, so a `git mv` inside the store closes a row that was never filed
     # and the printed classes out-sum `filed`. Splitting the rename into the
@@ -968,7 +1161,7 @@ def cmd_metrics(args):
     # The three bytes are ones no path and no message hold.
     log = _git(["log", "--no-renames", "--diff-filter=AD", "--name-status",
                 "--date=short",
-                "--pretty=format:%x00%ad%x01%B%x02", "--", str(rel)], root)
+                "--pretty=format:%x00%ad%x01%B%x02", sha, "--", str(rel)], root)
     filed, closed, reason, outcome = {}, {}, {}, {}
     for chunk in log.split("\x00")[1:]:
         date, _, rest = chunk.partition("\x01")
@@ -1037,6 +1230,40 @@ def cmd_metrics(args):
     return 0
 
 
+def _walked(root, rev):
+    """(sha, line naming it and its distance upstream), or (None, why).
+
+    Every class `metrics` prints is correct for the commit it walked, so a
+    stale checkout answers with a summary that is consistent and out of date —
+    measured once as 195 closed against 211 on a tree four commits behind,
+    with nothing in the output to tell the two runs apart. The commit and its
+    distance from the upstream travel with the numbers for that reason. The
+    upstream is a remote-tracking ref, so the distance is as of the last fetch;
+    this reads and never fetches.
+    """
+    out, ok = _git_read(["rev-parse", "--verify", "--quiet",
+                         rev + "^{commit}"], root)
+    if not ok:
+        return None, f"{rev!r} names no commit"
+    sha = out.strip()
+    line = f"walked       {sha[:12]} ({rev})"
+    up, ok = _git_read(["rev-parse", "--abbrev-ref", "--symbolic-full-name",
+                        "@{upstream}"], root)
+    if not ok:
+        return sha, line + ", no upstream to compare against"
+    up = up.strip()
+    counts, ok = _git_read(["rev-list", "--left-right", "--count",
+                            f"{sha}...{up}"], root)
+    if not ok:
+        return sha, line + f", distance from {up} unreadable"
+    ahead, behind = (int(n) for n in counts.split())
+    if not ahead and not behind:
+        return sha, line + f", level with {up} as last fetched"
+    parts = [f"{n} {word}" for n, word in ((ahead, "ahead of"),
+                                           (behind, "behind")) if n]
+    return sha, line + f", {' and '.join(parts)} {up} as last fetched"
+
+
 def _days(a, b):
     from datetime import date
     ya, ma, da = (int(x) for x in a.split("-"))
@@ -1080,9 +1307,9 @@ def _blobs(oids, root):
 # of a diff: stripped of its context a one-token bullet in an item's prose body
 # is indistinguishable from a labels entry, and comparing parsed sets also
 # makes a reordered labels list the no-op it is rather than a gain and a loss.
-def _label_flow(root, rel):
+def _label_flow(root, rel, sha):
     raw = _git(["log", "--reverse", "--diff-filter=AMD", "--raw", "--no-abbrev",
-                "--no-renames", "--pretty=format:", "--", str(rel)], root)
+                "--no-renames", "--pretty=format:", sha, "--", str(rel)], root)
     entries = []
     for line in raw.split("\n"):
         if not line.startswith(":"):
@@ -1285,6 +1512,62 @@ def _shipped_ids(rev, rel, root):
     return found, None
 
 
+def _coverage_at(store, base_ref):
+    """({name: checked citations}, base, None), (None, None, why), or nothing.
+
+    Three answers, and the third is why this does not mirror `_indexed_names`.
+    A reading taken, a reading refused, and *no earlier state to read* — a
+    store in no repository, or in one with no commit yet — which is a complete
+    answer rather than a failed one and so discloses nothing: (None, None,
+    None). Reporting it would put a line on every bootstrapped store and every
+    fixture, which is how a disclosure stops being read.
+
+    Only the rows this branch touched are read. A row it did not touch cannot
+    have lost coverage, and reading every row would put one `git show` per
+    item on the path of the gate a groom runs most.
+
+    A row absent at the base is absent from the mapping rather than counted at
+    zero: it is new on this branch, so there is no earlier reading to have
+    fallen from, and counting it would report every newly filed row that cites
+    nothing as a loss.
+    """
+    out, ok = _git_read(["rev-parse", "--show-toplevel"], store)
+    if not ok:
+        return None, None, None
+    root = Path(out.strip()).resolve()
+    _, ok = _git_read(["rev-parse", "--verify", "HEAD"], root)
+    if not ok:
+        return None, None, None
+    try:
+        rel = Path(store).resolve().relative_to(root)
+    except ValueError:
+        return None, None, f"{store} is outside {root}"
+    base, ok = _git_read(["merge-base", base_ref, "HEAD"], root)
+    if not ok:
+        return None, None, (f"no merge base between {base_ref} and HEAD — "
+                            f"fetch it, or deepen a shallow clone, or pass "
+                            f"--base")
+    base = base.strip()
+    # The working tree rather than HEAD, because every check around this one
+    # reads the disk: a de-numbering that has been written and not committed
+    # is exactly when saying so is cheapest.
+    out, ok = _git_read(["diff", "--name-only", base, "--", str(rel)], root)
+    if not ok:
+        return None, None, f"cannot diff {rel} against {base[:12]}"
+    counts = {}
+    for name in out.split("\n"):
+        if not name or not ID_RE.match(Path(name).stem):
+            continue
+        text, ok = _git_read(["show", f"{base}:{name}"], root)
+        if not ok:
+            continue
+        data, body, _ = _parse_frontmatter(text, Path(name).name)
+        if data is None:
+            continue
+        counts[Path(name).name] = len(split_citations(_body_fields(body)[1], store)[0])
+    return counts, base, None
+
+
 def _allowlist(values, env):
     """Ids excused by a repeatable flag, or by its comma-separated env default.
 
@@ -1293,6 +1576,21 @@ def _allowlist(values, env):
     """
     raw = values or [os.environ.get(env, "")]
     return set(",".join(raw).replace(",", " ").split())
+
+
+def _remote_label(remote, root):
+    """`remote`, and the URL it resolves to when the two differ.
+
+    A verdict about reservations is a verdict about one repository, and
+    `origin` names a different one in a clone than it does in the checkout the
+    clone came from. Naming the address is what lets a reader tell the two
+    apart without re-deriving it.
+    """
+    out, ok = _git_read(["remote", "get-url", remote], root)
+    url = out.strip()
+    if not ok or not url or url == remote:
+        return remote
+    return f"{remote} ({url})"
 
 
 def cmd_claims(args):
@@ -1372,15 +1670,37 @@ def cmd_claims(args):
         rc |= disclose(f"{args.remote} did not answer, so its claims are "
                        f"unknown and {len(added)} added id(s) went unchecked")
         return rc
-    # ls-remote exits non-zero when it cannot reach the remote, so exit 0 means
-    # the remote answered and an empty list is a real "nothing is claimed"
-    # rather than a read that never happened.
+    where = _remote_label(args.remote, root)
     claimed = set(re.findall(r"(Q\d+)$", out, re.M))
     allowed = _allowlist(args.allow, "QUEUE_CLAIMS_ALLOW")
     missing = [q for q in added if q not in claimed and q not in allowed]
+    # An answer of no refs at all is not a reading of any id. `ls-remote` asks
+    # whichever repository it was handed, and `alloc-queue-id.sh` pushes a
+    # reservation to the upstream that nothing ever fetches back — so a working
+    # checkout holds none of these refs in its own ref store, and a clone of
+    # that checkout answers empty at exit 0 however much it has fetched. The
+    # namespace is never read locally, so carrying it into the clone changes
+    # nothing. Byte-identical to a repository that has genuinely reserved
+    # nothing, which is why this refuses instead of naming rows: measured
+    # 2026-09-21 against `karlkfi/claude-spill-guard` over one tree and one
+    # added row with the origin URL as the only variable, a clone of the
+    # checkout reported the row unclaimed and the same clone pointed at GitHub
+    # exited 0, with the local namespace empty in both arms.
+    if missing and not claimed:
+        rc |= disclose(
+            f"{where} carries no {REF_NS}/* at all, so this cannot tell an id "
+            f"holding no claim from a remote that has never seen the "
+            f"namespace, and {len(missing)} added id(s) went unchecked: "
+            f"{', '.join(missing)}. Reservations live on the upstream and are "
+            f"never fetched back, so a clone of a working checkout answers "
+            f"empty — ask the upstream directly with --remote <url>")
+        return rc
+    if missing:
+        print(f"queue: claims: {where} holds {len(claimed)} reservation(s) "
+              f"under {REF_NS}/*, and these are not among them", file=sys.stderr)
     for q in missing:
         print(f"queue: {q}.md files an id holding no {REF_NS}/{q} on "
-              f"{args.remote}: allocate one with alloc-queue-id.sh and rename "
+              f"{where}: allocate one with alloc-queue-id.sh and rename "
               f"the file, or pass --allow {q} if it was claimed elsewhere",
               file=sys.stderr)
     if missing or rc:
@@ -1579,6 +1899,10 @@ def main(argv=None):
                     choices=NOTE_CLASSES,
                     help="fail rather than note on CLASS; repeatable. One of: "
                          + ", ".join(NOTE_CLASSES))
+    li.add_argument("--base", default="origin/main",
+                    help="branch the citation-coverage comparison is taken "
+                         "against (default: origin/main); every other check "
+                         "reads the tree alone")
     li.add_argument("--citation-window", type=int, default=CITATION_WINDOW,
                     metavar="N",
                     help="how far a fragment may sit from its cited line "
@@ -1607,7 +1931,9 @@ def main(argv=None):
                     "skips, so an offline clone still runs what it can; pass "
                     "--strict where a network and a full history are "
                     "guaranteed.")
-    c.add_argument("--remote", default="origin", help="holds the claims")
+    c.add_argument("--remote", default="origin",
+                   help="holds the claims; a URL works where the "
+                        "configured remote is a clone that never saw them")
     c.add_argument("--base", default="origin/main",
                    help="branch this one is measured against")
     c.add_argument("--allow", action="append", metavar="QNNN",
@@ -1633,8 +1959,13 @@ def main(argv=None):
                       help="per-label transitions rather than the stock — how "
                            "many items were filed already carrying each label, "
                            "gained it later, had it taken off, and shipped "
-                           "still carrying it. `now` is replayed to HEAD and "
-                           "equals `render --label LABEL` over a clean tree.")
+                           "still carrying it. `now` is replayed to the walked "
+                           "commit and, at HEAD, equals `render --label "
+                           "LABEL` over a clean tree.")
+    m.add_argument("--rev", default="HEAD",
+                   help="walk this commit's history rather than HEAD's — "
+                        "`origin/main` reads the remote as last fetched "
+                        "without checking it out")
     m.set_defaults(fn=cmd_metrics)
 
     g = sub.add_parser("migrate", help="convert a legacy STATUS.md table")
