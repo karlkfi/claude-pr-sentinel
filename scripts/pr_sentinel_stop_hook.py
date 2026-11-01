@@ -74,6 +74,11 @@ process table, writes nothing, and never touches the PR body or comment stream
     command string, the same model-authored source the create route reads, and
     a `$VAR` in it resolves against a literal that command assigned earlier.
 
+  * Is the Claude desktop app's PR bar on this session?  -> a `tool_use` whose
+    name starts `mcp__ccd_pr__`. It never suppresses the block — a bound PR
+    wakes nobody while the app's Auto-fix is off — and only adds a clause
+    answering the app's own "never poll CI yourself" instruction.
+
 We cannot verify check status locally (that needs a network call), so "checks
 still pending" is approximated as "owned, not handed off, unwatched". The block
 is safe under that approximation: it fires at most once per stop-chain
@@ -227,12 +232,17 @@ _OUTFILE_READ_CAP = 65536
 # field keeps it off a `tool_use_id` on a result entry.
 TOOL_USE_LINE_RE = re.compile(r'"type":\s*"tool_use"')
 
+# The Claude desktop app's PR tools. A session that called one is running under
+# the app's PR bar, whose instructions tell the model never to poll CI itself —
+# the opposite of this hook's ask — so the block has to say which one applies.
+APP_PR_TOOL_PREFIX = 'mcp__ccd_pr__'
+
 # Cheap line pre-filter: only JSON-parse transcript lines that can carry a
 # signal we care about. Everything else (the bulk of a session) is skipped.
 # The shared scan's needles are unioned in so a single pass feeds it too.
 _NEEDLES = tuple(set(
     ('PR-SENTINEL EVENT', 'pr create', 'pr merge', 'pr close', '/pull/',
-     BLOCK_MARKER)
+     BLOCK_MARKER, APP_PR_TOOL_PREFIX)
 ) | set(watchers.SCAN_NEEDLES))
 
 
@@ -696,6 +706,7 @@ def _analyze(path):
     url_by_pr = {}             # PR number -> the full URL, when one was resolved
     asked = set()              # PRs a previous block by this hook already named
     launched_since_ask = set()  # ... of those, ones watched since that block
+    app_pr = False             # the session called the desktop app's PR tools
 
     try:
         with open(path, encoding='utf-8', errors='replace') as fh:
@@ -749,6 +760,8 @@ def _analyze(path):
                         btype = b.get('type')
                         if btype == 'tool_use':
                             in_create = False
+                            if str(b.get('name')).startswith(APP_PR_TOOL_PREFIX):
+                                app_pr = True
                             if b.get('name') != 'Bash':
                                 continue
                             inp = b.get('input') or {}
@@ -892,7 +905,7 @@ def _analyze(path):
     # block says what is already running rather than "nothing is".
     foreign = {pr: scripts for pr, scripts in scan.foreign().items()
                if pr in unwatched}
-    return unwatched, dampened, url_by_pr, foreign
+    return unwatched, dampened, url_by_pr, foreign, app_pr
 
 
 def prs_needing_watcher(path):
@@ -929,10 +942,27 @@ def _foreign_note(foreign):
             f'launch ours alongside it rather than instead of it.')
 
 
-def build_reason(prs, urls=None, foreign=None):
+def _app_note(app_pr):
+    """The clause for a session under the desktop app's PR bar, which tells the
+    model not to poll CI itself. A bound PR is not a watched one: in the session
+    that prompted this, `get_status` read `bound: true` with `auto_fix: false`,
+    so nothing but this watcher would have woken it on a failure."""
+    if not app_pr:
+        return ''
+    return (' The Claude desktop app binding this PR is not a watcher: it wakes '
+            'this session on a CI failure only while its Auto-fix is on '
+            '(`mcp__ccd_pr__get_status` reports `monitor.auto_fix`). This '
+            'project installed pr-sentinel to do that watching, so launch the '
+            'watcher even though the app\'s instructions say not to poll CI '
+            'yourself, and do not offer the app\'s Auto-fix for this PR as '
+            'well — both would wake this session on the same failure.')
+
+
+def build_reason(prs, urls=None, foreign=None, app_pr=False):
     """The block message fed back to the model. `foreign` maps a PR to the
     non-pr-sentinel watch scripts already running on it, which the ask names so
-    a session that armed one is not told nothing is watching."""
+    a session that armed one is not told nothing is watching. `app_pr` adds the
+    desktop app's case, whose instructions contradict this ask."""
     urls = urls or {}
     prs = sorted(prs, key=int)
     label = 'pull request #' + prs[0] if len(prs) == 1 \
@@ -941,7 +971,7 @@ def build_reason(prs, urls=None, foreign=None):
     return (
         f'{BLOCK_MARKER} with an open {label} this '
         f'session opened or was watching, but no pr-sentinel watcher is tracking it and CI may still be '
-        f'running.{_foreign_note(foreign)} Launch the PR Sentinel watcher as a BACKGROUND task '
+        f'running.{_foreign_note(foreign)}{_app_note(app_pr)} Launch the PR Sentinel watcher as a BACKGROUND task '
         f'(run_in_background) before you stop, so a CI failure or merge conflict '
         f'wakes this session — do NOT foreground-poll with `gh pr checks '
         f'--watch`, `gh run watch`, or a sleep loop. Command'
@@ -1025,14 +1055,14 @@ def run(data):
     transcript = data.get('transcript_path')
     if not transcript:
         return
-    unwatched, dampened, urls, foreign = _analyze(transcript)
+    unwatched, dampened, urls, foreign, app_pr = _analyze(transcript)
     if not unwatched and not dampened:
         return  # nothing opened-and-unwatched, nothing to warn about: allow
 
     out = {}
     if unwatched:
         out['decision'] = 'block'
-        out['reason'] = build_reason(unwatched, urls, foreign)
+        out['reason'] = build_reason(unwatched, urls, foreign, app_pr)
     if dampened:
         # Non-blocking notice; survives even when the stop is allowed.
         out['systemMessage'] = build_warning(dampened)

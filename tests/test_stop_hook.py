@@ -1714,5 +1714,58 @@ class ForeignWatcherBlock(unittest.TestCase):
         self.assertNotIn("alongside it", hook.build_reason({"42"}))
 
 
+def app_pr_status(tool_id="toolu_ccd"):
+    """The desktop app's PR status call and its result, in the shape measured on
+    a real session: `bound` with Auto-fix off, so nothing but our watcher wakes
+    the session on a failure."""
+    return [
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": tool_id,
+             "name": "mcp__ccd_pr__get_status", "input": {}}]}},
+        tool_result('{"bound": true, "pr": {"number": 42}, '
+                    '"monitor": {"auto_fix": false}}', tool_id),
+    ]
+
+
+def analyze_app_pr(entries):
+    path = write_transcript(entries)
+    try:
+        return hook._analyze(path)[4]
+    finally:
+        os.unlink(path)
+
+
+class DesktopAppBoundBlock(unittest.TestCase):
+    """A PR the desktop app has bound is still blocked over, and the block says
+    why, since the app's own instructions tell the model not to poll CI."""
+
+    def test_an_app_bound_pr_still_blocks(self):
+        self.assertEqual(needs(created_pr(42) + app_pr_status()), {"42"})
+
+    def test_the_app_call_is_noticed(self):
+        self.assertTrue(analyze_app_pr(created_pr(42) + app_pr_status()))
+        self.assertFalse(analyze_app_pr(created_pr(42)))
+
+    def test_a_live_watcher_still_satisfies_it(self):
+        entries = created_pr(42) + app_pr_status() + launch_watcher(42)
+        self.assertEqual(needs(entries), set())
+
+    def test_the_reason_names_the_app_case(self):
+        reason = hook.build_reason({"42"}, app_pr=True)
+        self.assertIn("monitor.auto_fix", reason)
+        self.assertIn("not to poll CI", reason)
+        # Still findable as a prior block on a later turn, so the repeat-ask
+        # dampening holds under the app as well.
+        self.assertTrue(reason.startswith(hook.BLOCK_MARKER))
+        record = {"type": "attachment",
+                  "attachment": {"type": "hook_blocking_error",
+                                 "hookName": "Stop", "hookEvent": "Stop",
+                                 "blockingError": {"blockingError": reason}}}
+        self.assertEqual(hook._prior_block_prs(record), {"42"})
+
+    def test_the_reason_is_unchanged_outside_the_app(self):
+        self.assertNotIn("desktop app", hook.build_reason({"42"}))
+
+
 if __name__ == "__main__":
     unittest.main()
