@@ -393,12 +393,17 @@ def _is_pr_create(command):
 
 
 def _pr_close_targets(command):
-    """PR numbers a `gh pr merge`/`gh pr close` in this command concludes."""
+    """PR numbers a `gh pr merge`/`gh pr close` in this command concludes.
+    Tokenized like `_is_pr_create`: a heredoc or a quoted string that only
+    names `gh pr merge 42` would otherwise conclude 42 and hide its block."""
     targets = set()
-    for m in re.finditer(r'\bgh\s+pr\s+(?:merge|close)\s+(\S+)', command):
-        num = pr_number(m.group(1))
-        if num:
-            targets.add(num)
+    for group in guard.tokenize.simple_commands(command, True):
+        argv = guard._strip_env_prefix(list(group))
+        if (len(argv) > 3 and os.path.basename(argv[0]) == 'gh'
+                and argv[1] == 'pr' and argv[2] in ('merge', 'close')):
+            num = pr_number(argv[3])
+            if num:
+                targets.add(num)
     return targets
 
 
