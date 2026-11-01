@@ -197,7 +197,10 @@ report).
   this plugin's, so the block can name it. That is the same local source and no
   new one: it inspects no process table, and such a watch never suppresses the
   block. Only the harness-written copies of its own message count —
-  it extracts nothing from your prompts or the model's replies.
+  it extracts nothing from your prompts or the model's replies. It also notes
+  whether the session called one of the **Claude desktop app's PR tools**
+  (`mcp__ccd_pr__*`), from the tool *name* alone, so the block can address the
+  app's case; the tools' results, which carry the PR title, are never read.
 - Extracts nothing from a redirected log but a `github.com` PR URL (the
   create's) or the watcher's own report header (the launch's). It does **not**
   read PR bodies or comments, and it inspects no process table.

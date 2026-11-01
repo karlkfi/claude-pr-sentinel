@@ -207,6 +207,7 @@ the session to launch the watcher before stopping:
 | the hook already blocked over this PR once and **no watcher has been launched since** | **allow + warn** — the ask was made and not acted on; repeating it cannot help a session that has no move here |
 | a launched watcher hasn't reported completion yet (still running) | silent (already covered) |
 | another tool's PR watch is running, **no** live pr-sentinel watcher | **block once** — a foreign watch covers merge state and need not report check conclusions at all, so the ask stands; the block names the script it found rather than saying nothing is watching |
+| the Claude desktop app has the PR bound (the session called one of its `mcp__ccd_pr__*` tools), **no** live pr-sentinel watcher | **block once** — a bound PR is not a watched one: the app wakes the session on a failure only while its Auto-fix is on. The block says so, and tells the session to launch the watcher despite the app's instruction not to poll CI, and not to turn on Auto-fix as well |
 | a launch the harness never answered with a task id (it never started) | **block once** — nothing is watching, so the pull request still needs a watcher |
 | PR handed off (watcher **terminal** `ready`/`closed`/`blocked`/`unchecked`, or `gh pr merge`/`close`) | silent (nothing to babysit) |
 | the watcher's last report is a `timeout`, or a `base_failure`, `repeat_failure`, `ready_watching`, `blocked_watching`, or `unchecked_watching` **notice** | **block once** — neither is a handoff; the PR is still open and unwatched |
