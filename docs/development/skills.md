@@ -33,8 +33,9 @@ and grooming.
 It applies to any change under `docs/queue/`. This repo's rules for the store,
 including id allocation and the pre-commit lint, are in
 [maintaining-backlog.md](maintaining-backlog.md).
-[`scripts/lint-backlog.sh`](../../scripts/lint-backlog.sh) is vendored from the
-skill.
+[`scripts/queue.py`](../../scripts/queue.py) and
+[`scripts/alloc-queue-id.sh`](../../scripts/alloc-queue-id.sh) are vendored from
+the skill.
 
 Named `backlog` until August 2026.
 
