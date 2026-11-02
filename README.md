@@ -178,7 +178,8 @@ branch is still the previous one. A `--head` on the create names the branch,
 and failing that, the last `git checkout <branch>` or `git switch <branch>`
 earlier in the same command does; otherwise it is the checked-out branch. A
 named head that is no branch here, locally or on `origin`, leaves nothing to
-compare and the check declines.
+compare and the check declines. A create that names `--repo` is compared
+against that repository's open PRs rather than the checkout's.
 
 This is the one part of the hooks that **talks to GitHub**: `gh pr list` for the
 open PRs and their paths, then `gh pr diff` for at most three of them, and only

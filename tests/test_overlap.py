@@ -74,13 +74,21 @@ GH_STUB = textwrap.dedent(
     """\
     #!/usr/bin/env bash
     # Stub gh: print the fixture matching the subcommand, or fail if absent.
+    # A `--repo` selects that repo's fixtures, suffixed `@owner_name`.
     set -u
     dir="$GH_STUB_DIR"
+    repo='' prev=''
+    for arg in "$@"; do
+      [[ "$prev" == --repo || "$prev" == -R ]] && repo="$arg"
+      prev="$arg"
+    done
+    at="${repo:+@${repo//\\//_}}"
     case "${1:-} ${2:-}" in
-      "pr list") [[ -f "$dir/pr_list" ]] && cat "$dir/pr_list" || exit 1 ;;
-      "pr diff") [[ -f "$dir/pr_diff.$3" ]] && cat "$dir/pr_diff.$3" || exit 1 ;;
+      "pr list") f="$dir/pr_list$at" ;;
+      "pr diff") f="$dir/pr_diff.$3$at" ;;
       *) exit 1 ;;
     esac
+    [[ -f "$f" ]] && cat "$f" || exit 1
     """
 )
 
@@ -228,18 +236,23 @@ class Scenario:
     def fixture(self, name, body):
         (self.stub_dir / name).write_text(body, encoding="utf-8")
 
-    def pr_list(self, prs):
-        """`prs` is [(number, headRefName, [paths])]."""
-        self.fixture("pr_list", json.dumps(
+    @staticmethod
+    def _at(repo):
+        return "@" + repo.replace("/", "_") if repo else ""
+
+    def pr_list(self, prs, repo=""):
+        """`prs` is [(number, headRefName, [paths])]; `repo` serves them to a
+        `gh pr list --repo <repo>` only."""
+        self.fixture("pr_list" + self._at(repo), json.dumps(
             [{"number": n, "headRefName": ref,
               "files": [{"path": p} for p in paths]} for n, ref, paths in prs]))
 
-    def pr_diff(self, number, path, changed_line):
+    def pr_diff(self, number, path, changed_line, repo=""):
         """A one-line change at `changed_line`, in the default-context (3-line)
         shape `gh pr diff` returns: the hunk spans changed_line-3 .. +3."""
         start = max(1, changed_line - 3)
         count = (changed_line + 3) - start + 1
-        self.fixture("pr_diff.%d" % number, textwrap.dedent(
+        self.fixture("pr_diff.%d%s" % (number, self._at(repo)), textwrap.dedent(
             """\
             diff --git a/{p} b/{p}
             index 1111111..2222222 100644
@@ -1030,6 +1043,12 @@ class DeclaredHead(unittest.TestCase):
     def test_short_flag_glued(self):
         self.assertEqual(self.head("gh pr create -Htopic"), "topic")
 
+    def test_the_repo_is_read_in_every_spelling(self):
+        for cmd in ("gh pr create --repo o/r", "gh pr create --repo=o/r",
+                    "gh pr create -R o/r", "gh pr create -Ro/r"):
+            self.assertEqual(guard.pr_create_repo(cmd), "o/r", cmd)
+        self.assertEqual(guard.pr_create_repo("gh pr create --fill"), "")
+
     def test_a_fork_head_is_cut_to_the_branch(self):
         self.assertEqual(self.head("gh pr create --head owner:topic"), "topic")
 
@@ -1119,6 +1138,50 @@ class NamedHead(unittest.TestCase):
         is the branch the create does not open."""
         self.assertEqual(
             self.s.guard("gh pr create --head nowhere --fill"), "")
+
+    def test_a_fork_head_pushed_only_to_the_fork_declines(self):
+        """The shape that was denied for the checked-out branch's overlap: a
+        commit pushed by SHA to a fork, opened against upstream. The fork's
+        branch is neither local nor on `origin`, so there is nothing to
+        compare. The base has to resolve, or the check declines before the
+        head is ever judged and the test proves nothing."""
+        git(self.s.root, "update-ref", "refs/remotes/origin/spike", "main")
+        self.deny_reason(self.s.guard("gh pr create --base spike --fill"))
+        self.assertEqual(self.s.guard(
+            "git push -q https://example.invalid/fork.git abc123:refs/heads/"
+            "probe && gh pr create --repo owner/repo --base spike "
+            "--head someone:probe --draft --fill"), "")
+
+
+class NamedRepo(unittest.TestCase):
+    """A create that names `--repo` opens its PR there, so the open PRs it
+    overlaps are that repo's, not the ones `gh` resolves from the checkout."""
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", tmp])
+        self.s = Scenario(tmp, {"app.py": numbered(80)},
+                          {"app.py": numbered(80, 40, "OURS")})
+        self.s.pr_list([(7, "other", ["app.py"])])
+        self.s.pr_diff(7, "app.py", 40)
+
+    deny_reason = GuardDeny.deny_reason
+
+    def test_the_checkouts_own_repo_is_not_compared(self):
+        """The control first: without `--repo` #7 overlaps."""
+        self.deny_reason(self.s.guard("gh pr create --fill"))
+        self.s.pr_list([], repo="up/stream")
+        for cmd in ("gh pr create --repo up/stream --fill",
+                    "gh pr create -R up/stream --fill"):
+            self.assertEqual(self.s.guard(cmd), "", cmd)
+
+    def test_the_named_repos_prs_are_compared(self):
+        self.s.pr_list([(9, "theirs", ["app.py"])], repo="up/stream")
+        self.s.pr_diff(9, "app.py", 41, repo="up/stream")
+        reason = self.deny_reason(
+            self.s.guard("gh pr create --repo up/stream --fill"))
+        self.assertIn("#9", reason)
+        self.assertNotIn("#7", reason)
 
 
 class ReadDisclosure(unittest.TestCase):

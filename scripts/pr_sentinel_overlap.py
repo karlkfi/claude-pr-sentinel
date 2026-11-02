@@ -38,6 +38,7 @@ or follows a `git checkout`/`git switch` in the same command, is judged on that
 branch rather than on whatever HEAD is when the hook runs — the hook runs before
 any of the command does, so a chained checkout has not happened yet. A head that
 resolves to no commit here leaves nothing to compare, and the check declines.
+A create that names `--repo` is compared against that repo's open PRs.
 """
 import fnmatch
 import json
@@ -293,7 +294,12 @@ def head_ref(root, name):
     return None
 
 
-def open_prs(root):
+def repo_args(repo):
+    """`--repo` for a `gh` read, when the create names the repo it opens in."""
+    return ('--repo', repo) if repo else ()
+
+
+def open_prs(root, repo=''):
     """Open PRs with the paths each one touches, or None.
 
     The field list is deliberately narrow and must stay that way: `number` and
@@ -303,7 +309,7 @@ def open_prs(root):
     """
     status, out = capture(
         ('gh', 'pr', 'list', '--state', 'open', '--limit', str(MAX_OPEN_PRS),
-         '--json', 'number,headRefName,files'), root)
+         '--json', 'number,headRefName,files') + repo_args(repo), root)
     if status != 0:
         return None
     try:
@@ -313,7 +319,7 @@ def open_prs(root):
     return prs if isinstance(prs, list) else None
 
 
-def pr_ranges(root, number):
+def pr_ranges(root, number, repo=''):
     """What an open PR changes, or None.
 
     Numbered from that PR's own merge base rather than this branch's, so a
@@ -323,15 +329,17 @@ def pr_ranges(root, number):
     `gh pr diff` has no `-U`, so this arrives at the default context and is not
     widened again — see `hunk_range`.
     """
-    status, out = capture(('gh', 'pr', 'diff', str(number)), root)
+    status, out = capture(('gh', 'pr', 'diff', str(number)) + repo_args(repo),
+                          root)
     return None if status != 0 else parse_hunks(out, widen=False)
 
 
-def overlapping_prs(cwd, declared_base='', head=''):
+def overlapping_prs(cwd, declared_base='', head='', repo=''):
     """[(number, paths, precise)] for open PRs on this branch's own lines, or [].
 
     `head` is the branch the create opens, when the command names one; empty
-    means the checked-out branch.
+    means the checked-out branch. `repo` is the `--repo` it opens in; empty
+    means the one `gh` resolves here.
 
     `precise` is False when the PR's diff was not fetched — the cap was reached,
     or the call failed — and the entry rests on a shared path alone. The deny
@@ -356,7 +364,7 @@ def overlapping_prs(cwd, declared_base='', head=''):
     mine = changed_ranges(root, fork.strip(), tip)
     if not mine:
         return []                        # nothing committed yet, or git said no
-    prs = open_prs(root)
+    prs = open_prs(root, repo)
     if prs is None:
         return []
     parent = (declared_base or '').strip()
@@ -379,7 +387,7 @@ def overlapping_prs(cwd, declared_base='', head=''):
         theirs = None
         if fetched < MAX_PR_DIFFS:
             fetched += 1                 # a failed fetch spends it too
-            theirs = pr_ranges(root, pr.get('number'))
+            theirs = pr_ranges(root, pr.get('number'), repo)
         if theirs is not None:
             shared = [p for p in shared
                       if p in theirs and ranges_meet(mine[p], theirs[p])]
