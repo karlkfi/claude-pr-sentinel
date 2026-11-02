@@ -310,19 +310,23 @@ def is_pr_create(command, lenient=False):
                for group in tokenize.simple_commands(command, lenient))
 
 
-def _pr_create_base(group):
-    """The `--base` this create declares, or ''. `pflag` accepts four spellings
+def _flag_value(group, long, short):
+    """The value of a create's flag, or ''. `pflag` accepts four spellings
     and `gh` inherits all of them: `--base x`, `--base=x`, `-B x`, `-Bx`."""
     rest = _strip_env_prefix(list(group))[1:]
     for i, arg in enumerate(rest):
-        if arg.startswith('--base='):
-            return arg[len('--base='):]
-        if arg.startswith('-B') and not arg.startswith('--') and len(arg) > 2:
+        if arg.startswith(long + '='):
+            return arg[len(long) + 1:]
+        if arg.startswith(short) and not arg.startswith('--') and len(arg) > 2:
             return arg[2:]
-        if arg in ('--base', '-B'):
+        if arg in (long, short):
             nxt = rest[i + 1] if i + 1 < len(rest) else ''
             return '' if nxt.startswith('-') else nxt
     return ''
+
+
+def _pr_create_base(group):
+    return _flag_value(group, '--base', '-B')
 
 
 def pr_create_base(command):
@@ -343,23 +347,19 @@ def pr_create_base(command):
 
 
 def _pr_create_head(group):
-    """The `--head` this create declares, or ''. Same four spellings as
-    `--base`. A fork's `owner:branch` is cut to the branch, the part that can
-    name a ref here."""
-    rest = _strip_env_prefix(list(group))[1:]
-    head = ''
-    for i, arg in enumerate(rest):
-        if arg.startswith('--head='):
-            head = arg[len('--head='):]
-        elif arg.startswith('-H') and not arg.startswith('--') and len(arg) > 2:
-            head = arg[2:]
-        elif arg in ('--head', '-H'):
-            nxt = rest[i + 1] if i + 1 < len(rest) else ''
-            head = '' if nxt.startswith('-') else nxt
-        else:
-            continue
-        break
-    return head.rsplit(':', 1)[-1]
+    """The `--head` this create declares, or ''. A fork's `owner:branch` is cut
+    to the branch, the part that can name a ref here."""
+    return _flag_value(group, '--head', '-H').rsplit(':', 1)[-1]
+
+
+def pr_create_repo(command):
+    """The `--repo` a `gh pr create` opens its PR in, or '' for the one `gh`
+    resolves from the working directory. The open PRs compared have to be that
+    repo's, or a create into an upstream is judged against the fork's queue."""
+    for group in simple_commands(command):
+        if _is_gh_pr_create(group):
+            return _flag_value(group, '--repo', '-R')
+    return ''
 
 
 # Flags that leave `git checkout <x>` / `git switch <x>` meaning "go to branch
@@ -561,7 +561,8 @@ def run(data):
     if overlap.enabled() and not overridden and is_pr_create(command):
         hits = overlap.overlapping_prs(data.get('cwd'),
                                        pr_create_base(command),
-                                       pr_create_head(command))
+                                       pr_create_head(command),
+                                       pr_create_repo(command))
         if hits:
             print(json.dumps({'hookSpecificOutput': {
                 'hookEventName': 'PreToolUse',
