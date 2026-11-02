@@ -476,6 +476,37 @@ class HunkParsing(unittest.TestCase):
                 "\x1b[36m@@ -10,2 +10,3 @@\x1b[m\n")
         self.assertEqual(overlap.parse_hunks(diff), {"f.py": [(7, 14)]})
 
+    def citing(self, old, new):
+        return ("diff --git a/Q1.md b/Q1.md\n--- a/Q1.md\n+++ b/Q1.md\n"
+                "@@ -10,1 +10,1 @@\n-" + old + "\n+" + new + "\n")
+
+    def test_a_citation_renumbered_is_not_an_edit(self):
+        diff = self.citing("`src/app.py:1063:if argv[0]:` and `b.sh:4-9`",
+                           "`src/app.py:1072:if argv[0]:` and `b.sh:5-10`")
+        self.assertEqual(overlap.parse_hunks(diff), {})
+
+    def test_a_citation_whose_quoted_text_changed_is_an_edit(self):
+        diff = self.citing("`src/app.py:1063:if argv[0]:`",
+                           "`src/app.py:1072:if argv[1]:`")
+        self.assertEqual(overlap.parse_hunks(diff), {"Q1.md": [(7, 13)]})
+
+    def test_a_citation_moved_to_another_file_is_an_edit(self):
+        diff = self.citing("`src/app.py:1063:`", "`src/lib.py:1063:`")
+        self.assertEqual(overlap.parse_hunks(diff), {"Q1.md": [(7, 13)]})
+
+    def test_one_hunk_mixing_a_renumber_and_an_edit_is_an_edit(self):
+        diff = ("diff --git a/Q1.md b/Q1.md\n--- a/Q1.md\n+++ b/Q1.md\n"
+                "@@ -10,2 +10,2 @@\n-`a.py:1:`\n-old prose\n"
+                "+`a.py:2:`\n+new prose\n")
+        self.assertEqual(overlap.parse_hunks(diff), {"Q1.md": [(7, 14)]})
+
+    def test_a_renumber_drops_only_its_own_hunk(self):
+        """The next file's header must not be read into this hunk's lines."""
+        diff = (self.citing("`a.py:1:`", "`a.py:2:`")
+                + "diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n"
+                "@@ -10,1 +10,1 @@\n-x = 1\n+x = 2\n")
+        self.assertEqual(overlap.parse_hunks(diff), {"f.py": [(7, 13)]})
+
 
 class RangesMeet(unittest.TestCase):
     """Pins the reach. A mutation to path-only intersection has to go red here
@@ -625,6 +656,39 @@ class OverlapDetection(unittest.TestCase):
         s.pr_list([(7, "other", ["app.py"])])
         s.pr_diff(7, "app.py", 75)
         self.assertEqual(s.hits(), [])
+
+    def citation_race(self, ours, theirs="`app.py:109:def f():`"):
+        """Two branches each refresh one doc's citation of a line their own
+        code change moved — the shape a parallel run produces."""
+        s = self.scenario(
+            {"Q1.md": numbered(80, 40, "`app.py:100:def f():`")},
+            {"Q1.md": numbered(80, 40, ours)})
+        s.pr_list([(7, "other", ["Q1.md"])])
+        s.fixture("pr_diff.7", textwrap.dedent(
+            """\
+            diff --git a/Q1.md b/Q1.md
+            --- a/Q1.md
+            +++ b/Q1.md
+            @@ -40,1 +40,1 @@
+            -`app.py:100:def f():`
+            +{theirs}
+            """).format(theirs=theirs))
+        return s
+
+    def test_two_branches_renumbering_one_citation_do_not_overlap(self):
+        self.assertEqual(self.citation_race("`app.py:131:def f():`").hits(),
+                         [])
+
+    def test_a_real_edit_on_both_sides_still_overlaps(self):
+        """The control: the same fixture fires once neither side renumbers."""
+        self.assertEqual(self.citation_race("OURS", "THEIRS").hits(),
+                         [[7, ["Q1.md"], True]])
+
+    def test_our_edit_against_their_renumber_is_silent(self):
+        """Their side is only a renumber, so it is not their work this branch
+        would be duplicating — the case of a row they repointed and this branch
+        rewrote or deleted."""
+        self.assertEqual(self.citation_race("REWRITTEN").hits(), [])
 
     def test_different_files_do_not_overlap(self):
         s = self.scenario({"a.py": numbered(40), "b.py": numbered(40)},
