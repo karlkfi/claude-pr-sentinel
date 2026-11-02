@@ -33,6 +33,13 @@ duplicated. Once that parent is rebased and this branch is not restacked onto
 it, the two sides are numbered in different pre-images and nothing comparable
 is left, so the check declines rather than guess.
 
+A create that declares no such base is still recognised as a stack when an open
+PR's head commit is already in this branch: it was built on that PR, so that
+PR's hunks are inherited too. `--base main` with a "merge after" note is the
+ordinary way to open a stack, and refusing it spent a human override per child.
+A branch that replays the parent's work as new commits carries no such head and
+is still compared — that is the duplicate this check exists for.
+
 **The branch judged is the one the create opens.** A create that names `--head`,
 or follows a `git checkout`/`git switch` in the same command, is judged on that
 branch rather than on whatever HEAD is when the hook runs — the hook runs before
@@ -303,13 +310,15 @@ def open_prs(root, repo=''):
     """Open PRs with the paths each one touches, or None.
 
     The field list is deliberately narrow and must stay that way: `number` and
-    `headRefName` identify the PR, `files` is what the comparison needs. A
+    `headRefName` identify the PR, `headRefOid` says whether this branch is
+    built on it, `files` is what the comparison needs. A
     human-writable field here (`title`, `body`) would be echoed into the
     session by the deny — the channel this plugin exists to keep shut.
     """
     status, out = capture(
         ('gh', 'pr', 'list', '--state', 'open', '--limit', str(MAX_OPEN_PRS),
-         '--json', 'number,headRefName,files') + repo_args(repo), root)
+         '--json', 'number,headRefName,headRefOid,files') + repo_args(repo),
+        root)
     if status != 0:
         return None
     try:
@@ -332,6 +341,31 @@ def pr_ranges(root, number, repo=''):
     status, out = capture(('gh', 'pr', 'diff', str(number)) + repo_args(repo),
                           root)
     return None if status != 0 else parse_hunks(out, widen=False)
+
+
+def built_on(root, prs, branch, tip, mine):
+    """(nearest head commit, {head branch names}) for the open PRs this branch is
+    built on, or None.
+
+    A PR qualifies when its head commit is an ancestor of `tip` and not `tip`
+    itself — a second branch name on the very same commit is a duplicate, not a
+    stack. Its head has to be here already: nothing is fetched, so a parent
+    known only to GitHub is not recognised and the create is judged as before.
+    A chain of stacked PRs all qualify, and the branch is numbered from the
+    nearest; two parents neither of which contains the other leave no single
+    base to number from, so that is judged as before too.
+    """
+    tip_oid = (git(root, 'rev-parse', '--verify', '--quiet', tip) or '').strip()
+    under = [pr for pr in prs
+             if pr.get('headRefName') != branch and pr.get('headRefOid')
+             and pr['headRefOid'] != tip_oid
+             and any(f.get('path') in mine for f in pr.get('files') or [])
+             and contains(root, pr['headRefOid'], tip)]
+    for near in under:
+        if all(contains(root, pr['headRefOid'], near['headRefOid'])
+               for pr in under):
+            return near['headRefOid'], {pr.get('headRefName') for pr in under}
+    return None
 
 
 def overlapping_prs(cwd, declared_base='', head='', repo=''):
@@ -372,12 +406,20 @@ def overlapping_prs(cwd, declared_base='', head='', repo=''):
                                    for pr in prs)
     if stacked and not contains(root, base, tip):
         return []                        # stale stack: nothing comparable left
+    inherited = {parent} if stacked else set()
+    if not stacked:
+        found = built_on(root, prs, branch, tip, mine)
+        if found:
+            mine = changed_ranges(root, found[0], tip)
+            if not mine:
+                return []
+            inherited = found[1]
     patterns = ignore_patterns()
     hits, fetched = [], 0
     for pr in prs:
         if pr.get('headRefName') == branch:
             continue                     # this branch's own PR, already open
-        if stacked and pr.get('headRefName') == parent:
+        if pr.get('headRefName') in inherited:
             continue                     # the stack's parent: inherited work
         shared = sorted(p for p in (f.get('path')
                                     for f in pr.get('files') or [])

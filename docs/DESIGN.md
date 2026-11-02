@@ -152,7 +152,7 @@ context already counted inside the hunk and is *not* widened again — doing so
 would stretch its reach to nine lines and quietly undo the narrowing.
 
 This is the one place a hook talks to GitHub, so the field list is the security
-surface: `number`, `headRefName`, `files`, and the diffs of at most three PRs
+surface: `number`, `headRefName`, `headRefOid`, `files`, and the diffs of at most three PRs
 that already share a path. Not the title — a denial's text lands in the
 session's context, and a title is written by whoever opened that PR, which is
 the channel this plugin exists to keep shut. Every probe fails silent, so the

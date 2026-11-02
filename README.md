@@ -163,11 +163,15 @@ out on both sides. Change the path or the quoted text and it counts again.
 PR carries that PR's hunks by construction, so numbering it from the default
 branch would collide it with its own parent on lines it never touched — every
 stacked create denied, on the one case that is not the duplicate-PR mistake.
-The `--base` on your `gh pr create` is what settles it: declare it and the
-branch is numbered from there, its parent is skipped as inherited work rather
-than duplicated, and every other open PR is still checked. Declare no base and
-nothing changes — a create naming none targets the default branch, so the PR it
-opens really does carry the parent's commits. If that parent has since been
+Two things settle it. A `--base` on your `gh pr create` naming the parent's
+branch is one. The other is the parent's head commit already being in your
+branch, which covers the stack opened against the default branch with a "merge
+after" note. Either way the branch is numbered from the parent, the parent is
+skipped as inherited work rather than duplicated, and every other open PR is
+still checked. A branch that carries the parent's *change* without its commit —
+the same work written again — is still compared, because that is the duplicate
+the check exists for. So is a branch cut before the parent's latest push:
+restack onto its current head first. If a declared parent has since been
 rebased and you have not restacked onto it, the two sides are numbered in
 different pre-images and no comparison between them means anything, so the
 check declines outright rather than guess.
@@ -561,7 +565,7 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_AUTOALLOW` | (on) | auto-approve the plugin's own watcher launch so it isn't prompted by the base Bash permission; `0`/`false`/empty keeps the prompt (see below) |
 | `PR_SENTINEL_OVERLAP_ENABLED` | (on) | deny a `gh pr create` whose branch edits lines an open PR already changes; `false`/`0`/empty turns the check off, and with it the only GitHub query any hook makes (see [Overlapping pull requests](#overlapping-pull-requests)) |
 | `PR_SENTINEL_OVERLAP_IGNORE` | (unset) | comma-separated glob patterns the overlap check discounts — for a file every branch edits by construction, e.g. `CHANGELOG.md,docs/roadmap.md` |
-| `PR_SENTINEL_BASE_REF` | (`origin/HEAD`, else `origin/main`) | the ref the overlap check forks this branch from when computing its changed lines. One value for every branch in the repo, so a `--base` on the `gh pr create` itself wins over it — that is the only place a [stack](#overlapping-pull-requests) is written down |
+| `PR_SENTINEL_BASE_REF` | (`origin/HEAD`, else `origin/main`) | the ref the overlap check forks this branch from when computing its changed lines. One value for every branch in the repo, so a `--base` on the `gh pr create` itself wins over it, and so does an open PR whose head this branch is [stacked](#overlapping-pull-requests) on |
 | `PR_SENTINEL_PROBE_TIMEOUT_SCALE` | `1` | whole-number multiplier on the overlap check's per-probe subprocess budget (5s). Raise it on a machine loaded enough that probes blow the cap and the check silently fails open. **Floored at 1**: no value set here can shorten a budget, because a shorter one only widens that fail-open. Anything but a whole number above 1 falls back to `1`, and the test suite reads the same knob for its own subprocess bounds. Unrelated to `PR_SENTINEL_TIMEOUT`, which is the whole watch's budget |
 | `PR_SENTINEL_DISABLE` | (unset) | `1` disables the PostToolUse nudge, the Stop backstop, and the watcher-launch auto-allow |
 | `PR_SENTINEL_SESSIONS_ROOT` | (platform default) | overrides the session-store path the [migration helper](#migrating-from-desktop-auto-fix) scans (same as its `--root`) |
