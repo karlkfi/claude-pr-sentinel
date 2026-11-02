@@ -152,6 +152,13 @@ do not. The false-positive direction is the one that matters — an overlap
 reported where there is none sends you to fold a branch that was fine — so a
 shared path with no shared range is silent.
 
+**A renumbered citation is not an edit.** A doc that quotes `file.py:1063:…`
+goes stale whenever a branch moves that line, so two unrelated branches each
+rewrite the same citation to their own number. Git conflicts on it, but whoever
+merges second just re-points it; that is not duplicated work. A hunk whose
+removed and added lines differ only in the numbers after `file.ext:` is left
+out on both sides. Change the path or the quoted text and it counts again.
+
 **A stacked branch is read from its own base.** A branch built on another open
 PR carries that PR's hunks by construction, so numbering it from the default
 branch would collide it with its own parent on lines it never touched — every

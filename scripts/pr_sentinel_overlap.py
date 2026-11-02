@@ -56,6 +56,7 @@ TIMED_OUT = 'timed out'  # a `capture()` status: ran, and blew its budget
 
 HUNK_RE = re.compile(r'^@@ -([0-9]+)(?:,([0-9]+))? \+')
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+CITATION_RE = re.compile(r'([\w./-]+\.\w+):[0-9]+(?:-[0-9]+)?')
 
 
 def enabled():
@@ -196,8 +197,23 @@ def hunk_range(start, count, widen):
     return max(1, start - pad), last + pad
 
 
+def is_repoint(removed, added):
+    """Whether a hunk only renumbers `file.ext:NNN` citations.
+
+    A code change that shifts lines sends every branch to refresh each doc that
+    cites the moved lines, so two unrelated PRs rewrite the same citation to
+    different numbers. That is a git conflict, but a mechanical one — whoever
+    lands second regenerates — and not the duplicated work this check is for.
+    The path and the quoted text must survive unchanged; only the number moves.
+    """
+    def norm(lines):
+        return [CITATION_RE.sub(r'\1:N', line) for line in lines]
+    return bool(removed) and removed != added and norm(removed) == norm(added)
+
+
 def parse_hunks(diff, widen=True):
     """{path: [(start, end)]} from a unified diff, in pre-image line numbers.
+    A hunk that only renumbers citations is left out — see `is_repoint`.
 
     A `--- ` line only names a file inside a header run, because a removed line
     carries a `-` of its own: an SQL comment `-- DROP` comes out of the diff as
@@ -209,10 +225,16 @@ def parse_hunks(diff, widen=True):
     would take every hunk out of the count and read as a PR that changes
     nothing.
     """
-    ranges, path, in_header = {}, '', False
+    ranges, path, in_header, hunk = {}, '', False, None
+
+    def flush():
+        if hunk and not is_repoint(hunk[2], hunk[3]):
+            ranges.setdefault(hunk[0], []).append(hunk[1])
+
     for line in ANSI_RE.sub('', diff).splitlines():
         if line.startswith('diff --git '):
-            path, in_header = '', True
+            flush()
+            path, in_header, hunk = '', True, None
             continue
         if in_header and line.startswith('--- '):
             path = '' if line == '--- /dev/null' else line[6:]
@@ -221,11 +243,15 @@ def parse_hunks(diff, widen=True):
             continue
         m = HUNK_RE.match(line)
         if m:
+            flush()
             in_header = False
-            ranges.setdefault(path, []).append(
-                hunk_range(int(m.group(1)),
-                           1 if m.group(2) is None else int(m.group(2)),
-                           widen))
+            hunk = (path, hunk_range(int(m.group(1)),
+                                     1 if m.group(2) is None
+                                     else int(m.group(2)),
+                                     widen), [], [])
+        elif hunk and not in_header and line[:1] in '-+':
+            hunk[2 if line[0] == '-' else 3].append(line[1:])
+    flush()
     return ranges
 
 
