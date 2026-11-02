@@ -71,11 +71,11 @@ report).
   with `git diff` / `git merge-base` / `git rev-parse` to learn which lines the
   branch being opened changes — the `--head` the create names, else the branch a
   `git checkout`/`git switch` earlier in the same command moves to, else the
-  checked-out one — and, when the create declares a `--base`, whether this branch
-  is built on top of it — then issues two read-only queries, against the
-  repository the create's `--repo` names when it names one:
-  - `gh pr list --json number,headRefName,files` — the open PRs, their head
-    branch names, and the paths each one touches;
+  checked-out one — and whether this branch is built on top of the `--base` the
+  create declares, or on an open PR's head commit — then issues two read-only
+  queries, against the repository the create's `--repo` names when it names one:
+  - `gh pr list --json number,headRefName,headRefOid,files` — the open PRs,
+    their head branch names and head commits, and the paths each one touches;
   - `gh pr diff <number>` — the diff of at most **three** PRs, and only ones
     that already share a path with your branch, to compare line ranges rather
     than filenames.

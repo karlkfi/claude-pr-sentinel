@@ -9,7 +9,8 @@ straight into `refs/remotes/`, so nothing here touches the network; the two
 `gh` calls are the only stubbed thing, via a stub on PATH that prints fixture
 files:
 
-  pr_list      -> the JSON `gh pr list --json number,headRefName,files` returns
+  pr_list      -> the JSON `gh pr list --json number,headRefName,headRefOid,files`
+                  returns
   pr_diff.<N>  -> the unified diff `gh pr diff <N>` returns
                   (absent = the call fails, as a rate-limited token would)
 
@@ -241,11 +242,20 @@ class Scenario:
         return "@" + repo.replace("/", "_") if repo else ""
 
     def pr_list(self, prs, repo=""):
-        """`prs` is [(number, headRefName, [paths])]; `repo` serves them to a
+        """`prs` is [(number, headRefName, [paths])], with the PR's head commit
+        as an optional fourth element — `headRefOid` is empty without it, as for
+        a head this clone has never seen. `repo` serves them to a
         `gh pr list --repo <repo>` only."""
         self.fixture("pr_list" + self._at(repo), json.dumps(
-            [{"number": n, "headRefName": ref,
-              "files": [{"path": p} for p in paths]} for n, ref, paths in prs]))
+            [{"number": pr[0], "headRefName": pr[1],
+              "headRefOid": pr[3] if len(pr) > 3 else "",
+              "files": [{"path": p} for p in pr[2]]} for pr in prs]))
+
+    def oid(self, rev):
+        proc = subprocess.run(
+            ("git", "-C", str(self.root), "rev-parse", rev),
+            capture_output=True, text=True, check=True)
+        return proc.stdout.strip()
 
     def pr_diff(self, number, path, changed_line, repo=""):
         """A one-line change at `changed_line`, in the default-context (3-line)
@@ -772,8 +782,9 @@ class OverlapDetection(unittest.TestCase):
 class StackedBranches(unittest.TestCase):
     """A branch built on another open PR. Its diff against the DEFAULT branch
     contains its parent's hunks by construction, so numbering it from there
-    collides it with its own parent on lines it never touched. The `--base` the
-    create declares is the only place the stack is written down."""
+    collides it with its own parent on lines it never touched. Two things say
+    it is a stack: a `--base` naming the parent's head, or the parent's head
+    commit already being in this branch."""
 
     def stack(self, parent_line, our_line, size=80):
         """`parent` edits one line, `feature` is built on it and edits another.
@@ -795,9 +806,9 @@ class StackedBranches(unittest.TestCase):
             parent_files={"app.py": parent_file},
         )
 
-    def test_an_undeclared_base_still_collides_with_the_parent(self):
-        """Unchanged behaviour, and correct: a create naming no base targets the
-        default branch, so the PR it opens really does carry the parent's work."""
+    def test_a_parent_head_unknown_here_still_collides(self):
+        """No head commit to look for, so nothing says this is a stack: the
+        parent's hunks read as this branch's own, as they did before."""
         s = self.stack(parent_line=5, our_line=60)
         s.pr_list([(7, "parent", ["app.py"])])
         s.pr_diff(7, "app.py", 5)
@@ -855,6 +866,81 @@ class StackedBranches(unittest.TestCase):
         s.pr_list([(9, "other", ["app.py"])])
         s.pr_diff(9, "app.py", 60)
         self.assertEqual(s.hits(base="main"), [[9, ["app.py"], True]])
+
+    # --- a stack opened against the default branch ---
+
+    def test_a_branch_built_on_the_parents_head_is_a_stack(self):
+        """`--base main` and a "merge after" note is the usual way a stack is
+        opened. The parent's head commit is in this branch, so its hunks are
+        inherited, whatever base the create names."""
+        s = self.stack(parent_line=5, our_line=60)
+        s.pr_list([(7, "parent", ["app.py"], s.oid("parent"))])
+        s.pr_diff(7, "app.py", 5)
+        self.assertEqual(s.hits(), [])
+        self.assertEqual(s.hits(base="main"), [])
+
+    def test_an_inferred_stack_still_catches_a_real_duplicate(self):
+        s = self.stack(parent_line=5, our_line=60)
+        s.branch_off("other", {"app.py": numbered(80, 60, "OTHER")})
+        s.pr_list([(7, "parent", ["app.py"], s.oid("parent")),
+                   (9, "other", ["app.py"], s.oid("other"))])
+        s.pr_diff(7, "app.py", 5)
+        s.pr_diff(9, "app.py", 60)
+        self.assertEqual(s.hits(), [[9, ["app.py"], True]])
+
+    def test_an_inferred_stack_does_not_charge_the_parents_lines(self):
+        s = self.stack(parent_line=5, our_line=60)
+        s.branch_off("other", {"app.py": numbered(80, 60, "OTHER")})
+        s.pr_list([(7, "parent", ["app.py"], s.oid("parent")),
+                   (9, "other", ["app.py"], s.oid("other"))])
+        s.pr_diff(7, "app.py", 5)
+        s.pr_diff(9, "app.py", 5)
+        self.assertEqual(s.hits(), [])
+
+    def test_the_parents_work_replayed_as_new_commits_still_collides(self):
+        """The duplicate this check is for: the same change, written again on a
+        branch that does not carry the parent's commit."""
+        s = self.stack(parent_line=5, our_line=60)
+        git(s.root, "checkout", "-q", "-b", "replayed", "main")
+        git(s.root, "checkout", "feature", "--", "app.py")
+        git(s.root, "commit", "-qm", "replayed")
+        s.pr_list([(7, "parent", ["app.py"], s.oid("parent"))])
+        s.pr_diff(7, "app.py", 5)
+        self.assertEqual(s.hits(), [[7, ["app.py"], True]])
+
+    def test_a_second_name_on_the_same_commit_is_a_duplicate(self):
+        s = self.stack(parent_line=5, our_line=60)
+        s.pr_list([(7, "copy", ["app.py"], s.oid("feature"))])
+        s.pr_diff(7, "app.py", 60)
+        self.assertEqual(s.hits(), [[7, ["app.py"], True]])
+
+    def test_a_parent_that_moved_past_this_branch_still_collides(self):
+        """The parent pushed again after this branch was cut, so its current
+        head is not in this branch: restack before opening the child."""
+        s = self.stack(parent_line=5, our_line=60)
+        git(s.root, "checkout", "-q", "parent")
+        git(s.root, "commit", "-q", "--allow-empty", "-m", "parent fix")
+        git(s.root, "checkout", "-q", "feature")
+        s.pr_list([(7, "parent", ["app.py"], s.oid("parent"))])
+        s.pr_diff(7, "app.py", 5)
+        self.assertEqual(s.hits(), [[7, ["app.py"], True]])
+
+    def test_a_chain_is_numbered_from_its_nearest_parent(self):
+        """Grandparent, parent, this branch, all open and all opened against
+        the default branch: both ancestors are inherited."""
+        s = self.stack(parent_line=5, our_line=60)
+        git(s.root, "branch", "grandparent", "parent~0")
+        git(s.root, "checkout", "-q", "parent")
+        s._write({"app.py": numbered(80, 5, "PARENT").replace(
+            "line 30\n", "PARENT TWO\n")})
+        git(s.root, "commit", "-qam", "parent two")
+        git(s.root, "checkout", "-q", "feature")
+        git(s.root, "rebase", "-q", "parent")
+        s.pr_list([(6, "grandparent", ["app.py"], s.oid("grandparent")),
+                   (7, "parent", ["app.py"], s.oid("parent"))])
+        s.pr_diff(6, "app.py", 5)
+        s.pr_diff(7, "app.py", 30)
+        self.assertEqual(s.hits(), [])
 
 
 class DeclaredBase(unittest.TestCase):
@@ -1206,7 +1292,7 @@ class ReadDisclosure(unittest.TestCase):
     def test_the_check_can_fail(self):
         """A clean scan and a broken extraction look identical, so prove the
         needle is found before trusting its absence."""
-        self.assertIn("number,headRefName,files",
+        self.assertIn("number,headRefName,headRefOid,files",
                       "\n".join(self.gh_argv_lines()),
                       "the field list moved; this scan no longer reads it")
 
