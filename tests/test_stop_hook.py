@@ -289,6 +289,14 @@ class ClassifierUnit(unittest.TestCase):
         self.assertEqual(hook._pr_close_targets("gh pr merge 42 --squash"), {"42"})
         self.assertEqual(hook._pr_close_targets("gh pr close 7"), {"7"})
         self.assertEqual(hook._pr_close_targets("git status"), set())
+        self.assertEqual(hook._pr_close_targets(
+            "cd /w && GH_TOKEN=x gh pr merge 42 --squash"), {"42"})
+
+    def test_pr_close_targets_ignores_text_that_only_names_it(self):
+        self.assertEqual(hook._pr_close_targets(
+            "cat > notes.md <<'EOF'\ngh pr merge 42 --squash\nEOF"), set())
+        self.assertEqual(hook._pr_close_targets(
+            "git commit -m 'never gh pr close 7 here'"), set())
 
     def test_notification_text(self):
         n = task_notification("toolu_w")
@@ -737,6 +745,16 @@ class NeedsWatcherLogic(unittest.TestCase):
         self.assertEqual(needs([
             *launch_watcher(42, "toolu_w"),
             task_notification("toolu_w"),
+        ]), {"42"})
+
+    def test_heredoc_naming_gh_pr_merge_does_not_conclude_the_pr(self):
+        # Writing notes that mention a merge concludes nothing: the PR is still
+        # open and unwatched, so the stop still blocks over it.
+        self.assertEqual(needs([
+            *created_pr(42),
+            assistant_bash("cat > notes.md <<'EOF'\nthen gh pr merge 42\nEOF",
+                           "toolu_n"),
+            tool_result("", "toolu_n"),
         ]), {"42"})
 
     def test_created_via_gh_pr_create_correlation(self):
