@@ -666,7 +666,31 @@ class OverlapDetection(unittest.TestCase):
         self.assertEqual([h[2] for h in hits], [True, True, True, False],
                          "the fourth PR must be reported as path-only")
 
+    def full_list(self, s):
+        """A PR whose `gh pr list` entry is cut at the cap before `app.py`,
+        as a 112-file PR's was: 100 paths, every one sorting ahead of ours."""
+        s.pr_list([(7, "other", ["a/f%03d.py" % n
+                                 for n in range(overlap.GH_FILES_CAP)])])
+
+    def test_a_path_past_the_files_cap_still_overlaps(self):
+        s = self.one_file(40)
+        self.full_list(s)
+        s.pr_diff(7, "app.py", 40)
+        self.assertEqual(s.hits(), [[7, ["app.py"], True]])
+
     # --- silent (the direction that matters) ---
+
+    def test_a_full_list_whose_diff_skips_our_path_is_silent(self):
+        s = self.one_file(40)
+        self.full_list(s)
+        s.pr_diff(7, "a/f000.py", 40)
+        self.assertEqual(s.hits(), [])
+
+    def test_a_full_list_whose_diff_failed_claims_no_unlisted_path(self):
+        """Path-only rests on what `gh` listed, and `app.py` is not in it."""
+        s = self.one_file(40)
+        self.full_list(s)
+        self.assertEqual(s.hits(), [])
 
     def test_seven_lines_apart_does_not_overlap(self):
         s = self.one_file(40)

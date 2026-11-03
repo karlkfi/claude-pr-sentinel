@@ -57,6 +57,7 @@ PROBE_TIMEOUT = 5        # seconds, per subprocess
 CONTEXT_LINES = 3        # what a diff hunk carries either side
 MAX_OPEN_PRS = 20        # PRs listed; a repo with more is not our problem
 MAX_PR_DIFFS = 3         # diffs fetched — this runs while someone waits
+GH_FILES_CAP = 100       # files `gh pr list --json files` returns per PR
 
 FALLBACK_BASE_REF = 'origin/main'
 
@@ -328,6 +329,22 @@ def open_prs(root, repo=''):
     return prs if isinstance(prs, list) else None
 
 
+def listed_paths(pr):
+    """(paths `gh` listed for this PR, whether that list may be cut short).
+
+    `gh` lists at most `GH_FILES_CAP` files, alphabetically, so a full list is
+    a prefix: a path missing from it proves nothing, and only the diff can say
+    whether the PR touches it."""
+    paths = [f.get('path') for f in pr.get('files') or []]
+    return set(paths), len(paths) >= GH_FILES_CAP
+
+
+def may_share(pr, mine):
+    """The paths of `mine` this PR may also change, before its diff is read."""
+    listed, truncated = listed_paths(pr)
+    return sorted(mine) if truncated else sorted(p for p in listed if p in mine)
+
+
 def pr_ranges(root, number, repo=''):
     """What an open PR changes, or None.
 
@@ -359,7 +376,7 @@ def built_on(root, prs, branch, tip, mine):
     under = [pr for pr in prs
              if pr.get('headRefName') != branch and pr.get('headRefOid')
              and pr['headRefOid'] != tip_oid
-             and any(f.get('path') in mine for f in pr.get('files') or [])
+             and may_share(pr, mine)
              and contains(root, pr['headRefOid'], tip)]
     for near in under:
         if all(contains(root, pr['headRefOid'], near['headRefOid'])
@@ -421,9 +438,8 @@ def overlapping_prs(cwd, declared_base='', head='', repo=''):
             continue                     # this branch's own PR, already open
         if pr.get('headRefName') in inherited:
             continue                     # the stack's parent: inherited work
-        shared = sorted(p for p in (f.get('path')
-                                    for f in pr.get('files') or [])
-                        if p in mine and not is_ignored(p, patterns))
+        shared = [p for p in may_share(pr, mine)
+                  if not is_ignored(p, patterns)]
         if not shared:
             continue
         theirs = None
@@ -433,8 +449,10 @@ def overlapping_prs(cwd, declared_base='', head='', repo=''):
         if theirs is not None:
             shared = [p for p in shared
                       if p in theirs and ranges_meet(mine[p], theirs[p])]
-            if not shared:
-                continue
+        else:                            # path-only: claim what gh listed
+            shared = [p for p in shared if p in listed_paths(pr)[0]]
+        if not shared:
+            continue
         hits.append((pr.get('number'), shared, theirs is not None))
     return hits
 

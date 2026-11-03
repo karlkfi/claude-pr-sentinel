@@ -153,7 +153,9 @@ would stretch its reach to nine lines and quietly undo the narrowing.
 
 This is the one place a hook talks to GitHub, so the field list is the security
 surface: `number`, `headRefName`, `headRefOid`, `files`, and the diffs of at most three PRs
-that already share a path. Not the title — a denial's text lands in the
+that already share a path. `files` stops at 100 paths, alphabetically, so a PR
+listing 100 counts as sharing one until its diff says otherwise — a 112-file PR
+once hid the only file that really conflicted past the cut. Not the title — a denial's text lands in the
 session's context, and a title is written by whoever opened that PR, which is
 the channel this plugin exists to keep shut. Every probe fails silent, so the
 cost of a missing `gh`, an unresolvable base ref or a rate-limited token is a
