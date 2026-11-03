@@ -78,7 +78,8 @@ report).
     their head branch names and head commits, and the paths each one touches;
   - `gh pr diff <number>` — the diff of at most **three** PRs, and only ones
     that already share a path with your branch, to compare line ranges rather
-    than filenames.
+    than filenames. `gh` lists at most 100 paths per PR, so a PR listing 100
+    is fetched too: the paths past that cut are only in its diff.
 - That field list is the whole of it. The check **never** requests the PR body,
   review comments, issue comments, or even the PR **title** — a title is
   written by its author, and the denial message goes straight into your

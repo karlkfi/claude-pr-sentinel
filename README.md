@@ -187,7 +187,8 @@ against that repository's open PRs rather than the checkout's.
 
 This is the one part of the hooks that **talks to GitHub**: `gh pr list` for the
 open PRs and their paths, then `gh pr diff` for at most three of them, and only
-ones already sharing a path. It reads code, never prose — no PR body, no
+ones already sharing a path — or listing 100, the most `gh` returns, past which
+a shared path shows only in the diff. It reads code, never prose — no PR body, no
 comments, and not even the PR title, which its author writes and which the
 denial would drop straight into the session's context. A denial names the PR
 number and the shared paths, and points at `gh pr diff <N>` so you read the
