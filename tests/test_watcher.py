@@ -39,6 +39,9 @@ scenario is a directory of small fixture files:
   dequeue_actor -> "typename\tlogin" for the `gh api graphql` timeline query
                  naming who removed the PR from the queue (absent = the query
                  fails, so the report must claim no cause at all)
+  head_runs    -> count of unfinished workflow runs on the head, for the
+                 `actions/runs?head_sha=` read (absent = none unfinished; pair
+                 with head_runs.stderr for a read that fails)
 
 Per-call variation (to test transitions like pending -> fail) is supported by
 suffixed files pr_checks.1, pr_checks.2, ... which the stub selects by a
@@ -136,6 +139,9 @@ GH_STUB = textwrap.dedent(
         */compare/*)
           emit "compare" || true
           exit 0 ;;
+        *'/actions/runs?head_sha='*)
+          emit "head_runs" || echo 0
+          exit "$stub_rc" ;;
       esac
       # repos/<o>/<r>/actions/runs/<id> -> run_workflow.<id> for the
       # `-q .workflow_id` projection, run_conclusion.<id> otherwise. Absent =
@@ -1561,6 +1567,79 @@ class WatcherCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("PR-SENTINEL EVENT: timeout", out)
         self.assertNotIn("EVENT: ready_watching", out)
+
+    # -- a workflow run with no check row (re-run, 2026-11-04) -----------------
+
+    # A queued re-run can have no rows on the head, so the other workflows'
+    # rows are all that remain, all passing.
+    RERUN_VIEW = "OPEN\tCLEAN\tmain\tabc1234def\thttps://github.com/o/r/pull/123\n"
+    OTHER_WORKFLOW = "pass\tlint\thttps://github.com/o/r/actions/runs/11/job/1\n"
+
+    def test_a_queued_rerun_withholds_ready(self):
+        """Measured: `ready` and CLEAN on a head showing 14 check runs of 70,
+        none unfinished, with the `tests` run queued in `actions/runs`."""
+        files = {"pr_view": self.RERUN_VIEW, "pr_checks": self.OTHER_WORKFLOW,
+                 "head_runs": "1\n"}
+        rc, out, _ = self.run_watcher(files, env={"PR_SENTINEL_TIMEOUT": "3"})
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+        self.assertNotIn("EVENT: ready", out)
+        self.assertIn("1 workflow run(s) on this head", out)
+        self.assertIn("'ready' was withheld", out)
+
+    def test_a_queued_rerun_withholds_the_ready_watching_notice(self):
+        files = {"pr_view": self.RERUN_VIEW, "pr_checks": self.OTHER_WORKFLOW,
+                 "head_runs": "1\n"}
+        _, out, _ = self.run_watcher(
+            files,
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed", "PR_SENTINEL_TIMEOUT": "3"})
+        self.assertNotIn("EVENT: ready_watching", out)
+
+    def test_a_rerun_that_then_fails_wakes_as_check_failure(self):
+        """The whole incident: the attempt the false `ready` hid went on to
+        fail, which is the report the session needed instead."""
+        failing = "fail\ttests\thttps://github.com/o/r/actions/runs/22/job/2\n"
+        files = {"pr_view": self.RERUN_VIEW,
+                 "pr_checks.1": self.OTHER_WORKFLOW,
+                 "pr_checks.2": self.OTHER_WORKFLOW,
+                 "pr_checks.3": self.OTHER_WORKFLOW,
+                 "pr_checks": self.OTHER_WORKFLOW + failing,
+                 "run_conclusion.22": "failure\n",
+                 "head_runs": "1\n"}
+        rc, out, _ = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: ready", out)
+
+    def test_ready_follows_once_the_run_finishes(self):
+        """The hold resets the streak, so `ready` still needs its full count
+        of green polls after the run ends — two here, on calls 2 and 3."""
+        files = {"pr_view": self.RERUN_VIEW, "pr_checks": self.OTHER_WORKFLOW,
+                 "head_runs.1": "1\n", "head_runs": "0\n"}
+        rc, out, err = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: ready", out)
+        self.assertNotIn("could not be read", out)
+        self.assertEqual(len(re.findall(r"had not finished", err)), 1, err)
+
+    def test_an_unreadable_run_list_reaches_ready_and_says_so(self):
+        """A token that cannot read Actions fails this read on every poll, so
+        holding on it would turn every `ready` into an hour-long timeout."""
+        files = {"pr_view": self.RERUN_VIEW, "pr_checks": self.OTHER_WORKFLOW,
+                 "head_runs": "", "head_runs.stderr": NETWORK_DOWN}
+        rc, out, _ = self.run_watcher(files)
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: ready", out)
+        self.assertIn("Workflow runs on this head could not be read", out)
+        self.assertNotIn(NETWORK_DOWN.strip(), out)
+
+    def test_a_finished_run_list_keeps_the_plain_ready(self):
+        files = {"pr_view": self.RERUN_VIEW, "pr_checks": self.OTHER_WORKFLOW,
+                 "head_runs": "0\n"}
+        _, out, _ = self.run_watcher(files)
+        self.assertIn("PR-SENTINEL EVENT: ready", out)
+        self.assertIn("All checks are green", out)
+        self.assertNotIn("could not be read", out)
 
     # -- no check row at all (issue #112) ------------------------------------
 

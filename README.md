@@ -345,7 +345,7 @@ needed:
 | `mergeStateStatus == BEHIND` | **behind** | rebase onto `<base>` (default) and force-push with lease, relaunch — or merge to fast-forward (`PR_SENTINEL_HEAL=merge`) |
 | the PR holds a **merge-queue entry** | *(keep polling, hands off)* | nothing — the queue is merging it, and any push to a queued PR evicts it (see [Merge queues](#merge-queues)) |
 | the queue entry is **gone** but the PR is still open, for `PR_SENTINEL_DEQUEUED_POLLS` polls | **dequeued** | heal whatever the report names, then hand back to a human to **re-enqueue** — never enqueue or merge yourself. The report names who removed it: the queue (an eviction) or a person (deliberate, often to allow a push) |
-| **at least one check reported**, all checks green, no conflict, a computed `mergeStateStatus` (not `BLOCKED`, not `UNKNOWN`), for `PR_SENTINEL_GREEN_POLLS` polls running | **ready** | hand back to a human for merge review — **never auto-merge** |
+| **at least one check reported**, all checks green, **no workflow run on the head unfinished**, no conflict, a computed `mergeStateStatus` (not `BLOCKED`, not `UNKNOWN`), for `PR_SENTINEL_GREEN_POLLS` polls running | **ready** | hand back to a human for merge review — **never auto-merge** |
 | the same, **and** `PR_SENTINEL_WATCH_UNTIL=closed` | *(notice: **ready_watching**, keep polling)* | nothing — the watch continues past green (see [Configuration](#configuration)) |
 | all checks green but `mergeStateStatus == BLOCKED` for `PR_SENTINEL_BLOCKED_POLLS` polls running | **blocked** | don't treat it as green: a required check may never have registered, or an approval is outstanding (see [Green is not the same as ready](#green-is-not-the-same-as-ready)) |
 | the same, **and** `PR_SENTINEL_WATCH_UNTIL=closed` | *(notice: **blocked_watching**, keep polling)* | nothing — the watch continues |
@@ -761,6 +761,18 @@ poll interval on a genuine ready — the confirming poll is scheduled at
 `PR_SENTINEL_INTERVAL` rather than the backed-off interval, so a long CI run
 doesn't turn that into a five-minute wait. Set it to `1` to decide on a single
 poll.
+
+A **re-run** can be the same problem at an unchanged head, and persistence does
+not reach it. While a re-run waits in the queue, its workflow can have no check
+rows on the head, so the remaining workflows' rows are all passing and the merge
+state stays `CLEAN`. This was seen once, with `--failed` during a GitHub Actions
+incident; a full re-run on a healthy queue kept its rows, as pending. So a green
+poll also asks GitHub whether any workflow run on the head is unfinished, and
+`ready` waits for that to reach zero. A run stuck in the queue
+ends the watch in `timeout`, whose report says why `ready` was withheld. If the
+run list cannot be read, for example because the token has no Actions access,
+`ready` still fires and adds a line saying a run with no check row is not ruled
+out.
 
 ### A head no check reported on
 
