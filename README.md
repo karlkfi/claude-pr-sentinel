@@ -762,12 +762,13 @@ poll interval on a genuine ready — the confirming poll is scheduled at
 doesn't turn that into a five-minute wait. Set it to `1` to decide on a single
 poll.
 
-A **re-run** is the same problem at an unchanged head, and persistence does not
-reach it. `gh run rerun` takes every check row of that workflow off the head
-until its jobs start, even with `--failed`, so the remaining workflows' rows are
-all passing and the merge state can stay `CLEAN` for as long as the run sits in
-the queue. So a green poll also asks GitHub whether any workflow run on the head
-is unfinished, and `ready` waits for that to reach zero. A run stuck in the queue
+A **re-run** can be the same problem at an unchanged head, and persistence does
+not reach it. While a re-run waits in the queue, its workflow can have no check
+rows on the head, so the remaining workflows' rows are all passing and the merge
+state stays `CLEAN`. This was seen once, with `--failed` during a GitHub Actions
+incident; a full re-run on a healthy queue kept its rows, as pending. So a green
+poll also asks GitHub whether any workflow run on the head is unfinished, and
+`ready` waits for that to reach zero. A run stuck in the queue
 ends the watch in `timeout`, whose report says why `ready` was withheld. If the
 run list cannot be read, for example because the token has no Actions access,
 `ready` still fires and adds a line saying a run with no check row is not ruled

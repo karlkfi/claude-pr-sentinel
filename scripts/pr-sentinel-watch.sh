@@ -457,10 +457,10 @@ gh_checks_fetch() {
 	return 1
 }
 
-# Count this head's workflow runs that have not finished. A re-run takes every
-# row of its workflow off the head until its jobs start, so `gh pr checks` shows
-# the other workflows alone, all passing, and nothing says a gate is missing.
-# The run itself stays listed here as `queued`. Only `status` is read: a run's
+# Count this head's workflow runs that have not finished. A queued re-run can
+# have no rows on the head, so `gh pr checks` shows the other workflows alone,
+# all passing, and nothing says a gate is missing. The run itself stays listed
+# here as `queued`. See docs/DESIGN.md. Only `status` is read: a run's
 # name comes from a workflow file a fork's pull request can edit. `check-suites`
 # would see the same runs, but also an empty suite an installed app leaves open.
 gh_unfinished_runs() {
@@ -1340,8 +1340,8 @@ emit_timeout() {
 	fi
 	if (( RUNS_UNFINISHED > 0 )); then
 		echo "Its check rows were green, but ${RUNS_UNFINISHED} workflow run(s) on this head had not"
-		echo "finished, so 'ready' was withheld — a queued re-run has no row until its"
-		echo "jobs start. Verify with 'gh run list --commit <head>'."
+		echo "finished, so 'ready' was withheld — a queued re-run can have no check row"
+		echo "yet. Verify with 'gh run list --commit <head>'."
 	fi
 	if (( QUEUED_SEEN == 1 )); then
 		echo "The PR held a merge-queue entry when last confirmed; if it is still"

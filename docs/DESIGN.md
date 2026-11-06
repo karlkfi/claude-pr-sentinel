@@ -564,9 +564,12 @@ A re-run makes the rows absent for only one workflow, which neither guard
 reaches: the set is not empty, so `unchecked` does not engage, and it is not
 stale, so a second poll sees the same thing. Measured 2026-11-04 during an
 Actions incident: `gh run rerun --failed` on a run with 56 check rows left the
-head showing the other workflows' 14, all green, with the merge state `CLEAN`;
-`ready` fired 36 seconds later and the attempt then failed. Nothing `gh pr checks`
-or `mergeStateStatus` returns says a gate is missing, so a green poll also reads
+head showing the other workflows' 14, all green, with the merge state `CLEAN`,
+for at least 50 seconds; `ready` fired inside that window and the attempt then
+failed. It is not every re-run: on 2026-11-06 a full re-run on a healthy queue
+showed all 6 of its rows as pending at the first read. Whether `--failed` or the
+incident made the difference is unmeasured. Nothing `gh pr checks` or
+`mergeStateStatus` returns says a gate is missing, so a green poll also reads
 the head's unfinished workflow runs, and any count above zero clears that poll's
 green. It is a read and not a timer, so it answers for however long the queue
 takes. The other commit-level read, `check-suites`, was rejected because an

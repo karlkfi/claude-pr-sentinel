@@ -1570,8 +1570,8 @@ class WatcherCase(unittest.TestCase):
 
     # -- a workflow run with no check row (re-run, 2026-11-04) -----------------
 
-    # A re-run takes every row of its workflow off the head until its jobs
-    # start, so the other workflows' rows are all that remain, all passing.
+    # A queued re-run can have no rows on the head, so the other workflows'
+    # rows are all that remain, all passing.
     RERUN_VIEW = "OPEN\tCLEAN\tmain\tabc1234def\thttps://github.com/o/r/pull/123\n"
     OTHER_WORKFLOW = "pass\tlint\thttps://github.com/o/r/actions/runs/11/job/1\n"
 
