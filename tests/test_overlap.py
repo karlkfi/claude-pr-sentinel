@@ -619,14 +619,14 @@ class OverlapDetection(unittest.TestCase):
         s = self.one_file(40)
         s.pr_list([(7, "other", ["app.py"])])
         s.pr_diff(7, "app.py", 40)
-        self.assertEqual(s.hits(), [[7, ["app.py"], True]])
+        self.assertEqual(s.hits(), [[7, ["app.py"], overlap.RANGED]])
 
     def test_four_lines_apart_still_overlaps(self):
         """Our -U0 range reaches 3 either side, theirs carries 3 of context."""
         s = self.one_file(40)
         s.pr_list([(7, "other", ["app.py"])])
         s.pr_diff(7, "app.py", 44)
-        self.assertEqual(s.hits(), [[7, ["app.py"], True]])
+        self.assertEqual(s.hits(), [[7, ["app.py"], overlap.RANGED]])
 
     def test_a_slow_probe_is_refused_rather_than_read_as_an_answer(self):
         """`hits` is the instrument every other test in this class trusts, so
@@ -640,7 +640,7 @@ class OverlapDetection(unittest.TestCase):
         s = self.one_file(40)
         s.pr_list([(7, "other", ["app.py"])])
         s.pr_diff(7, "app.py", 40)
-        self.assertEqual(s.hits(), [[7, ["app.py"], True]])
+        self.assertEqual(s.hits(), [[7, ["app.py"], overlap.RANGED]])
         s.slow_git()
         self.assertEqual(s.hits(allow_timeout=True), [],
                          "a timed-out probe must fail open, not raise")
@@ -654,7 +654,7 @@ class OverlapDetection(unittest.TestCase):
         path and must announce that rather than pass itself off as precise."""
         s = self.one_file(40)
         s.pr_list([(7, "other", ["app.py"])])
-        self.assertEqual(s.hits(), [[7, ["app.py"], False]])
+        self.assertEqual(s.hits(), [[7, ["app.py"], overlap.PATHED]])
 
     def test_only_three_diffs_are_fetched(self):
         s = self.one_file(40)
@@ -663,7 +663,7 @@ class OverlapDetection(unittest.TestCase):
             s.pr_diff(n, "app.py", 40)
         hits = s.hits()
         self.assertEqual([h[0] for h in hits], [1, 2, 3, 4])
-        self.assertEqual([h[2] for h in hits], [True, True, True, False],
+        self.assertEqual([h[2] for h in hits], [overlap.RANGED] * 3 + [overlap.PATHED],
                          "the fourth PR must be reported as path-only")
 
     def full_list(self, s):
@@ -676,7 +676,7 @@ class OverlapDetection(unittest.TestCase):
         s = self.one_file(40)
         self.full_list(s)
         s.pr_diff(7, "app.py", 40)
-        self.assertEqual(s.hits(), [[7, ["app.py"], True]])
+        self.assertEqual(s.hits(), [[7, ["app.py"], overlap.RANGED]])
 
     # --- silent (the direction that matters) ---
 
@@ -729,7 +729,7 @@ class OverlapDetection(unittest.TestCase):
     def test_a_real_edit_on_both_sides_still_overlaps(self):
         """The control: the same fixture fires once neither side renumbers."""
         self.assertEqual(self.citation_race("OURS", "THEIRS").hits(),
-                         [[7, ["Q1.md"], True]])
+                         [[7, ["Q1.md"], overlap.RANGED]])
 
     def test_our_edit_against_their_renumber_is_silent(self):
         """Their side is only a renumber, so it is not their work this branch
@@ -767,7 +767,7 @@ class OverlapDetection(unittest.TestCase):
         s.pr_list([(7, "other", ["app.py"])])
         s.pr_diff(7, "app.py", 40)
         hits = s.hits({"PR_SENTINEL_OVERLAP_IGNORE": "docs/*:app.py"})
-        self.assertEqual([n for n, _paths, _precise in hits], [7])
+        self.assertEqual([n for n, _paths, _basis in hits], [7])
 
     def test_gh_failing_is_a_missed_catch_not_a_deny(self):
         s = self.one_file(40)          # no pr_list fixture: `gh pr list` exits 1
@@ -803,6 +803,216 @@ class OverlapDetection(unittest.TestCase):
         self.assertEqual(overlap.overlapping_prs(tmp), [])
 
 
+class TrialMerge(unittest.TestCase):
+    """A head that is here gets merged, and the merge decides what proximity
+    only suspected. Every test but the fallbacks carries a real head commit,
+    because the range tests above carry none and so never reach the merge."""
+
+    MERGE_TREE_MISSING = textwrap.dedent(
+        """\
+        #!/usr/bin/env bash
+        # The git before 2.38, which has no `merge-tree --write-tree`.
+        [[ " $* " == *" merge-tree "* ]] && exit 129
+        exec {real} "$@"
+        """
+    )
+
+    def scenario(self, base_files, head_files):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", tmp])
+        return Scenario(tmp, base_files, head_files)
+
+    def beside(self, our_line, their_line, ours="OURS", theirs="THEIRS"):
+        """`feature` and `other`, each changing one line of one file, with the
+        PR's diff served at the line it really changed."""
+        s = self.scenario({"app.py": numbered(80)},
+                          {"app.py": numbered(80, our_line, ours)})
+        s.branch_off("other", {"app.py": numbered(80, their_line, theirs)})
+        s.pr_list([(7, "other", ["app.py"], s.oid("other"))])
+        s.pr_diff(7, "app.py", their_line)
+        return s
+
+    def test_edits_within_the_margin_that_merge_clean_are_silent(self):
+        """Three untouched lines apart: the ranges meet, git merges it."""
+        s = self.beside(40, 44)
+        self.assertEqual(s.hits(), [])
+
+    def test_the_same_edits_still_meet_when_no_merge_can_run(self):
+        """The control on the test above: without a head here the same two
+        edits are a range hit, so it was the merge that silenced them."""
+        s = self.beside(40, 44)
+        s.pr_list([(7, "other", ["app.py"])])
+        self.assertEqual(s.hits(), [[7, ["app.py"], overlap.RANGED]])
+
+    def test_a_conflict_is_denied(self):
+        s = self.beside(40, 40)
+        self.assertEqual(s.hits(), [[7, ["app.py"], overlap.MERGED]])
+
+    def test_the_same_edit_on_both_sides_is_denied(self):
+        """Git merges an identical edit clean, and it is the duplicate this
+        check exists for, so a clean merge alone cannot be the verdict."""
+        s = self.beside(40, 40, ours="SAME", theirs="SAME")
+        self.assertEqual(s.hits(), [[7, ["app.py"], overlap.MERGED]])
+
+    def test_the_same_edit_among_other_edits_is_denied(self):
+        same = numbered(80, 40, "SAME")
+        s = self.scenario({"app.py": numbered(80)},
+                          {"app.py": same.replace("line 70\n", "OURS\n")})
+        s.branch_off("other", {"app.py": same.replace("line 10\n", "THEIRS\n")})
+        s.pr_list([(7, "other", ["app.py"], s.oid("other"))])
+        s.pr_diff(7, "app.py", 40)
+        self.assertEqual(s.hits(), [[7, ["app.py"], overlap.MERGED]])
+
+    def stale_pr(self):
+        """`other` branched before `main` rewrote line 40 of `a.py`, so it
+        conflicts there against the fork point, whatever this branch did."""
+        s = self.scenario({"a.py": numbered(80), "b.py": numbered(80)}, {})
+        git(s.root, "checkout", "-q", "main")
+        git(s.root, "branch", "-D", "feature")
+        s.branch_off("other", {"a.py": numbered(80, 40, "OTHER"),
+                               "b.py": numbered(80, 20, "OTHER")})
+        s._write({"a.py": numbered(80, 40, "MAIN")})
+        git(s.root, "commit", "-qam", "main moves")
+        git(s.root, "update-ref", "refs/remotes/origin/main", "HEAD")
+        git(s.root, "checkout", "-q", "-b", "feature")
+        s.pr_list([(7, "other", ["a.py", "b.py"], s.oid("other"))])
+        s.fixture("pr_diff.7", textwrap.dedent(
+            """\
+            diff --git a/a.py b/a.py
+            --- a/a.py
+            +++ b/a.py
+            @@ -37,7 +37,7 @@
+            diff --git a/b.py b/b.py
+            --- a/b.py
+            +++ b/b.py
+            @@ -17,7 +17,7 @@
+            """))
+        return s
+
+    def test_a_conflict_the_fork_point_has_too_is_not_this_branchs(self):
+        s = self.stale_pr()
+        s._write({"a.py": numbered(80, 40, "MAIN").replace(
+            "line 44\n", "OURS\n")})
+        git(s.root, "commit", "-qam", "work")
+        self.assertEqual(s.hits(), [])
+
+    def test_a_stale_prs_other_path_can_still_be_denied(self):
+        """Discounting is per path: the stale conflict on `a.py` is dropped and
+        this branch's own conflict on `b.py` stands."""
+        s = self.stale_pr()
+        s._write({"a.py": numbered(80, 40, "MAIN").replace(
+                      "line 44\n", "OURS\n"),
+                  "b.py": numbered(80, 20, "OURS")})
+        git(s.root, "commit", "-qam", "work")
+        self.assertEqual(s.hits(), [[7, ["b.py"], overlap.MERGED]])
+
+    def test_a_merge_can_only_narrow_a_deny(self):
+        """`Q1.md` conflicts, but only on a renumbered citation the ranges
+        discount, and `app.py` is a range hit that merges clean. A deny taken
+        from the merge's own list would bring back the refusal the citation
+        rule removed."""
+        cited = "`app.py:%d:def f():`"
+        s = self.scenario({"Q1.md": numbered(80, 40, cited % 100),
+                           "app.py": numbered(80)},
+                          {"Q1.md": numbered(80, 40, cited % 131),
+                           "app.py": numbered(80, 40, "OURS")})
+        s.branch_off("other", {"Q1.md": numbered(80, 40, cited % 109),
+                               "app.py": numbered(80, 44, "THEIRS")})
+        self.assertEqual(
+            overlap.merge_conflicts(str(s.root), "feature", "other"), {"Q1.md"})
+        s.pr_list([(7, "other", ["Q1.md", "app.py"], s.oid("other"))])
+        s.fixture("pr_diff.7", textwrap.dedent(
+            """\
+            diff --git a/Q1.md b/Q1.md
+            --- a/Q1.md
+            +++ b/Q1.md
+            @@ -40,1 +40,1 @@
+            -{old}
+            +{new}
+            diff --git a/app.py b/app.py
+            --- a/app.py
+            +++ b/app.py
+            @@ -41,7 +41,7 @@
+            """).format(old=cited % 100, new=cited % 109))
+        self.assertEqual(s.hits(), [])
+
+    def test_a_pr_past_the_diff_cap_is_still_merged(self):
+        """The merge is local, so the three-diff cap does not bound it, and a
+        fourth PR need not rest on its path."""
+        s = self.scenario({"app.py": numbered(80)},
+                          {"app.py": numbered(80, 40, "OURS")})
+        prs = []
+        for n in (1, 2, 3, 4):
+            s.branch_off("other%d" % n,
+                         {"app.py": numbered(80, 40 + n * 10, "THEIRS")})
+            prs.append((n, "other%d" % n, ["app.py"], s.oid("other%d" % n)))
+            s.pr_diff(n, "app.py", 40)   # the ranges all claim a meet
+        s.pr_list(prs)
+        self.assertEqual(s.hits(), [])
+
+    def test_a_head_that_is_not_here_keeps_the_range_result(self):
+        s = self.beside(40, 44)
+        s.pr_list([(7, "other", ["app.py"], "0" * 40)])
+        self.assertEqual(s.hits(), [[7, ["app.py"], overlap.RANGED]])
+
+    def test_a_git_without_write_tree_keeps_the_range_result(self):
+        s = self.beside(40, 44)
+        shim = s.bin_dir / "git"
+        shim.write_text(self.MERGE_TREE_MISSING.format(real=shutil.which("git")),
+                        encoding="utf-8")
+        shim.chmod(0o755)
+        self.assertEqual(s.hits(), [[7, ["app.py"], overlap.RANGED]])
+
+    def test_a_revision_that_does_not_resolve_is_not_a_clean_merge(self):
+        """Exit 1 is conflicts and also this, so the status alone cannot say."""
+        s = self.beside(40, 44)
+        self.assertIsNone(overlap.merge_conflicts(str(s.root), "HEAD", "nope"))
+
+    def test_the_guard_allows_a_clean_merge(self):
+        s = self.beside(40, 44)
+        self.assertEqual(s.hits(), [])
+        self.assertEqual(s.guard("gh pr create --fill"), "")
+
+    def test_the_guard_denies_a_conflict(self):
+        out = self.beside(40, 40).guard("gh pr create --fill")
+        reason = json.loads(out)["hookSpecificOutput"][
+            "permissionDecisionReason"]
+        self.assertIn("#7 (app.py; a trial merge conflicts", reason)
+
+
+class DenyWording(unittest.TestCase):
+    """The reason has to say what the refusal rests on: a session told "edits
+    lines" about edits three lines away goes looking for a collision that is
+    not there, and one told nothing spends an override on what may merge."""
+
+    def reason(self, *bases):
+        return overlap.build_reason(
+            [(7 + i, ["app.py"], basis) for i, basis in enumerate(bases)])
+
+    def test_every_basis_opens_with_the_plugins_name(self):
+        for basis in overlap.BASIS_NOTE:
+            self.assertTrue(self.reason(basis).startswith("pr-sentinel: "))
+
+    def test_a_merged_hit_offers_no_fetch(self):
+        reason = self.reason(overlap.MERGED)
+        self.assertIn("a trial merge conflicts", reason)
+        self.assertNotIn("git fetch", reason)
+
+    def test_a_range_hit_claims_only_proximity(self):
+        reason = self.reason(overlap.RANGED)
+        self.assertIn("edits within six lines, not trial-merged", reason)
+        self.assertNotIn("edits lines", reason)
+
+    def test_an_undecided_hit_names_the_fetch_that_decides_it(self):
+        for basis in (overlap.RANGED, overlap.PATHED):
+            self.assertIn("git fetch origin pull/7/head", self.reason(basis))
+
+    def test_the_fetch_names_the_pr_no_merge_decided(self):
+        reason = self.reason(overlap.MERGED, overlap.RANGED)
+        self.assertIn("git fetch origin pull/8/head", reason)
+        self.assertIn("gh pr diff 7", reason)
+
+
 class StackedBranches(unittest.TestCase):
     """A branch built on another open PR. Its diff against the DEFAULT branch
     contains its parent's hunks by construction, so numbering it from there
@@ -836,7 +1046,7 @@ class StackedBranches(unittest.TestCase):
         s = self.stack(parent_line=5, our_line=60)
         s.pr_list([(7, "parent", ["app.py"])])
         s.pr_diff(7, "app.py", 5)
-        self.assertEqual(s.hits(), [[7, ["app.py"], True]])
+        self.assertEqual(s.hits(), [[7, ["app.py"], overlap.RANGED]])
 
     def test_a_declared_base_leaves_only_this_branchs_own_lines(self):
         s = self.stack(parent_line=5, our_line=60)
@@ -859,7 +1069,7 @@ class StackedBranches(unittest.TestCase):
         s.pr_list([(7, "parent", ["app.py"]), (9, "other", ["app.py"])])
         s.pr_diff(7, "app.py", 5)
         s.pr_diff(9, "app.py", 60)
-        self.assertEqual(s.hits(base="parent"), [[9, ["app.py"], True]])
+        self.assertEqual(s.hits(base="parent"), [[9, ["app.py"], overlap.RANGED]])
 
     def test_the_parents_lines_are_not_charged_to_this_branch(self):
         """Skipping the parent is not enough on its own. A third PR editing the
@@ -889,7 +1099,7 @@ class StackedBranches(unittest.TestCase):
         s = self.stack(parent_line=5, our_line=60)
         s.pr_list([(9, "other", ["app.py"])])
         s.pr_diff(9, "app.py", 60)
-        self.assertEqual(s.hits(base="main"), [[9, ["app.py"], True]])
+        self.assertEqual(s.hits(base="main"), [[9, ["app.py"], overlap.RANGED]])
 
     # --- a stack opened against the default branch ---
 
@@ -910,7 +1120,7 @@ class StackedBranches(unittest.TestCase):
                    (9, "other", ["app.py"], s.oid("other"))])
         s.pr_diff(7, "app.py", 5)
         s.pr_diff(9, "app.py", 60)
-        self.assertEqual(s.hits(), [[9, ["app.py"], True]])
+        self.assertEqual(s.hits(), [[9, ["app.py"], overlap.MERGED]])
 
     def test_an_inferred_stack_does_not_charge_the_parents_lines(self):
         s = self.stack(parent_line=5, our_line=60)
@@ -930,13 +1140,13 @@ class StackedBranches(unittest.TestCase):
         git(s.root, "commit", "-qm", "replayed")
         s.pr_list([(7, "parent", ["app.py"], s.oid("parent"))])
         s.pr_diff(7, "app.py", 5)
-        self.assertEqual(s.hits(), [[7, ["app.py"], True]])
+        self.assertEqual(s.hits(), [[7, ["app.py"], overlap.MERGED]])
 
     def test_a_second_name_on_the_same_commit_is_a_duplicate(self):
         s = self.stack(parent_line=5, our_line=60)
         s.pr_list([(7, "copy", ["app.py"], s.oid("feature"))])
         s.pr_diff(7, "app.py", 60)
-        self.assertEqual(s.hits(), [[7, ["app.py"], True]])
+        self.assertEqual(s.hits(), [[7, ["app.py"], overlap.MERGED]])
 
     def test_a_parent_that_moved_past_this_branch_still_collides(self):
         """The parent pushed again after this branch was cut, so its current
@@ -947,7 +1157,7 @@ class StackedBranches(unittest.TestCase):
         git(s.root, "checkout", "-q", "feature")
         s.pr_list([(7, "parent", ["app.py"], s.oid("parent"))])
         s.pr_diff(7, "app.py", 5)
-        self.assertEqual(s.hits(), [[7, ["app.py"], True]])
+        self.assertEqual(s.hits(), [[7, ["app.py"], overlap.MERGED]])
 
     def test_a_chain_is_numbered_from_its_nearest_parent(self):
         """Grandparent, parent, this branch, all open and all opened against
