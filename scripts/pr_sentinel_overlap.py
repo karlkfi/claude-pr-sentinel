@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Whether this branch edits lines an already-open pull request also changes.
+"""Whether this branch collides with an already-open pull request.
 
 Used by the PreToolUse guard to deny a `gh pr create` that would open a second
 PR over the same work. Review is an expensive place to discover that two
@@ -24,6 +24,17 @@ in that ancestor and their ranges are comparable. Each range is widened by the
 three lines of context a hunk carries, so edits within six lines meet and edits
 seven apart do not. The false-positive direction carries the weight: an overlap
 reported where there is none sends a session to fold a branch that was fine.
+
+**A trial merge decides what the ranges suspect.** Six lines is a proximity
+guess, and two branches adding separate blocks beside each other merge cleanly.
+So a suspect whose head commit is here is merged with `git merge-tree`, and the
+deny stands only on a path where that merge conflicts and the fork point's does
+not, or where both sides made one identical edit. Git merges an identical edit
+clean, and it is the duplicate this check exists for. Only a path the ranges
+already suspected can stand, so a renumbered citation stays discounted and the
+merge can only ever narrow a deny. Nothing is fetched: a head known only to
+GitHub, or a git older than 2.38, leaves the range result, and the deny says so
+and names the fetch that lets a re-run decide it.
 
 **A stacked branch is numbered from its own base.** A create that declares
 `--base <another open PR's head>` is numbered from that head rather than from
@@ -62,6 +73,11 @@ GH_FILES_CAP = 100       # files `gh pr list --json files` returns per PR
 FALLBACK_BASE_REF = 'origin/main'
 
 TIMED_OUT = 'timed out'  # a `capture()` status: ran, and blew its budget
+
+# What a hit rests on, weakest last. `build_reason` words the deny from it.
+MERGED = 'merged'        # a trial merge conflicts, or both made one edit
+RANGED = 'ranged'        # edits within six lines, and no trial merge ran
+PATHED = 'pathed'        # a shared path alone: no diff, no trial merge
 
 HUNK_RE = re.compile(r'^@@ -([0-9]+)(?:,([0-9]+))? \+')
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
@@ -220,9 +236,10 @@ def is_repoint(removed, added):
     return bool(removed) and removed != added and norm(removed) == norm(added)
 
 
-def parse_hunks(diff, widen=True):
-    """{path: [(start, end)]} from a unified diff, in pre-image line numbers.
-    A hunk that only renumbers citations is left out — see `is_repoint`.
+def parse_edits(diff, widen=True):
+    """[(path, (start, end), removed, added)] from a unified diff, in pre-image
+    line numbers. A hunk that only renumbers citations is left out — see
+    `is_repoint`.
 
     A `--- ` line only names a file inside a header run, because a removed line
     carries a `-` of its own: an SQL comment `-- DROP` comes out of the diff as
@@ -234,11 +251,11 @@ def parse_hunks(diff, widen=True):
     would take every hunk out of the count and read as a PR that changes
     nothing.
     """
-    ranges, path, in_header, hunk = {}, '', False, None
+    edits, path, in_header, hunk = [], '', False, None
 
     def flush():
         if hunk and not is_repoint(hunk[2], hunk[3]):
-            ranges.setdefault(hunk[0], []).append(hunk[1])
+            edits.append(hunk)
 
     for line in ANSI_RE.sub('', diff).splitlines():
         if line.startswith('diff --git '):
@@ -261,11 +278,24 @@ def parse_hunks(diff, widen=True):
         elif hunk and not in_header and line[:1] in '-+':
             hunk[2 if line[0] == '-' else 3].append(line[1:])
     flush()
+    return edits
+
+
+def by_path(edits):
+    """{path: [(start, end)]} from `parse_edits`."""
+    ranges = {}
+    for path, span, _removed, _added in edits:
+        ranges.setdefault(path, []).append(span)
     return ranges
 
 
-def changed_ranges(root, old, new):
-    """What changed between two revisions, or None.
+def parse_hunks(diff, widen=True):
+    """{path: [(start, end)]} from a unified diff — see `parse_edits`."""
+    return by_path(parse_edits(diff, widen))
+
+
+def changed_edits(root, old, new):
+    """The edits between two revisions, or None.
 
     `-U0` so a hunk covers only the lines that moved; the context comes back in
     `hunk_range`, which is where its width is stated once. The prefixes are
@@ -274,11 +304,64 @@ def changed_ranges(root, old, new):
     """
     out = git(root, 'diff', '-U0', '--no-color', '--no-ext-diff',
               '--src-prefix=a/', '--dst-prefix=b/', old, new)
-    return None if out is None else parse_hunks(out)
+    return None if out is None else parse_edits(out)
+
+
+def changed_ranges(root, old, new):
+    """What changed between two revisions, or None."""
+    edits = changed_edits(root, old, new)
+    return None if edits is None else by_path(edits)
 
 
 def ranges_meet(mine, theirs):
     return any(a[0] <= b[1] and b[0] <= a[1] for a in mine for b in theirs)
+
+
+def merge_conflicts(root, ours, theirs):
+    """The paths a trial merge conflicts on, or None if it could not run.
+
+    Exit 1 means conflicts, and also a revision that does not resolve, so only
+    the tree id leading the output tells them apart. The merge writes the
+    resulting objects into the repository's own store, unreferenced until `git
+    gc` takes them; it moves no ref and touches no working tree.
+    """
+    status, out = capture(('git', '-C', root, 'merge-tree', '--write-tree',
+                           '--name-only', '--no-messages', '-z', ours, theirs),
+                          root)
+    fields = out.split('\0')
+    if status not in (0, 1) or not fields[0]:
+        return None
+    return {f for f in fields[1:] if f}
+
+
+def same_edits(root, fork, tip, head):
+    """The paths where this branch and `head` made one identical edit."""
+    mine = changed_edits(root, fork, tip)
+    theirs = changed_edits(root, fork, head)
+    if not mine or not theirs:
+        return set()
+
+    def keys(edits):
+        return {(p, span, tuple(rm), tuple(add)) for p, span, rm, add in edits}
+
+    return {key[0] for key in keys(mine) & keys(theirs)}
+
+
+def collisions(root, fork, tip, head):
+    """The paths where landing this branch beside `head` collides, or None when
+    no trial merge can say — the head is not here, or git would not try.
+
+    A conflict the fork point has as well is not this branch's: that PR is stale
+    against the base, and would conflict on it with or without this branch.
+    """
+    if not head or not resolves(root, head):
+        return None
+    conflicts = merge_conflicts(root, tip, head)
+    if conflicts is None:
+        return None
+    if conflicts:
+        conflicts -= merge_conflicts(root, fork, head) or set()
+    return conflicts | same_edits(root, fork, tip, head)
 
 
 def is_ignored(path, patterns):
@@ -386,15 +469,14 @@ def built_on(root, prs, branch, tip, mine):
 
 
 def overlapping_prs(cwd, declared_base='', head='', repo=''):
-    """[(number, paths, precise)] for open PRs on this branch's own lines, or [].
+    """[(number, paths, basis)] for open PRs this branch collides with, or [].
 
     `head` is the branch the create opens, when the command names one; empty
     means the checked-out branch. `repo` is the `--repo` it opens in; empty
     means the one `gh` resolves here.
 
-    `precise` is False when the PR's diff was not fetched — the cap was reached,
-    or the call failed — and the entry rests on a shared path alone. The deny
-    says so rather than passing it off as a range match.
+    `basis` says what the entry rests on — `MERGED`, `RANGED` or `PATHED` — and
+    the deny words it accordingly rather than passing a guess off as a finding.
     """
     root = repo_root(cwd)
     if root is None:
@@ -409,10 +491,10 @@ def overlapping_prs(cwd, declared_base='', head='', repo=''):
         if not branch:
             return []                    # detached HEAD: nothing to compare
     base = base_ref(root, declared_base)
-    fork = git(root, 'merge-base', tip, base)
-    if fork is None or not fork.strip():
+    fork = (git(root, 'merge-base', tip, base) or '').strip()
+    if not fork:
         return []
-    mine = changed_ranges(root, fork.strip(), tip)
+    mine = changed_ranges(root, fork, tip)
     if not mine:
         return []                        # nothing committed yet, or git said no
     prs = open_prs(root, repo)
@@ -427,7 +509,8 @@ def overlapping_prs(cwd, declared_base='', head='', repo=''):
     if not stacked:
         found = built_on(root, prs, branch, tip, mine)
         if found:
-            mine = changed_ranges(root, found[0], tip)
+            fork = found[0]
+            mine = changed_ranges(root, fork, tip)
             if not mine:
                 return []
             inherited = found[1]
@@ -453,24 +536,47 @@ def overlapping_prs(cwd, declared_base='', head='', repo=''):
             shared = [p for p in shared if p in listed_paths(pr)[0]]
         if not shared:
             continue
-        hits.append((pr.get('number'), shared, theirs is not None))
+        basis = RANGED if theirs is not None else PATHED
+        collided = collisions(root, fork, tip, pr.get('headRefOid'))
+        if collided is not None:
+            shared, basis = [p for p in shared if p in collided], MERGED
+        if shared:
+            hits.append((pr.get('number'), shared, basis))
     return hits
+
+
+BASIS_NOTE = {
+    MERGED: 'a trial merge conflicts, or both make the same edit',
+    RANGED: 'edits within six lines, not trial-merged',
+    PATHED: 'shared path only, diff not fetched, not trial-merged',
+}
 
 
 def build_reason(prs):
     """The deny reason. Names each PR by number and the paths it shares — never
-    its title, which its author writes."""
-    parts = ['#%s (%s%s)' % (number, ', '.join(paths),
-                             '' if precise else
-                             '; shared path only, diff not fetched')
-             for number, paths, precise in prs]
+    its title, which its author writes.
+
+    An entry no trial merge decided gets the fetch that lets a re-run decide it.
+    That is the model's to run, and spends no override on what may merge clean.
+    """
+    parts = ['#%s (%s; %s)' % (number, ', '.join(paths), BASIS_NOTE[basis])
+             for number, paths, basis in prs]
     first = prs[0][0]
+    untried = [number for number, _paths, basis in prs if basis != MERGED]
+    fetch = (
+        f'What was not trial-merged may still merge clean: run '
+        f'`git fetch origin pull/{untried[0]}/head` (for each such PR) and '
+        f're-run the create, which trial-merges a head it has and allows a '
+        f'clean merge.\n'
+    ) if untried else ''
     return (
-        f'pr-sentinel: refusing `gh pr create` — this branch edits lines an '
-        f'open PR already changes: {"; ".join(parts)}. That is duplicated or '
-        f'mutually invalidating work, and review is an expensive place to find '
-        f'it. Read that diff first (`gh pr diff {first}`), then either fold '
-        f'this branch into that one or narrow it to what does not overlap.\n'
+        f'pr-sentinel: refusing `gh pr create` — this branch collides with an '
+        f'open PR: {"; ".join(parts)}.\n'
+        f'{fetch}'
+        f'A real collision is duplicated or mutually invalidating work, and '
+        f'review is an expensive place to find it. Read that diff first '
+        f'(`gh pr diff {first}`), then either fold this branch into that one '
+        f'or narrow it to what does not overlap.\n'
         f'If the overlap is known and deliberate, re-run with an inline '
         f'PR_SENTINEL_OVERRIDE=<reason> prefix on the command itself '
         f'(PR_SENTINEL_OVERRIDE="why this once" gh pr create …).\n'

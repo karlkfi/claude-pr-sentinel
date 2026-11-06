@@ -151,6 +151,19 @@ apart do not. `gh pr diff` has no `-U0`, so the PR's side arrives with that
 context already counted inside the hunk and is *not* widened again — doing so
 would stretch its reach to nine lines and quietly undo the narrowing.
 
+Ranges still measure proximity, not collision, so where the PR's head is local
+`git merge-tree` decides each suspect. Proximity alone refused creates git merged
+cleanly, and because the override is refused in some auto-mode sessions each
+false positive could cost a human approval. Three rules keep the merge honest. A
+conflict the fork point has as well is the PR's staleness rather than this
+branch's. An identical edit counts despite merging clean, since that is the
+duplicate the check exists for. The verdict can only narrow the range result,
+which keeps the citation and ignore-list discounts. A clean merge is silent, not
+advisory: the clean-merging denies whose outcome was recorded were all overridden
+rather than folded. The cost is that two rewrites of one function in non-touching
+hunks now pass. Nothing is fetched, because a head known only to GitHub is reachable by the
+deny's own `git fetch` line, which the model can run and a hook should not.
+
 This is the one place a hook talks to GitHub, so the field list is the security
 surface: `number`, `headRefName`, `headRefOid`, `files`, and the diffs of at most three PRs
 that already share a path. `files` stops at 100 paths, alphabetically, so a PR

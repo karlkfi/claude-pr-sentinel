@@ -43,12 +43,12 @@ Fires on a `Bash` command the session is *about to run*. Four branches:
   host isn't CI polling under any reading, and this hook has no business
   refusing it.
 
-* **Overlap deny** — if the command is a `gh pr create` and this branch edits
-  lines an already-open PR also changes, it returns a `deny` naming that PR and
-  the shared paths. Two branches rewriting the same function is duplicated or
-  mutually invalidating work, and review is an expensive place to discover it.
-  Compared as LINE RANGES, not paths, so sharing a file is not a finding; see
-  `pr_sentinel_overlap`. Gated by `PR_SENTINEL_OVERLAP_ENABLED` (default on;
+* **Overlap deny** — if the command is a `gh pr create` and this branch collides
+  with an already-open PR, it returns a `deny` naming that PR and the shared
+  paths. Two branches rewriting the same function is duplicated or mutually
+  invalidating work, and review is an expensive place to discover it. Suspected
+  from LINE RANGES, not paths, and decided by a trial merge where that PR's head
+  is here; see `pr_sentinel_overlap`. Gated by `PR_SENTINEL_OVERLAP_ENABLED` (default on;
   `0`/`false` disables) and off under `PR_SENTINEL_DISABLE=1`. Unlike the poll
   deny this one applies to a backgrounded call too — backgrounding a create
   still opens the PR, so it is not the fix here.

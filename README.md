@@ -86,7 +86,9 @@ advisory nudge, a deny is *enforced* — the command never runs.
 | `bash …/pr-sentinel-watch.sh N` (the plugin's own watcher), optionally with leading `PR_SENTINEL_*=…` assignments | **allow** — auto-approved (no base Bash prompt), gated by `PR_SENTINEL_AUTOALLOW` |
 | the same launch with any **other** leading assignment (`BASH_ENV=…`, `PATH=…`, `GH_TOKEN=…`) | allow (deferred — not a recognised shape, so it takes the base Bash prompt) |
 | the same launch for a PR this session is **already watching** | **deny** — one watcher is enough; the reason names the `TaskStop` call that frees the PR for a fresh one |
-| `gh pr create` on a branch editing lines an **open PR already changes** | **deny** — names that PR's number and the shared paths (see [Overlapping pull requests](#overlapping-pull-requests)) |
+| `gh pr create` on a branch that **conflicts in a trial merge** with an open PR, or makes one of its edits again | **deny** — names that PR's number and the paths (see [Overlapping pull requests](#overlapping-pull-requests)) |
+| `gh pr create` with edits within six lines of an open PR's, whose head is not in this clone | **deny** — says it was not trial-merged, and names the `git fetch` after which a re-run decides it |
+| `gh pr create` with edits within six lines of an open PR's that merge clean | allow (proximity was only the suspicion, and the trial merge settled it) |
 | `gh pr create` sharing a *file* with an open PR, but edits 7+ lines apart | allow (a shared file is not a finding — the comparison is line ranges) |
 | the same create submitted with `run_in_background` | **deny** — backgrounding still opens the PR, so it is not the fix here |
 | `gh pr create --help` · `gh pr list` · `gh pr view` · `gh pr edit` | allow (opens no PR) |
@@ -137,8 +139,8 @@ independently.
 
 ### Overlapping pull requests
 
-The last thing the PreToolUse hook does is check, at `gh pr create`, whether an
-already-open PR changes the same lines this branch does. Two branches rewriting
+The last thing the PreToolUse hook does is check, at `gh pr create`, whether
+this branch collides with an already-open PR. Two branches rewriting
 one function is duplicated or mutually invalidating work, and review is an
 expensive place to discover it — one of the two is going to be rewritten or
 thrown away, and both have already been written by then.
@@ -151,6 +153,22 @@ lines of context a hunk carries. Edits within six lines meet; edits seven apart
 do not. The false-positive direction is the one that matters — an overlap
 reported where there is none sends you to fold a branch that was fine — so a
 shared path with no shared range is silent.
+
+**A trial merge decides what the ranges suspect.** Six lines is a guess, and two
+branches adding separate blocks beside each other merge cleanly. So where the
+PR's head commit is in this clone, `git merge-tree` (git 2.38 or later) merges it
+with your branch, and the deny stands only on a path where that conflicts and
+merging your fork point does not, or where both sides made one identical edit.
+The fork-point comparison keeps a PR that is already stale from being charged to
+you, and the identical edit is there because git merges it clean although it is
+the duplicate this check exists for. A merge can only narrow a deny: a path the
+ranges did not suspect never becomes a finding from it.
+
+Clean means silent, so two branches that rewrite one function in hunks that do
+not touch are no longer caught here. That is the trade for not refusing work git
+would merge. Nothing is fetched for this. If the head is not in this clone, or
+git is too old, the range result stands and the denial says so, naming the
+`git fetch origin pull/<N>/head` after which a re-run decides it.
 
 **A renumbered citation is not an edit.** A doc that quotes `file.py:1063:…`
 goes stale whenever a branch moves that line, so two unrelated branches each
@@ -170,8 +188,9 @@ after" note. Either way the branch is numbered from the parent, the parent is
 skipped as inherited work rather than duplicated, and every other open PR is
 still checked. A branch that carries the parent's *change* without its commit —
 the same work written again — is still compared, because that is the duplicate
-the check exists for. So is a branch cut before the parent's latest push:
-restack onto its current head first. If a declared parent has since been
+the check exists for. So is a branch cut before the parent's latest push, whose
+inherited hunks read as repeats of the parent's until you restack onto its
+current head. If a declared parent has since been
 rebased and you have not restacked onto it, the two sides are numbered in
 different pre-images and no comparison between them means anything, so the
 check declines outright rather than guess.
@@ -192,13 +211,15 @@ a shared path shows only in the diff. It reads code, never prose — no PR body,
 comments, and not even the PR title, which its author writes and which the
 denial would drop straight into the session's context. A denial names the PR
 number and the shared paths, and points at `gh pr diff <N>` so you read the
-overlap yourself. `PRIVACY.md` has the full account.
+overlap yourself. The trial merge reads nothing from GitHub, though it leaves
+unreferenced objects in your repository's store until `git gc` takes them.
+`PRIVACY.md` has the full account.
 
 Every probe fails silent. No `gh`, no credentials, a base ref that won't
 resolve, a rate-limited token, a slow call: each costs a missed catch, never a
 blocked create. When the three-diff cap is reached the remaining entries rest on
-a shared path alone, and the denial says so rather than passing itself off as a
-range match.
+a shared path alone unless a trial merge decides them, and the denial says which
+each one rests on rather than passing a guess off as a finding.
 
 Turn it off with `PR_SENTINEL_OVERLAP_ENABLED=false` — which also stops the two
 queries being made at all. For the file every branch edits by construction (a
@@ -564,7 +585,7 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_BASE_CHECK` | (on) | compare each failing check against the same workflow's latest run on the base branch, and report `base_failure` instead of `check_failure` when the base is already red; `0`/`false`/empty wakes on every failure as before (see [Failures inherited from the base branch](#failures-inherited-from-the-base-branch)) |
 | `PR_SENTINEL_BACKOFF_NUM` / `PR_SENTINEL_BACKOFF_DEN` | `3` / `2` | backoff multiplier once checks have settled (interval × num ÷ den each poll) |
 | `PR_SENTINEL_AUTOALLOW` | (on) | auto-approve the plugin's own watcher launch so it isn't prompted by the base Bash permission; `0`/`false`/empty keeps the prompt (see below) |
-| `PR_SENTINEL_OVERLAP_ENABLED` | (on) | deny a `gh pr create` whose branch edits lines an open PR already changes; `false`/`0`/empty turns the check off, and with it the only GitHub query any hook makes (see [Overlapping pull requests](#overlapping-pull-requests)) |
+| `PR_SENTINEL_OVERLAP_ENABLED` | (on) | deny a `gh pr create` whose branch collides with an open PR; `false`/`0`/empty turns the check off, and with it the only GitHub query any hook makes (see [Overlapping pull requests](#overlapping-pull-requests)) |
 | `PR_SENTINEL_OVERLAP_IGNORE` | (unset) | comma-separated glob patterns the overlap check discounts — for a file every branch edits by construction, e.g. `CHANGELOG.md,docs/roadmap.md` |
 | `PR_SENTINEL_BASE_REF` | (`origin/HEAD`, else `origin/main`) | the ref the overlap check forks this branch from when computing its changed lines. One value for every branch in the repo, so a `--base` on the `gh pr create` itself wins over it, and so does an open PR whose head this branch is [stacked](#overlapping-pull-requests) on |
 | `PR_SENTINEL_PROBE_TIMEOUT_SCALE` | `1` | whole-number multiplier on the overlap check's per-probe subprocess budget (5s). Raise it on a machine loaded enough that probes blow the cap and the check silently fails open. **Floored at 1**: no value set here can shorten a budget, because a shorter one only widens that fail-open. Anything but a whole number above 1 falls back to `1`, and the test suite reads the same knob for its own subprocess bounds. Unrelated to `PR_SENTINEL_TIMEOUT`, which is the whole watch's budget |

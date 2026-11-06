@@ -63,7 +63,7 @@ GUARD_BUILDERS = {
     "build_duplicate_reason": lambda: guard.build_duplicate_reason(
         "41", ["task-1"]),
     "overlap.build_reason": lambda: overlap.build_reason(
-        [("41", ["src/synthetic.py"], True)]),
+        [("41", ["src/synthetic.py"], overlap.RANGED)]),
 }
 
 GUARD_CATEGORIES = {

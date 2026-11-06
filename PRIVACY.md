@@ -68,7 +68,8 @@ report).
   the auto-allow and the duplicate deny make no network call at all.
 - **The overlap check talks to GitHub**, through your already-authenticated
   `gh` CLI, and only when you run a `gh pr create`. It reads your local repo
-  with `git diff` / `git merge-base` / `git rev-parse` to learn which lines the
+  with `git diff` / `git merge-base` / `git rev-parse` / `git merge-tree` to learn
+  which lines the
   branch being opened changes — the `--head` the create names, else the branch a
   `git checkout`/`git switch` earlier in the same command moves to, else the
   checked-out one — and whether this branch is built on top of the `--base` the
@@ -80,6 +81,12 @@ report).
     that already share a path with your branch, to compare line ranges rather
     than filenames. `gh` lists at most 100 paths per PR, so a PR listing 100
     is fetched too: the paths past that cut are only in its diff.
+- **The overlap check trial-merges locally.** Where an open PR's head commit is
+  already in your clone, `git merge-tree` merges it with your branch and with
+  your fork point. It reads your clone and nothing from GitHub, and fetches
+  nothing. It does write: git stores the merge's trees and blobs as unreferenced
+  objects in your repository's own object store, until `git gc` removes them. It
+  moves no ref and touches no working tree.
 - That field list is the whole of it. The check **never** requests the PR body,
   review comments, issue comments, or even the PR **title** — a title is
   written by its author, and the denial message goes straight into your
@@ -89,8 +96,8 @@ report).
   ref, or a slow call costs a missed catch, never a blocked command. Set
   `PR_SENTINEL_OVERLAP_ENABLED=false` to switch the check — and its two
   queries — off entirely.
-- Writes nothing to disk, and emits only its allow/deny decision to standard
-  output.
+- Writes nothing to disk apart from those unreferenced git objects, and emits
+  only its allow/deny decision to standard output.
 
 ## The watcher (`scripts/pr-sentinel-watch.sh`)
 
