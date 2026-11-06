@@ -560,6 +560,22 @@ timestamp is the instrument, since a commit's own timestamp is mostly the local
 gate that ran before the push) and inside the incident band, so a run that never
 starts is reported in ten minutes instead of waiting out the watch budget.
 
+A re-run makes the rows absent for only one workflow, which neither guard
+reaches: the set is not empty, so `unchecked` does not engage, and it is not
+stale, so a second poll sees the same thing. Measured 2026-11-04 during an
+Actions incident: `gh run rerun --failed` on a run with 56 check rows left the
+head showing the other workflows' 14, all green, with the merge state `CLEAN`;
+`ready` fired 36 seconds later and the attempt then failed. Nothing `gh pr checks`
+or `mergeStateStatus` returns says a gate is missing, so a green poll also reads
+the head's unfinished workflow runs, and any count above zero clears that poll's
+green. It is a read and not a timer, so it answers for however long the queue
+takes. The other commit-level read, `check-suites`, was rejected because an
+installed app can leave a suite open with nothing in it (on 2026-11-06, `cli/cli`
+had two still `queued` with no check runs, three days old), which would hold
+`ready` forever on a repo with such an app. A failed read does not hold, since a
+token without Actions access would fail it on every poll; `ready` names the gap
+instead. Stuck runs end in `timeout`, as `UNKNOWN` does.
+
 The third failure in the family is `UNKNOWN` (#40). The guard #29 left behind
 excluded exactly one value — `MERGE != BLOCKED` — and `UNKNOWN` satisfies it,
 but `UNKNOWN` is not a merge state: it is GitHub saying it has not computed one

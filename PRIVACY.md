@@ -113,6 +113,11 @@ report).
     removing it deliberately. Read once, when that event is reported, never
     per poll. The event's own free-form text is not requested;
   - the PR's check results (`gh pr checks`);
+  - on a poll where every check is green, how many workflow runs on the PR's
+    head commit have not finished (`actions/runs?head_sha=`), so a queued re-run
+    with no check row yet cannot read as green. The response also carries each
+    run's name, commit message and actor; `gh`'s own query reduces it to one
+    number on your machine, and **none** of the rest reaches the watcher;
   - a failing check's workflow run — its conclusion, and its workflow id and
     that workflow's latest completed run on the **base branch**, to tell a
     failure the PR caused from one it inherited — only on a failure. Of that

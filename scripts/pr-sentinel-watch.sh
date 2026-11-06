@@ -174,6 +174,12 @@ UNCHECKED_REPORTED=0
 # about the checks, so it leaves every streak and clock above as it found them.
 CHECKS_UNREAD=0
 
+# This poll's read of the head's workflow runs (see read_unfinished_runs). Green
+# polls only, and both clear at the top of every poll, so neither outlives the
+# poll that set it.
+RUNS_UNFINISHED=0
+RUNS_UNREAD=0
+
 # When the current run of pending checks was first seen, or 0 when the last poll
 # saw nothing pending. This is what paces a pending poll; clearing it on a poll
 # with no pending checks is what makes a push restart the clock.
@@ -449,6 +455,39 @@ gh_checks_fetch() {
 	esac
 	warn "gh pr checks failed (exit ${rc}); this poll decides nothing about the checks"
 	return 1
+}
+
+# Count this head's workflow runs that have not finished. A re-run takes every
+# row of its workflow off the head until its jobs start, so `gh pr checks` shows
+# the other workflows alone, all passing, and nothing says a gate is missing.
+# The run itself stays listed here as `queued`. Only `status` is read: a run's
+# name comes from a workflow file a fork's pull request can edit. `check-suites`
+# would see the same runs, but also an empty suite an installed app leaves open.
+gh_unfinished_runs() {
+	gh api "repos/${QUEUE_OWNER}/${QUEUE_REPO}/actions/runs?head_sha=${HEAD_SHA}&per_page=100" \
+		-q '[.workflow_runs[] | select(.status != "completed")] | length'
+}
+
+# Set RUNS_UNFINISHED, or RUNS_UNREAD when the read failed. A failed read does
+# not hold: a token without Actions access fails it on every poll, which would
+# turn each `ready` into a timeout. `ready` says it could not check instead.
+read_unfinished_runs() {
+	local out
+	[[ -n "$QUEUE_OWNER" && -n "$HEAD_SHA" ]] || return 0
+	if out=$(gh_unfinished_runs 2>/dev/null) && [[ "$out" =~ ^[0-9]+$ ]]; then
+		RUNS_UNFINISHED="$out"
+	else
+		RUNS_UNREAD=1
+		warn "could not read this head's workflow runs; a run with no check row yet is not ruled out"
+	fi
+}
+
+# The caveat `ready` and `ready_watching` carry when that read failed.
+runs_unread_note() {
+	(( RUNS_UNREAD == 1 )) || return 0
+	echo
+	echo "Workflow runs on this head could not be read, so a run that has no check"
+	echo "row yet is not ruled out. Confirm with: gh run list --commit ${HEAD_SHA}"
 }
 
 # Extract a GitHub Actions run id from a check link like
@@ -1150,6 +1189,7 @@ emit_ready() {
 	echo "All checks are green and the PR has no merge conflict. Nothing left to"
 	echo "babysit. Next action: hand back to a human for merge review. Do NOT"
 	echo "auto-merge."
+	runs_unread_note
 	exit 0
 }
 
@@ -1166,6 +1206,7 @@ notice_ready_watching() {
 	echo
 	echo "All checks are green and the PR has no merge conflict. Hand it back to a"
 	echo "human for merge review; do NOT auto-merge."
+	runs_unread_note
 	echo
 	echo "This is a NOTICE, not a wake-up: PR_SENTINEL_WATCH_UNTIL=closed, so the"
 	echo "watcher keeps polling and will exit (waking this session) only if the PR"
@@ -1297,6 +1338,11 @@ emit_timeout() {
 		echo "nothing ran, so 'ready' was withheld — it would have claimed checks"
 		echo "that do not exist. Verify with 'gh run list --commit <head>'."
 	fi
+	if (( RUNS_UNFINISHED > 0 )); then
+		echo "Its check rows were green, but ${RUNS_UNFINISHED} workflow run(s) on this head had not"
+		echo "finished, so 'ready' was withheld — a queued re-run has no row until its"
+		echo "jobs start. Verify with 'gh run list --commit <head>'."
+	fi
 	if (( QUEUED_SEEN == 1 )); then
 		echo "The PR held a merge-queue entry when last confirmed; if it is still"
 		echo "queued, the queue is merging it on its own."
@@ -1420,6 +1466,8 @@ main() {
 		fi
 
 		local checks=""
+		RUNS_UNFINISHED=0
+		RUNS_UNREAD=0
 		if (( QUEUED_SEEN == 1 )); then
 			# The queue owns the PR — it is queued now, or its entry just
 			# vanished and the dequeue awaits confirmation. Branch-state
@@ -1550,6 +1598,18 @@ main() {
 					green=1
 				elif [[ "$MERGE" == "CLEAN" ]]; then
 					unchecked=1
+				fi
+			fi
+
+			# Green rows do not cover a run that has no row. Asked only on a poll
+			# that is otherwise green, and clearing `green` resets the streak, so
+			# `ready` needs its full count of polls again once the run finishes.
+			# See docs/DESIGN.md.
+			if (( green == 1 )); then
+				read_unfinished_runs
+				if (( RUNS_UNFINISHED > 0 )); then
+					green=0
+					warn "${RUNS_UNFINISHED} workflow run(s) on this head had not finished; withholding ready"
 				fi
 			fi
 
