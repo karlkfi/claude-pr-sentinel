@@ -92,6 +92,11 @@ report).
   written by its author, and the denial message goes straight into your
   session's context. A denial names the PR **number** and the shared **paths**
   from your own diff, nothing else.
+- It reads the create's own `--title` and `--body` from the command string for
+  a `Replaces #N` / `Supersedes #N` / `Closes #N` naming an open PR this one
+  replaces, and leaves that PR out of the comparison. That is text you are
+  about to publish, read from the command and nowhere else: a `--body-file` is
+  not opened.
 - Every probe **fails silent**: no `gh`, no credentials, an unresolvable base
   ref, or a slow call costs a missed catch, never a blocked command. Set
   `PR_SENTINEL_OVERLAP_ENABLED=false` to switch the check — and its two

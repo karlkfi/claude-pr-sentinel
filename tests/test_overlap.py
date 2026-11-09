@@ -1344,6 +1344,92 @@ class GuardDeny(unittest.TestCase):
         self.assertIn("pr-sentinel-watch.sh", reason)
 
 
+class ReplacedPrs(unittest.TestCase):
+    """A create whose own title or body says it replaces an open PR is not
+    denied over that PR — and is still denied over any PR it does not name.
+
+    The measured case: three Dependabot PRs, each a slice of one bump over the
+    same files, folded into one replacement whose body opened "Replaces
+    Dependabot #2252, #2253 and #2254". The only way past the deny was an
+    override prefix, which auto mode's classifier refused, so the session closed
+    the three PRs first — public state changed to satisfy a hook."""
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", tmp])
+        self.s = Scenario(tmp, {"app.py": numbered(80)},
+                          {"app.py": numbered(80, 40, "OURS")})
+        self.s.pr_list([(7, "seven", ["app.py"]), (8, "eight", ["app.py"])])
+        self.s.pr_diff(7, "app.py", 40)
+        self.s.pr_diff(8, "app.py", 41)
+
+    def decision(self, command):
+        out = self.s.guard(command)
+        return json.loads(out)["hookSpecificOutput"] if out else None
+
+    def test_the_parse(self):
+        cases = {
+            "Replaces Dependabot #2252, #2253 and #2254 with one PR":
+                {2252, 2253, 2254},
+            "supersedes #9": {9},
+            "Superseding #9": {9},
+            "Closes #4. See #5 for context": {4},
+            "Closes #4; #5 is unrelated": {4},
+            "bump to v0.37.2, replacing #3": {3},
+            "line one\nReplaces #1\nsee #2": {1},
+            "Replaces o/r#5 and x#6": set(),
+            "Fixes #5": set(),
+            "See #5": set(),
+            "": set(),
+        }
+        for text, want in cases.items():
+            self.assertEqual(guard.replaced_prs(text), want, text)
+
+    def test_title_and_body_in_every_spelling(self):
+        for cmd in ('gh pr create --title "Supersedes #7" --body x',
+                    'gh pr create -t x -b "Replaces #7"',
+                    'gh pr create --body="Replaces #7" --fill',
+                    "gh pr create -b'Replaces #7'"):
+            self.assertEqual(guard.pr_create_replaced(cmd), {7}, cmd)
+
+    def test_a_heredoc_body_is_read(self):
+        """The usual shape a session writes a body in. The tokenizer hands the
+        substitution back as one word, text and all."""
+        cmd = ('gh pr create --title t --body "$(cat <<\'EOF\'\n'
+               'Replaces #7 and #8 with one PR.\nEOF\n)"')
+        self.assertEqual(guard.pr_create_replaced(cmd), {7, 8})
+
+    def test_a_body_file_is_not_read(self):
+        self.assertEqual(
+            guard.pr_create_replaced("gh pr create --body-file Replaces#7.md"),
+            set())
+
+    def test_text_outside_the_create_does_not_count(self):
+        self.assertEqual(guard.pr_create_replaced(
+            'git commit -m "Replaces #7" && gh pr create --fill'), set())
+
+    def test_every_named_pr_lets_the_create_through(self):
+        """Control first: the same scenario denies when nothing is named, so
+        the silence after it is the exemption and not a probe that failed."""
+        self.assertEqual(self.decision("gh pr create --fill")
+                         ["permissionDecision"], "deny")
+        self.assertEqual(self.s.guard(
+            'gh pr create --title "deps: bump" '
+            '--body "Replaces #7 and #8 with one PR."'), "")
+
+    def test_an_unnamed_overlapping_pr_still_denies(self):
+        hso = self.decision('gh pr create --title t --body "Supersedes #7."')
+        self.assertEqual(hso["permissionDecision"], "deny")
+        reason = hso["permissionDecisionReason"]
+        self.assertIn("#8 (app.py", reason)
+        self.assertNotIn("#7 (", reason)
+
+    def test_the_deny_names_the_route(self):
+        reason = self.decision("gh pr create --fill")["permissionDecisionReason"]
+        self.assertIn('("Supersedes #7")', reason)
+        self.assertIn("--body-file is not read", reason)
+
+
 class DeclaredHead(unittest.TestCase):
     """Reading the branch a create opens off the command: `--head` in its four
     spellings, else a checkout or switch earlier in the chain."""

@@ -49,7 +49,9 @@ Fires on a `Bash` command the session is *about to run*. Four branches:
   invalidating work, and review is an expensive place to discover it. Suspected
   from LINE RANGES, not paths, and decided by a trial merge where that PR's head
   is here; see `pr_sentinel_overlap`. Gated by `PR_SENTINEL_OVERLAP_ENABLED` (default on;
-  `0`/`false` disables) and off under `PR_SENTINEL_DISABLE=1`. Unlike the poll
+  `0`/`false` disables) and off under `PR_SENTINEL_DISABLE=1`. An open PR the
+  create's own `--title` or `--body` says it replaces ("Supersedes #N") is not
+  counted; see `pr_create_replaced`. Unlike the poll
   deny this one applies to a backgrounded call too — backgrounding a create
   still opens the PR, so it is not the fix here.
 
@@ -352,6 +354,45 @@ def _pr_create_head(group):
     return _flag_value(group, '--head', '-H').rsplit(':', 1)[-1]
 
 
+# "Replaces #1, #2 and #3", "Supersedes #9", "Closes #4". The PR numbers are
+# read up to the end of the clause, so "Closes #4. See #5" names only #4. A
+# `#N` glued to a word or a path (`o/r#5`, `x#5`) belongs to another repo or is
+# not a reference at all.
+_REPLACES_RE = re.compile(r'\b(?:replac(?:es|ing)|supersed(?:es|ing)|closes)\b'
+                          r'([^\n]*)', re.IGNORECASE)
+_CLAUSE_END_RE = re.compile(r'[.;!?](?:\s|$)')
+_PR_REF_RE = re.compile(r'(?<![\w/])#([0-9]+)\b')
+
+
+def replaced_prs(text):
+    """The PR numbers `text` says it replaces, supersedes or closes."""
+    numbers = set()
+    for m in _REPLACES_RE.finditer(text or ''):
+        clause = _CLAUSE_END_RE.split(m.group(1), 1)[0]
+        numbers.update(int(n) for n in _PR_REF_RE.findall(clause))
+    return numbers
+
+
+def pr_create_replaced(command):
+    """The open PRs a `gh pr create` says, in its own `--title` or `--body`,
+    that it replaces.
+
+    A PR that deliberately replaces others overlaps them by construction, and
+    the override is the wrong tool for that: it says nothing a reviewer reads.
+    The body does. Naming #N there is a claim the reviewer will act on, so the
+    exemption costs a public, checkable statement rather than a hidden prefix.
+
+    Only the command's own text is read. A `--body-file` is a file the hook does
+    not open, and nothing is read from GitHub — the replaced PR's own text is
+    as closed a channel here as everywhere else.
+    """
+    for group in simple_commands(command):
+        if _is_gh_pr_create(group):
+            return (replaced_prs(_flag_value(group, '--title', '-t'))
+                    | replaced_prs(_flag_value(group, '--body', '-b')))
+    return set()
+
+
 def pr_create_repo(command):
     """The `--repo` a `gh pr create` opens its PR in, or '' for the one `gh`
     resolves from the working directory. The open PRs compared have to be that
@@ -563,6 +604,8 @@ def run(data):
                                        pr_create_base(command),
                                        pr_create_head(command),
                                        pr_create_repo(command))
+        replaced = pr_create_replaced(command)
+        hits = [hit for hit in hits if hit[0] not in replaced]
         if hits:
             print(json.dumps({'hookSpecificOutput': {
                 'hookEventName': 'PreToolUse',
