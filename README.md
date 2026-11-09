@@ -89,6 +89,7 @@ advisory nudge, a deny is *enforced* — the command never runs.
 | `gh pr create` on a branch that **conflicts in a trial merge** with an open PR, or makes one of its edits again | **deny** — names that PR's number and the paths (see [Overlapping pull requests](#overlapping-pull-requests)) |
 | `gh pr create` with edits within six lines of an open PR's, whose head is not in this clone | **deny** — says it was not trial-merged, and names the `git fetch` after which a re-run decides it |
 | `gh pr create` with edits within six lines of an open PR's that merge clean | allow (proximity was only the suspicion, and the trial merge settled it) |
+| `gh pr create` whose own `--title` or `--body` says it replaces the overlapping PR (`Replaces #N`, `Supersedes #N`, `Closes #N`) | allow — that PR is not counted; any open PR it does not name still denies |
 | `gh pr create` sharing a *file* with an open PR, but edits 7+ lines apart | allow (a shared file is not a finding — the comparison is line ranges) |
 | the same create submitted with `run_in_background` | **deny** — backgrounding still opens the PR, so it is not the fix here |
 | `gh pr create --help` · `gh pr list` · `gh pr view` · `gh pr edit` | allow (opens no PR) |
@@ -226,8 +227,25 @@ queries being made at all. For the file every branch edits by construction (a
 changelog, a backlog table), name it in `PR_SENTINEL_OVERLAP_IGNORE` instead of
 switching the whole check off — comma-separated globs, the same spelling
 branch-guard's `BRANCH_GUARD_OVERLAP_IGNORE` takes, so a list worked out for one
-copies to the other unchanged. `PR_SENTINEL_OVERRIDE=<reason>` allows one create
-whose overlap you already know about.
+copies to the other unchanged.
+
+**A PR that says it replaces another is not denied over it.** Folding three
+Dependabot PRs into one, or re-cutting a stale PR, overlaps the originals by
+construction. When the create's own `--title` or `--body` says `Replaces #N`,
+`Supersedes #N` or `Closes #N` (or `replacing`/`superseding`), PR #N is left out
+of the comparison, and every open PR it does not name is still checked. One
+clause can name several — `Replaces #12, #13 and #14` — and it ends at a full
+stop or semicolon, so `Closes #4. See #5` names only #4. `owner/repo#N` is
+another repository's and does not count. Only the command's own text is read: a
+`--body-file` is not opened, and nothing is read from GitHub for this. The
+statement lands in the PR body, where the reviewer reads it and closes #N on it,
+which is why it suffices where a hidden prefix should not. Bot-authored PRs get
+no other treatment: a session redoing an open Dependabot bump by accident is
+exactly the duplicate the check exists for.
+
+`PR_SENTINEL_OVERRIDE=<reason>` allows one create whose overlap you already know
+about and that replaces nothing — a fix that an open PR will later be rebased
+over, say.
 
 **The Stop hook** is the backstop that makes the advisory nudge reliable. When
 the session tries to end its turn with an unwatched open PR, it **blocks the
