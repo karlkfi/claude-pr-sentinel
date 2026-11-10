@@ -585,12 +585,13 @@ def build_report(prs):
         f'diff (`gh pr diff {prs[0][0]}`) before this PR lands beside it.'
     ) if prs else 'it collides with no open PR the check could confirm.'
     return (
-        f'pr-sentinel: this `gh pr create` could not be parsed strictly — an '
-        f'unbalanced quote, often an apostrophe in the body — so the overlap '
-        f'check reports rather than denies. Read leniently, {found}\n'
+        f'pr-sentinel: this command may run a `gh pr create`, but it could not '
+        f'be parsed strictly — an unbalanced quote, often an apostrophe in the '
+        f'body — so the overlap check reports rather than denies. Read '
+        f'leniently, {found}\n'
         f'Nothing was refused, so a PR_SENTINEL_OVERRIDE prefix on this '
-        f'command changes nothing. A body written to a file by an earlier '
-        f'command, then passed as --body-file, lets the check decide.'
+        f'command changes nothing. A body written to a file in an earlier, '
+        f'separate Bash call, then passed as --body-file, lets the check decide.'
     )
 
 
