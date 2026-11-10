@@ -1383,6 +1383,48 @@ class GuardDeny(unittest.TestCase):
             "than timing out, so this silence is not the one under test"
             % (elapsed, probe_cap()))
 
+    # A heredoc body holding an apostrophe: the whole string will not lex, so
+    # the strict parse the deny rests on sees no create at all.
+    UNLEXABLE = ("cat > body.md <<EOF\nit's the fix\nEOF\n"
+                 "gh pr create --title t --body-file body.md")
+
+    def report(self, out):
+        self.assertNotEqual(out, "", GUARD_SILENT)
+        hso = json.loads(out)["hookSpecificOutput"]
+        self.assertEqual(hso["hookEventName"], "PreToolUse")
+        self.assertNotIn("permissionDecision", hso, "a report must not decide")
+        return hso["additionalContext"]
+
+    def test_an_unlexable_create_is_reported_not_denied(self):
+        """Strict sees no create and lenient does — that gap is the case. The
+        deny on the lexable spelling is the control that the probes answer."""
+        self.assertFalse(guard.is_pr_create(self.UNLEXABLE))
+        self.assertTrue(guard.is_pr_create(self.UNLEXABLE, lenient=True))
+        self.deny_reason(self.s.guard(
+            "gh pr create --title t --body-file body.md"))
+        text = self.report(self.s.guard(self.UNLEXABLE))
+        self.assertTrue(text.startswith("pr-sentinel: "))
+        self.assertIn("#7 (app.py", text)
+        self.assertIn("gh pr diff 7", text)
+        self.assertIn("changes nothing", text)
+
+    def test_an_unlexable_create_with_no_overlap_says_so(self):
+        """The silence the row names: a defer that cannot be told from a deny
+        the session's override stopped."""
+        self.deny_reason(self.s.guard("gh pr create --fill"))
+        self.s.pr_diff(7, "app.py", 70)
+        text = self.report(self.s.guard(self.UNLEXABLE))
+        self.assertIn("no open PR the check could confirm", text)
+        self.assertNotIn("#7", text)
+
+    def test_an_unlexable_non_create_stays_silent(self):
+        self.assertEqual(self.s.guard(
+            "cat > body.md <<EOF\nit's the fix\nEOF\ngh pr view 7"), "")
+
+    def test_an_unlexable_create_honours_the_env_override(self):
+        self.assertEqual(self.s.guard(
+            self.UNLEXABLE, {"PR_SENTINEL_OVERRIDE": "known"}), "")
+
     def test_the_poll_deny_still_fires(self):
         """The new branch must not have displaced the one already there."""
         reason = self.deny_reason(self.s.guard("gh run watch 5"))
