@@ -523,6 +523,95 @@ class ClassificationUnit(unittest.TestCase):
         self.assertFalse(hook.looks_failed("http://example.invalid/pull/1"))
 
 
+class PushDirectory(unittest.TestCase):
+    """A push's remote, tags and default branch are read in the repository the
+    push runs in — moved by `cd` and `git -C` — not the session's (Q51)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        # `forge` pushes to a hosted remote; `scratch` to a bare repo on disk.
+        self.forge = os.path.join(self.tmp, "forge")
+        self.scratch = os.path.join(self.tmp, "scratch")
+        make_repo_with_remote(self.forge, "git@github.com:owner/repo.git")
+        make_repo_with_remote(self.scratch, os.path.join(self.tmp, "r.git"))
+
+    def test_cd_into_a_scratch_repo_is_silent(self):
+        # The observed shape: a forge session building a throwaway repo.
+        for cmd in ("cd " + self.scratch + " && git push origin abc:refs/x",
+                    "cd ../scratch; git push origin HEAD:refs/heads/main",
+                    "cd -P -- " + self.scratch + "\ngit push",
+                    "pushd " + self.scratch + " && git push origin x"):
+            self.assertIsNone(hook.detect_action(cmd, self.forge), cmd)
+
+    def test_cd_into_a_forge_repo_nudges(self):
+        # The quiet direction: a real PR push read in a scratch session's repo.
+        self.assertEqual(hook.detect_action(
+            "cd " + self.forge + " && git push origin claude/foo",
+            self.scratch), "git_push")
+
+    def test_git_dash_c_names_the_repository(self):
+        self.assertIsNone(hook.detect_action(
+            "git -C " + self.scratch + " push origin x", self.forge))
+        self.assertEqual(hook.detect_action(
+            "git -C " + self.forge + " push origin claude/foo", self.scratch),
+            "git_push")
+        # Each `-C` is taken relative to the one before, as git applies them.
+        self.assertIsNone(hook.detect_action(
+            "git -C " + self.tmp + " -C scratch push origin x", self.forge))
+        for cmd in ("git --git-dir=../scratch/.git push origin x",
+                    "GIT_DIR=../scratch/.git git push origin x"):
+            self.assertIsNone(hook.detect_action(cmd, self.forge), cmd)
+
+    def test_dot_dot_through_a_symlink_lands_where_the_shell_would(self):
+        # `link` -> scratch/sub. bash's `cd` folds `link/..` textually back to
+        # tmp; `cd -P` and git's `-C` follow the link and land in scratch.
+        os.mkdir(os.path.join(self.scratch, "sub"))
+        os.symlink(os.path.join(self.scratch, "sub"),
+                   os.path.join(self.forge, "link"))
+        self.assertEqual(hook.detect_action(
+            "cd link/.. && git push origin claude/foo", self.forge), "git_push")
+        for cmd in ("cd -P link/.. && git push origin x",
+                    "git -C link/.. push origin x"):
+            self.assertIsNone(hook.detect_action(cmd, self.forge), cmd)
+
+    def test_a_cd_after_the_push_does_not_move_it(self):
+        self.assertEqual(hook.detect_action(
+            "git push origin claude/foo && cd " + self.scratch, self.forge),
+            "git_push")
+
+    def test_tags_are_read_in_the_pushed_repo(self):
+        # `v9.9.9` is a tag in the session's repo only, so it is a branch name
+        # in the repo being pushed and the push is PR work.
+        session = os.path.join(self.tmp, "tagged")
+        make_repo(session)
+        self.assertEqual(hook.detect_action(
+            "cd " + self.forge + " && git push origin v9.9.9", session),
+            "git_push")
+        self.assertIsNone(hook.detect_action("git push origin v9.9.9", session))
+
+    def test_a_directory_it_cannot_name_nudges(self):
+        # No local read can be aimed at it, so none can silence the push:
+        # nudge, as for every other answer the repo can't give.
+        for cmd in ('cd "$WORK" && git push origin claude/foo',
+                    "cd - && git push origin claude/foo",
+                    "pushd /x && popd && git push origin claude/foo",
+                    "cd ~nobody-here && git push origin claude/foo",
+                    'git --git-dir="$D" push origin claude/foo',
+                    'GIT_DIR="$D" git push origin claude/foo'):
+            self.assertEqual(hook.detect_action(cmd, self.scratch), "git_push",
+                             cmd)
+
+    def test_a_path_remote_is_silent_even_where_the_directory_is_unknown(self):
+        self.assertIsNone(hook.detect_action(
+            'cd "$WORK" && git push /srv/backup.git claude/foo', self.forge))
+
+    def test_a_relative_cd_with_no_session_directory_nudges(self):
+        self.assertEqual(hook.detect_action(
+            "cd scratch && git push origin x", None), "git_push")
+
+
 class HookEndToEnd(unittest.TestCase):
     def test_nudge_on_pr_create_with_url(self):
         out, _ = run_hook(bash_payload(

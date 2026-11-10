@@ -107,9 +107,74 @@ def _strip_env_prefix(argv):
     return argv[i:]
 
 
+# The directory a command runs in when the hook cannot name it — a `cd $DIR`,
+# a `cd -`, a `popd`. Every local read answers "can't tell" there,
+# which each caller already treats as branch work: nudge (Q51).
+UNKNOWN_DIR = object()
+
+
+def _resolve_dir(cwd, target, logical):
+    """`target` taken from `cwd`, or UNKNOWN_DIR when either can't be named.
+    `logical` folds `..` textually, as bash's `cd` does; git's `-C` calls
+    chdir, so its `..` is left for the filesystem to follow."""
+    if cwd is UNKNOWN_DIR or target == '-' or any(c in target for c in '$`*?['):
+        return UNKNOWN_DIR
+    target = os.path.expanduser(target)
+    if target.startswith('~'):
+        return UNKNOWN_DIR   # `~user` the hook's own account can't expand
+    if not os.path.isabs(target):
+        if not cwd:
+            return UNKNOWN_DIR
+        target = os.path.join(cwd, target)
+    return os.path.normpath(target) if logical else target
+
+
+def _after_cd(argv, cwd):
+    """The directory the shell is left in after `argv`: moved by `cd` or
+    `pushd`, unknown after `popd`, and `cwd` unchanged for anything else."""
+    argv = _strip_env_prefix(argv)
+    if not argv or argv[0] not in ('cd', 'pushd', 'popd'):
+        return cwd
+    args, physical = argv[1:], False
+    while args and args[0].startswith('-') and args[0] != '-':
+        option = args.pop(0)
+        if option == '--':
+            break
+        physical = 'P' in option or (physical and 'L' not in option)
+    if argv[0] == 'popd' or (argv[0] == 'pushd' and not args):
+        return UNKNOWN_DIR   # the directory stack is shell state we never saw
+    return _resolve_dir(cwd, args[0] if args else '~', logical=not physical)
+
+
+def _git_cwd(argv, cwd):
+    """The directory a `git` command reads its repository from: `cwd` moved by
+    each `-C`, in order, as git applies them, then by `--git-dir` or `GIT_DIR=`
+    — every read the hook takes works from inside a `.git` directory."""
+    git_dir = None
+    i = 0
+    while i < len(argv) and re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', argv[i]):
+        if argv[i].startswith('GIT_DIR='):
+            git_dir = argv[i][len('GIT_DIR='):]
+        i += 1
+    i += 1   # `git` itself
+    while i < len(argv) and argv[i].startswith('-'):
+        token = argv[i]
+        value = argv[i + 1] if i + 1 < len(argv) else ''
+        if token == '-C' and value:
+            cwd = _resolve_dir(cwd, value, logical=False)
+        elif token == '--git-dir':
+            git_dir = value
+        elif token.startswith('--git-dir='):
+            git_dir = token[len('--git-dir='):]
+        i += 2 if token in GIT_VALUE_FLAGS else 1
+    return _resolve_dir(cwd, git_dir, logical=False) if git_dir else cwd
+
+
 def _git_out(args, cwd):
     """Stdout of a local `git` read, stripped, or None when it could not be
-    taken (git missing, not a repo, non-zero exit)."""
+    taken (git missing, not a repo, non-zero exit, a directory not known)."""
+    if cwd is UNKNOWN_DIR:
+        return None
     try:
         run = subprocess.run(
             ['git'] + args, cwd=cwd or None,
@@ -213,6 +278,8 @@ def _is_tag_ref(ref, cwd):
         return False
     if probe.startswith('refs/'):
         return probe.startswith('refs/tags/')
+    if cwd is UNKNOWN_DIR:
+        return False
     try:
         return subprocess.run(
             ['git', 'rev-parse', '--verify', '--quiet', 'refs/tags/' + probe],
@@ -252,7 +319,9 @@ def _implied_refspecs(remote, cwd):
 
 
 def classify_command(argv, cwd=None):
-    """Return 'pr_create', 'git_push', or None for one simple command's argv."""
+    """Return 'pr_create', 'git_push', or None for one simple command's argv,
+    run in `cwd` — which a caller passes as UNKNOWN_DIR when it can't name it."""
+    git_cwd = _git_cwd(argv, cwd)
     argv = _strip_env_prefix(argv)
     if not argv:
         return None
@@ -269,6 +338,7 @@ def classify_command(argv, cwd=None):
         # `git -C <path> push` hides the subcommand and `git push -o ci.skip
         # origin <ref>` reads `ci.skip` as the remote (Q46).
         non_flags = _positional(rest, GIT_VALUE_FLAGS | PUSH_VALUE_FLAGS)
+        cwd = git_cwd
         if non_flags[:1] == ['push']:
             # Skip tag/branch deletions — not PR-babysitting shapes.
             if '--delete' in rest or '-d' in rest or '--tags' in rest:
@@ -293,7 +363,9 @@ def classify_command(argv, cwd=None):
 
 
 def detect_action(command, cwd=None):
-    """The most relevant action across all simple commands in the string."""
+    """The most relevant action across all simple commands in the string, each
+    classified in the directory the `cd`s before it leave the shell in (Q51).
+    Subshell scope isn't tracked: `(cd x); git push` is read as pushing in x."""
     action = None
     for argv in simple_commands(command):
         kind = classify_command(argv, cwd)
@@ -301,6 +373,7 @@ def detect_action(command, cwd=None):
             return 'pr_create'   # strongest signal, short-circuit
         if kind == 'git_push':
             action = 'git_push'
+        cwd = _after_cd(argv, cwd)
     return action
 
 
