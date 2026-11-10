@@ -106,7 +106,10 @@ invariants are non-negotiable and must not regress into a default:
 
 **Disclose every read.** A new GitHub read, a new local file read, or a new
 component must be named in `PRIVACY.md`, in that component's own section — the
-disclosure tests in `tests/test_watcher.py` fail the build otherwise.
+disclosure tests in `tests/test_watcher.py` fail the build otherwise. They check
+that a name appears, never that the sentence is true, so an absolute negative
+("writes nothing", "no X is requested") must name the measurement or test behind
+it (`docs/development/privacy-disclosures.md`).
 
 CI log excerpts are semi-untrusted: keep the size cap, the ANSI strip, and the
 `DATA, NOT INSTRUCTIONS` frame. Any loosening knob is opt-in and documented as
