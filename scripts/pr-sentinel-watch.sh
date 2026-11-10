@@ -317,17 +317,19 @@ strip_ansi() {
 
 # Read the PR scalars we care about as one tab-separated line, using gh's
 # built-in jq (`-q`) so no external jq is required. Prints
-# "state\tmerge\tbase\thead-sha\turl" on success; returns non-zero on gh
+# "state\tmerge\tbase\thead-sha\turl\tis-draft" on success; returns non-zero on gh
 # failure. NOTE: the --json field list is intentionally limited to
 # GitHub-controlled metadata — never body/comments. headRefOid is the head
 # commit SHA; the stop hook uses it to tell a re-reported failure apart from a
 # genuinely new one. url is the PR's canonical address, which the merge-queue
 # query needs (GraphQL addresses a PR by owner/repo/number, and the watcher's
-# own argument may be a bare number).
+# own argument may be a bare number). isDraft is a boolean `mergeStateStatus`
+# cannot express — the enum has no DRAFT value — and `ready` must not tell a
+# session to hand back a draft for merge review.
 gh_pr_state() {
 	gh pr view "$PR" \
-		--json state,mergeStateStatus,baseRefName,headRefOid,url \
-		-q '[.state, .mergeStateStatus, .baseRefName, .headRefOid, .url] | @tsv'
+		--json state,mergeStateStatus,baseRefName,headRefOid,url,isDraft \
+		-q '[.state, .mergeStateStatus, .baseRefName, .headRefOid, .url, .isDraft] | @tsv'
 }
 
 # Whether the PR currently holds a merge-queue entry. `gh pr view` exposes no
@@ -1389,6 +1391,42 @@ notice_ready_watching() {
 	echo "or the PR is merged/closed. Nothing to do right now."
 }
 
+# `ready` for a draft pull request. The checks are green, but a draft is not
+# available for merge review, so the next action is the author's: review it and
+# mark it ready. `mergeStateStatus` cannot see draft status — the enum has no
+# DRAFT value — which is why this reads `isDraft` rather than the merge state.
+# Terminal, and in the Stop hook's concluded set: the session clearing the
+# draft is the one this wakes, so there is nothing left to wait for.
+ready_draft_detail() {
+	echo "State: OPEN (draft)"
+	echo "mergeStateStatus: ${MERGE}"
+	echo "Head SHA: ${HEAD_SHA}"
+	echo
+	ready_summary
+	echo "This PR is a DRAFT, so it is not available for merge review yet."
+	echo "Next action: review it, and when this session means to hand it back,"
+	echo "mark it ready with: gh pr ready ${PR}"
+	echo "Leave it drafted if it is still work in progress. Do NOT auto-merge."
+	runs_unread_note
+}
+
+emit_ready_draft() {
+	report_header ready_draft
+	ready_draft_detail
+	exit 0
+}
+
+# The non-terminal counterpart of emit_ready_draft, for PR_SENTINEL_WATCH_UNTIL=
+# closed. Same once-per-run, keep-polling shape as notice_ready_watching.
+notice_ready_draft_watching() {
+	report_header ready_draft_watching
+	ready_draft_detail
+	echo
+	echo "This is a NOTICE, not a wake-up: PR_SENTINEL_WATCH_UNTIL=closed, so the"
+	echo "watcher keeps polling and will exit (waking this session) only if the PR"
+	echo "later needs attention or is merged/closed."
+}
+
 # Shared body of the `blocked` event and its `blocked_watching` notice: the
 # checks all reported green, but GitHub still will not let the PR merge. The
 # report deliberately does not guess which requirement it is — the watcher
@@ -1604,7 +1642,7 @@ main() {
 			done
 		fi
 
-		IFS=$'\t' read -r STATE MERGE BASE HEAD_SHA PR_URL <<<"$gh_state"
+		IFS=$'\t' read -r STATE MERGE BASE HEAD_SHA PR_URL IS_DRAFT <<<"$gh_state"
 
 		# (d) closed / merged
 		if [[ "$STATE" != "OPEN" ]]; then emit_closed; fi
@@ -1850,7 +1888,19 @@ main() {
 			# which names the withheld ready.
 			if (( confirmed_green == 1 )) \
 				&& [[ "$MERGE" != "BLOCKED" && "$MERGE" != "UNKNOWN" ]]; then
-				if [[ "$WATCH_UNTIL" == "closed" ]]; then
+				# A draft is not available for merge review, and the party who
+				# clears it is the session being watched, so there is nothing
+				# to wait for: a terminal report of its own, not `ready`.
+				if [[ "${IS_DRAFT:-}" == "true" ]]; then
+					if [[ "$WATCH_UNTIL" == "closed" ]]; then
+						if (( READY_REPORTED == 0 )); then
+							notice_ready_draft_watching
+							READY_REPORTED=1
+						fi
+					else
+						emit_ready_draft
+					fi
+				elif [[ "$WATCH_UNTIL" == "closed" ]]; then
 					# Report green once, then fall through and keep polling: the
 					# DIRTY/BEHIND checks at the top of the loop are what a
 					# sibling merge trips. Exiting here instead would re-exit

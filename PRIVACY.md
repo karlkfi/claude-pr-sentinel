@@ -111,8 +111,8 @@ report).
 - **Talks to GitHub** through your already-authenticated `gh` CLI — this is its
   purpose. It issues read-only queries for:
   - the PR's `state`, `mergeStateStatus`, base branch name (`baseRefName`),
-    head commit (`headRefOid`), and canonical URL (`url`), from
-    `gh pr view --json`;
+    head commit (`headRefOid`), canonical URL (`url`), and whether it is a
+    draft (`isDraft`, a boolean), from `gh pr view --json`;
   - whether the PR currently holds a merge-queue entry (a GraphQL
     `mergeQueueEntry` read);
   - who removed the PR from the merge queue — the `__typename` and `login` of

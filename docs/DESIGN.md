@@ -637,6 +637,20 @@ forever. And when `gh pr checks` and `mergeStateStatus` disagree, the watcher
 cannot tell which is stale, so a hold would pick a side. The derived summary
 hands the disagreement to the reader instead, with the command that settles it.
 
+A green **draft** gets its own terminal event, `ready_draft`, rather than `ready`.
+`ready`'s next action is a merge-review handback, and a draft is not available
+for merge review. The guard could not tell: `mergeStateStatus` has no `DRAFT`
+value, and a draft reads `CLEAN` like any other green PR, so the watcher reads
+`isDraft` and branches inside the readiness guard without changing the guard's
+condition. This is terminal, not a hold, and that is where it differs from
+`BLOCKED`. Refusing `ready` on `BLOCKED` and saying nothing more was rejected
+because a third party clears `BLOCKED`. A draft is cleared by its author,
+running `gh pr ready`, and the author is the session the watcher is about to
+wake. A non-terminal notice in default mode would let that session sleep until
+the budget ran out in `timeout`. `ready_draft` joins the concluded set for the
+same livelock reason as `blocked`. Its `closed`-mode notice is
+`ready_draft_watching`, kept out of the set by the same `(?![\w-])` guard.
+
 `blocked` and `unchecked` join `ready`/`closed` in the Stop hook's concluded
 set. Both of `blocked`'s causes need a human — a review gate is the human's turn
 by definition, and a gate that never registered can't be waited out, since the
