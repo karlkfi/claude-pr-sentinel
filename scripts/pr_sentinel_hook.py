@@ -364,8 +364,8 @@ def classify_command(argv, cwd=None):
 
 def detect_action(command, cwd=None):
     """The most relevant action across all simple commands in the string, each
-    classified in the directory the `cd`s before it leave the shell in (Q51).
-    Subshell scope isn't tracked: `(cd x); git push` is read as pushing in x."""
+    classified in the directory the `cd`s before it leave the shell in (Q51)."""
+    scoped = _may_scope_a_cd(command)
     action = None
     for argv in simple_commands(command):
         kind = classify_command(argv, cwd)
@@ -373,8 +373,27 @@ def detect_action(command, cwd=None):
             return 'pr_create'   # strongest signal, short-circuit
         if kind == 'git_push':
             action = 'git_push'
-        cwd = _after_cd(argv, cwd)
+        moved = _after_cd(argv, cwd)
+        cwd = UNKNOWN_DIR if scoped and moved is not cwd else moved
     return action
+
+
+def _may_scope_a_cd(command):
+    """True when the string holds a subshell, `$(…)`, pipe or background job.
+    A `cd` inside one does not move the shell running the push, and the
+    simple commands carry no trace of which one it sat in — so any `cd` in
+    such a string leaves the directory unknown, which nudges."""
+    try:
+        tokens = tokenize.lex(command)
+    except ValueError:
+        tokens = tokenize.lex_by_line(command)
+    for token in tokens:
+        if not tokenize._is_operator(token):
+            continue
+        if '(' in token or ')' in token \
+                or token.strip(';\n') in ('|', '&', '|&'):
+            return True
+    return False
 
 
 def output_text(response):

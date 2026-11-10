@@ -607,6 +607,22 @@ class PushDirectory(unittest.TestCase):
         self.assertIsNone(hook.detect_action(
             'cd "$WORK" && git push /srv/backup.git claude/foo', self.forge))
 
+    def test_a_cd_that_may_not_persist_nudges(self):
+        # None of these `cd`s moves the shell that runs the last push, which
+        # goes to the forge — measured in bash 5.3.15. The hook can't tell
+        # which one a `cd` sat in, so it reads the directory as unknown.
+        for cmd in ("(cd ../scratch); git push origin feat",
+                    "(cd ../scratch && git push origin feat); "
+                    "git push origin feat",
+                    "cd ../scratch | cat; git push origin feat",
+                    "cd ../scratch & git push origin feat",
+                    "D=$(cd ../scratch && pwd); git push origin feat"):
+            self.assertEqual(hook.detect_action(cmd, self.forge), "git_push",
+                             cmd)
+        # `&&`, `||` and a `2>&1` redirect scope nothing.
+        self.assertIsNone(hook.detect_action(
+            "cd ../scratch 2>&1 && git push origin x || true", self.forge))
+
     def test_a_relative_cd_with_no_session_directory_nudges(self):
         self.assertEqual(hook.detect_action(
             "cd scratch && git push origin x", None), "git_push")
