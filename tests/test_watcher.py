@@ -3118,24 +3118,51 @@ def undisclosed_globs(script, privacy):
 
 # A write a Python script makes by itself. `os.replace` is spelled out so a
 # `str.replace` is not one, and an `open` counts only with a quoted mode that
-# writes, so `encoding='ascii'` is not one either. A write a subprocess makes
-# (`git merge-tree --write-tree`) is invisible here.
+# writes, so `encoding='ascii'` is not one either. Invisible here: a write a
+# subprocess makes (`git merge-tree --write-tree`), an `open` whose mode is a
+# variable or sits on a later line, and `Path.replace`, which reads exactly
+# like `str.replace`.
 _PY_WRITE = re.compile(
     r"""\bopen\([^)\n]*['"][rbt]*[wax][rbt+]*['"]"""
     r"""|\.write_(?:text|bytes)\("""
-    r"""|\bshutil\.\w+\("""
-    r"""|\bos\.(?:replace|rename|remove|unlink|makedirs|mkdir|rmdir)\("""
-    r"""|\.(?:mkdir|touch|unlink|rmdir)\(""")
+    r"""|\b(?:shutil|tempfile)\.\w+\("""
+    r"""|\bos\.(?:open|replace|rename|remove|unlink|makedirs|mkdir|rmdir"""
+    r"""|symlink|link)\("""
+    r"""|\bsqlite3\.connect\("""
+    r"""|\.(?:mkdir|touch|unlink|rmdir|rename|symlink_to|hardlink_to)\(""")
 
 _LOCAL_IMPORT = re.compile(r"^\s*(?:from|import)\s+(pr_sentinel_\w+)", re.M)
 
-# A section saying its component writes to disk, and one saying it does not.
-_CLAIMS_WRITE = re.compile(r"\bwrites?\b(?!\s+nothing)[^.\n]{0,40}\bdisk\b",
-                           re.I)
-_CLAIMS_NO_WRITE = re.compile(r"writes nothing to disk(?!\s+(?:apart|except))",
-                              re.I)
+# The policy is hard-wrapped, so every claim is read from a sentence with its
+# whitespace collapsed. A sentence about writing to disk is a denial when a
+# negation comes before `disk` ("never writes to disk", "writes no file to
+# disk") and a claim otherwise; "apart from" or "except" qualifies a denial.
+_WRITE_SENTENCE = re.compile(r"\bwrit(?:e|es|ing)\b[^.]{0,60}?\bdisk\b", re.I)
+_NEGATION = re.compile(r"\b(?:never|not|no|nothing|none)\b|n't\b", re.I)
+_QUALIFIED = re.compile(r"\bdisk\b\W*(?:apart|except)\b", re.I)
 _CLAIMS_SOLE_WRITER = re.compile(
-    r"the only (?:component|one|script)[^.\n]{0,20}\bwrites?\b", re.I)
+    r"the only (?:component|one|script)[^.]{0,30}\bwrites?\b", re.I)
+
+
+def _sentences(section):
+    flat = re.sub(r"\s+", " ", section)
+    return re.split(r"(?<=[.;:])\s", flat)
+
+
+def write_claims(section):
+    """(says it writes to disk, says it writes nothing to disk) for one
+    section of the policy."""
+    claims = denials = False
+    for sentence in _sentences(section):
+        m = _WRITE_SENTENCE.search(sentence)
+        if not m:
+            continue
+        head = sentence[max(0, m.start() - 20):m.end()]
+        if not _NEGATION.search(head):
+            claims = True
+        elif not _QUALIFIED.search(sentence):
+            denials = True
+    return claims, denials
 
 
 def writes_to_disk(component, repo=REPO, components=None):
@@ -3178,17 +3205,18 @@ def undisclosed_component_writes(privacy, writers=None):
         writers = [c for c in plugin_components() if writes_to_disk(c)]
     gaps = {}
     for c in writers:
-        section = privacy_section(privacy, c)
+        claims, denials = write_claims(privacy_section(privacy, c))
         missing = []
-        if not _CLAIMS_WRITE.search(section):
+        if not claims:
             missing.append("does not say it writes to disk")
-        if _CLAIMS_NO_WRITE.search(section):
+        if denials:
             missing.append("still says it writes nothing to disk")
         if missing:
             gaps[c] = missing
     if len(writers) > 1:
         for c in plugin_components():
-            if _CLAIMS_SOLE_WRITER.search(privacy_section(privacy, c)):
+            if _CLAIMS_SOLE_WRITER.search(
+                    re.sub(r"\s+", " ", privacy_section(privacy, c))):
                 gaps.setdefault(c, []).append(
                     "claims to be the only writer of %d" % len(writers))
     return gaps
@@ -3264,7 +3292,9 @@ class PrivacyComponents(unittest.TestCase):
         spelled like one that must not count."""
         writes = ["open(p, 'w')", 'open(p, mode="ab")', "p.write_text(s)",
                   "p.write_bytes(b)", "shutil.copy2(a, b)", "os.replace(a, b)",
-                  "d.mkdir(parents=True)", "p.unlink()"]
+                  "d.mkdir(parents=True)", "p.unlink()",
+                  "tempfile.mkstemp()", "os.open(p, os.O_WRONLY)",
+                  "p.rename(q)", "p.symlink_to(q)", "sqlite3.connect(db)"]
         reads = ["open(p, encoding='ascii')", "open(p, errors='replace')",
                  "open(p, 'r')", "s.replace('a', 'b')", "open(p)"]
         for line in writes:
@@ -3297,6 +3327,30 @@ class PrivacyComponents(unittest.TestCase):
                                "the only component that writes files")
         self.assertNotEqual(sole, privacy)
         self.assertEqual(undisclosed_component_writes(sole, writers),
+                         {migrate: ["claims to be the only writer of 2"]})
+
+        for denial in ("It never writes to disk.", "It does not write to disk.",
+                       "It writes no file to disk."):
+            negated = privacy.replace("With `--apply` it **writes to disk**",
+                                      denial + " With `--apply` it edits")
+            self.assertNotEqual(negated, privacy)
+            self.assertEqual(
+                undisclosed_component_writes(negated, writers),
+                {migrate: ["does not say it writes to disk",
+                           "still says it writes nothing to disk"]}, denial)
+
+        wrapped_ok = privacy.replace("it **writes to disk**",
+                                     "it **writes to\n  disk**")
+        self.assertNotEqual(wrapped_ok, privacy)
+        self.assertEqual(undisclosed_component_writes(wrapped_ok, writers), {})
+        wrapped_stale = privacy.replace(
+            "With `--apply` it **writes to disk**",
+            "It writes nothing to\n  disk. With `--apply` it **writes to disk**")
+        self.assertEqual(undisclosed_component_writes(wrapped_stale, writers),
+                         {migrate: ["still says it writes nothing to disk"]})
+        wrapped_sole = privacy.replace("the only component that edits files",
+                                       "the only component that\n  writes files")
+        self.assertEqual(undisclosed_component_writes(wrapped_sole, writers),
                          {migrate: ["claims to be the only writer of 2"]})
 
         gaps = undisclosed_component_writes(privacy, writers + [report])
