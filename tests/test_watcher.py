@@ -2755,9 +2755,15 @@ class WatcherCase(unittest.TestCase):
                     self.assertNotIn(
                         term, low,
                         msg=f"forbidden field '{term}' in gh call: {stripped!r}")
-        # The one metadata query lists only the allowed, GitHub-controlled fields.
-        self.assertIn("state,mergeStateStatus,baseRefName,headRefOid,url",
+        # The metadata query lists exactly these GitHub-controlled fields. A
+        # set, so a field added anywhere in the list fails here by name rather
+        # than a field inserted mid-list failing on position (Q61).
+        m = re.search(r"gh pr view \"\$PR\" \\\n\s*--json (\S+)",
                       WATCHER.read_text(encoding="utf-8"))
+        self.assertIsNotNone(m, "the `gh pr view --json` query moved")
+        self.assertEqual(
+            set(m.group(1).split(",")),
+            {"state", "mergeStateStatus", "baseRefName", "headRefOid", "url"})
 
     def test_the_checks_query_sorts_at_the_source(self):
         """Q45: the `Failed checks:` line built from this read is compared for
@@ -2809,10 +2815,9 @@ def undisclosed_reads(script, privacy):
     what to fetch (`REMOVED_FROM_MERGE_QUEUE_EVENT`). Those are the shapes a
     new read arrives in, and #64 added one of each without touching PRIVACY.md.
 
-    Deliberately narrow. A `gh api` REST path assembled from shell variables is
-    invisible here, and so is a `--json` field PRIVACY.md describes in prose
-    ("head commit" for `headRefOid`). This catches the GraphQL surface, which
-    is where the reads worth disclosing have actually appeared.
+    Deliberately narrow. A `gh api` REST path is `undisclosed_rest_reads`'
+    question and a `--json` field is `undisclosed_json_fields`'; this catches
+    the GraphQL surface alone.
     """
     names = set()
     for block in re.findall(r"-f query='(.*?)'", script, re.DOTALL):
@@ -2857,6 +2862,62 @@ def undisclosed_rest_reads(script, privacy):
                 names.add(seg)
     return sorted(n for n in names
                   if not re.search(r"\b%s\b" % re.escape(n), privacy, re.I))
+
+
+# A helper module whose `gh --json` read is disclosed in the section of the
+# component importing it, since a helper gets no section of its own.
+JSON_HELPERS = {"scripts/pr_sentinel_overlap.py": "scripts/pr_sentinel_guard.py"}
+
+
+def json_readers():
+    """Each script to check, with the PRIVACY.md heading that owns its reads."""
+    readers = {c: c for c in plugin_components()}
+    readers.update(JSON_HELPERS)
+    return sorted(readers.items())
+
+
+def json_fields(script):
+    """The fields every `gh ... --json <list>` in `script` requests.
+
+    The shell spells a list `--json a,b,c`, `--json=a,b,c` or either one
+    quoted, and an argv tuple `'--json', 'a,b,c'`. The quote has to sit
+    directly on the list in the tuple form, so an argparse
+    `'--json', action=...` is not read as a field. A list taken from a shell
+    variable is not read at all; `json_lists_from_variables` refuses one.
+    """
+    code = "\n".join(line for line in script.splitlines()
+                     if not line.strip().startswith("#"))
+    fields = set()
+    for lst in re.findall(
+            r"""--json(?:[=\s]+['"]?|['"],\s*['"])(\w+(?:,\w+)*)""", code):
+        fields |= set(lst.split(","))
+    return fields
+
+
+def json_lists_from_variables(script):
+    """The lines in `script` whose `--json` list comes from a shell variable.
+
+    The extractor cannot read such a list, so the gate would pass it unread.
+    """
+    return [line.strip() for line in script.splitlines()
+            if not line.strip().startswith("#")
+            and re.search(r"""--json[=\s]+['"]?\$""", line)]
+
+
+def undisclosed_json_fields(script, privacy):
+    """The `--json` fields in `script` that no code span in `privacy` names.
+
+    A field counts as disclosed only inside backticks, unlike the bare-word
+    match its GraphQL and REST siblings use. `--json` fields are ordinary
+    words — `name`, `state`, `link`, `url` — and measured on the watcher's
+    section as it stood, `name` already matched the prose "base branch name",
+    so a bare-word check would excuse a field with a sentence about another.
+    A span's tokens keep their hyphens for the same reason: `run-name:` does
+    not name `name`.
+    """
+    spans = re.findall(r"`([^`\n]+)`", privacy)
+    tokens = {t for span in spans for t in re.findall(r"[A-Za-z_][\w-]*", span)}
+    return sorted(json_fields(script) - tokens)
 
 
 def undisclosed_writes(script, privacy):
@@ -3006,6 +3067,98 @@ class PrivacyDisclosure(unittest.TestCase):
             "workflows",
             undisclosed_rest_reads(WATCHER.read_text(encoding="utf-8"),
                                    self.watcher_section(privacy)))
+
+    def test_every_json_field_is_named_in_privacy(self):
+        """Q61: a field added to a `--json` list reached no gate at all —
+        `isDraft` appended to the watcher's metadata query passed the whole
+        suite. Asked of the watcher, and of the overlap helper against the
+        PreToolUse section that discloses its one query."""
+        privacy = PRIVACY.read_text(encoding="utf-8")
+        missing = {}
+        for script, heading in json_readers():
+            if not (REPO / script).exists():
+                continue
+            gaps = undisclosed_json_fields(
+                (REPO / script).read_text(encoding="utf-8"),
+                privacy_section(privacy, heading))
+            if gaps:
+                missing[script] = gaps
+        self.assertEqual(
+            missing, {},
+            msg=("these `--json` fields are requested and no code span in "
+                 "the component's PRIVACY.md section names them: %r" % missing))
+
+    def test_the_json_extraction_sees_every_list(self):
+        """An extractor returning nothing passes the gate above vacuously, so
+        pin what it reads off the shipped scripts."""
+        self.assertEqual(
+            json_fields(WATCHER.read_text(encoding="utf-8")),
+            {"state", "mergeStateStatus", "baseRefName", "headRefOid", "url",
+             "name", "bucket", "link"})
+        self.assertEqual(
+            json_fields((REPO / "scripts" / "pr_sentinel_overlap.py")
+                        .read_text(encoding="utf-8")),
+            {"number", "headRefName", "headRefOid", "files"})
+
+    def test_every_json_reader_is_checked(self):
+        """The gate reads components plus `JSON_HELPERS`, so a `--json` read
+        added to some other helper would go unchecked. Every script carrying
+        one has to be on that list."""
+        checked = {script for script, _ in json_readers()}
+        readers = {"scripts/" + p.name for p in (REPO / "scripts").iterdir()
+                   if p.suffix in (".py", ".sh")
+                   and json_fields(p.read_text(encoding="utf-8"))}
+        self.assertTrue(readers, "no script makes a `--json` read")
+        self.assertEqual(readers - checked, set(),
+                         "add these to JSON_HELPERS with their owning section")
+        from_vars = {p.name: json_lists_from_variables(
+                         p.read_text(encoding="utf-8"))
+                     for p in (REPO / "scripts").iterdir()
+                     if p.suffix in (".py", ".sh")}
+        self.assertEqual({k: v for k, v in from_vars.items() if v}, {},
+                         "a `--json` list from a variable is invisible to "
+                         "the disclosure gate; spell the fields out")
+        self.assertEqual(
+            json_lists_from_variables('gh pr view --json "$FIELDS"\n'),
+            ['gh pr view --json "$FIELDS"'])
+
+    def test_the_json_check_can_fail(self):
+        """Both directions a field goes undisclosed: a planted field in the
+        code, at the end of a list and in its middle, in either spelling; and
+        a disclosure deleted from the policy."""
+        privacy = PRIVACY.read_text(encoding="utf-8")
+        watcher = WATCHER.read_text(encoding="utf-8")
+        section = self.watcher_section(privacy)
+        checks = "--json name,bucket,link"
+        for planted in (watcher.replace("headRefOid,url", "headRefOid,url,isDraft"),
+                        watcher.replace("state,mergeStateStatus",
+                                        "state,isDraft,mergeStateStatus"),
+                        watcher.replace(checks, '--json "name,bucket,link,isDraft"'),
+                        watcher.replace(checks, "--json 'name,bucket,link,isDraft'"),
+                        watcher.replace(checks, "--json=name,bucket,link,isDraft")):
+            self.assertNotEqual(planted, watcher)
+            self.assertEqual(undisclosed_json_fields(planted, section),
+                             ["isDraft"])
+        overlap = (REPO / "scripts" / "pr_sentinel_overlap.py").read_text(
+            encoding="utf-8")
+        planted = overlap.replace("headRefOid,files", "headRefOid,files,isDraft")
+        self.assertNotEqual(planted, overlap)
+        self.assertEqual(
+            undisclosed_json_fields(planted, privacy_section(
+                privacy, "scripts/pr_sentinel_guard.py")), ["isDraft"])
+        self.assertIn("headRefOid", undisclosed_json_fields(
+            watcher, section.replace("`headRefOid`", "head commit")))
+
+    def test_the_json_check_ignores_prose_and_hyphenated_spans(self):
+        """The two ways a bare-word check is discharged by text about
+        something else, each of which this one must refuse."""
+        script = 'gh pr checks "$PR" --json name\n'
+        self.assertEqual(
+            undisclosed_json_fields(script, "the base branch name"), ["name"])
+        self.assertEqual(
+            undisclosed_json_fields(script, "a `run-name:` title"), ["name"])
+        self.assertEqual(
+            undisclosed_json_fields(script, "each check's `name`"), [])
 
     def test_the_watchers_disk_write_is_disclosed(self):
         """The read gates have no counterpart for a write, and the watcher now
