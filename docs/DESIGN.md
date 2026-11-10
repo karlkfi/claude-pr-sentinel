@@ -650,6 +650,14 @@ wake. A non-terminal notice in default mode would let that session sleep until
 the budget ran out in `timeout`. `ready_draft` joins the concluded set for the
 same livelock reason as `blocked`. Its `closed`-mode notice is
 `ready_draft_watching`, kept out of the set by the same `(?![\w-])` guard.
+Terminal leaves one gap the report has to close itself: a job gated on the
+draft flag (`if: draft == false`, re-triggered on `ready_for_review`) reports
+as skipping on a draft, and skipping counts as passing, so that job first runs
+after `gh pr ready`. The PostToolUse hook does not nudge on that command and
+the Stop hook has already stood down, so `ready_draft` tells the session to
+relaunch the watcher after the undraft. The `closed`-mode notice has its own
+once-flag, apart from `ready_watching`'s, so an undraft during that watch
+still reports the PR as ready for merge review.
 
 `blocked` and `unchecked` join `ready`/`closed` in the Stop hook's concluded
 set. Both of `blocked`'s causes need a human — a review gate is the human's turn

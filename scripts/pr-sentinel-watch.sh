@@ -148,9 +148,12 @@ HEAL=$(printf '%s' "${PR_SENTINEL_HEAL:-rebase}" | tr '[:upper:]' '[:lower:]')
 WATCH_UNTIL=$(printf '%s' "${PR_SENTINEL_WATCH_UNTIL:-ready}" | tr '[:upper:]' '[:lower:]')
 [[ "$WATCH_UNTIL" == "closed" ]] || WATCH_UNTIL="ready"
 
-# Set to 1 once a `ready_watching` / `blocked_watching` notice has been emitted,
-# so each is reported exactly once per run (WATCH_UNTIL=closed only).
+# Set to 1 once a `ready_watching` / `ready_draft_watching` / `blocked_watching`
+# notice has been emitted, so each is reported exactly once per run
+# (WATCH_UNTIL=closed only). The draft flag is its own, so a PR undrafted while
+# the watch runs still gets its `ready_watching`.
 READY_REPORTED=0
+READY_DRAFT_REPORTED=0
 BLOCKED_REPORTED=0
 
 # Consecutive polls the PR has been green-but-BLOCKED. Reset by any poll that is
@@ -1413,6 +1416,11 @@ ready_draft_detail() {
 emit_ready_draft() {
 	report_header ready_draft
 	ready_draft_detail
+	echo
+	echo "After gh pr ready, relaunch this watcher. A repo can gate jobs on the"
+	echo "draft flag (if: draft == false, run again on ready_for_review): on a draft"
+	echo "they report as skipping, which counts as passing here, so they first run"
+	echo "after the undraft, and nothing relaunches a watcher for that."
 	exit 0
 }
 
@@ -1531,6 +1539,9 @@ emit_timeout() {
 	if (( READY_REPORTED == 1 )); then
 		echo "The PR was green when last polled (see the ready_watching notice above);"
 		echo "it is waiting on human merge review."
+	elif (( READY_DRAFT_REPORTED == 1 )); then
+		echo "The PR was a green draft when last polled (see the ready_draft_watching"
+		echo "notice above); it is waiting on gh pr ready ${PR}."
 	fi
 	if (( BLOCKED_REPORTED == 1 )); then
 		echo "Its checks were green but the merge was BLOCKED (see the"
@@ -1893,9 +1904,9 @@ main() {
 				# to wait for: a terminal report of its own, not `ready`.
 				if [[ "${IS_DRAFT:-}" == "true" ]]; then
 					if [[ "$WATCH_UNTIL" == "closed" ]]; then
-						if (( READY_REPORTED == 0 )); then
+						if (( READY_DRAFT_REPORTED == 0 )); then
 							notice_ready_draft_watching
-							READY_REPORTED=1
+							READY_DRAFT_REPORTED=1
 						fi
 					else
 						emit_ready_draft

@@ -1806,6 +1806,52 @@ class WatcherCase(unittest.TestCase):
         self.assertIn("PR-SENTINEL EVENT: ready_watching", out)
         self.assertNotIn("ready_draft", out)
 
+    # Jobs gated on the draft flag report as skipping on a draft, and skipping
+    # counts as passing, so they first run after `gh pr ready`. Nothing nudges
+    # on that command and the Stop hook has stood down, so the terminal report
+    # has to say it. The closed-mode notice must not: its watcher is still live.
+    RELAUNCH = "After gh pr ready, relaunch this watcher"
+
+    def test_ready_draft_says_to_relaunch_after_the_undraft(self):
+        rc, out, _ = self.run_watcher(self._green_pr())
+        self.assertIn("PR-SENTINEL EVENT: ready_draft", out)
+        self.assertIn(self.RELAUNCH, out)
+
+    def test_ready_and_the_draft_notice_do_not_say_relaunch(self):
+        """Controls: a non-draft `ready`, and the closed-mode draft notice."""
+        rc, out, _ = self.run_watcher(self._green_pr(draft="false"))
+        self.assertIn("PR-SENTINEL EVENT: ready\n", out)
+        self.assertNotIn(self.RELAUNCH, out)
+        rc, out, _ = self.run_watcher(
+            self._green_pr(), virtual_clock=True,
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed", "PR_SENTINEL_TIMEOUT": "20"})
+        self.assertIn("PR-SENTINEL EVENT: ready_draft_watching", out)
+        self.assertNotIn(self.RELAUNCH, out)
+
+    def test_a_draft_timeout_does_not_claim_merge_review(self):
+        rc, out, _ = self.run_watcher(
+            self._green_pr(), virtual_clock=True,
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed", "PR_SENTINEL_TIMEOUT": "20"})
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+        self.assertIn("waiting on gh pr ready 123", out)
+        self.assertNotIn("waiting on human merge review", out)
+
+    def test_an_undraft_during_a_closed_watch_reports_ready_watching(self):
+        """The draft notice has its own once-flag, so undrafting mid-watch
+        still produces the merge-review notice, once, and timeout names it."""
+        files = self._green_pr(draft="false")
+        draft = self._green_pr()["pr_view"]
+        for n in range(1, 5):
+            files["pr_view.%d" % n] = draft
+        rc, out, _ = self.run_watcher(
+            files, virtual_clock=True,
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed", "PR_SENTINEL_TIMEOUT": "60"})
+        self.assertEqual(out.count("PR-SENTINEL EVENT: ready_draft_watching"), 1)
+        self.assertEqual(out.count("PR-SENTINEL EVENT: ready_watching"), 1)
+        self.assertLess(out.index("EVENT: ready_draft_watching"),
+                        out.index("EVENT: ready_watching"))
+        self.assertIn("waiting on human merge review", out)
+
     def test_the_view_projection_feeds_every_field_the_read_unpacks(self):
         """The stub prints already-projected rows, so no fixture can see the
         `-q` projection. Dropping `.isDraft` from it passed every scenario in
