@@ -2864,12 +2864,16 @@ def undisclosed_rest_reads(script, privacy):
                   if not re.search(r"\b%s\b" % re.escape(n), privacy, re.I))
 
 
-# Each script making a `gh --json` read, and the PRIVACY.md section owning it.
-# The overlap helper is imported by the guard, so its read is the guard's.
-JSON_READERS = (
-    ("scripts/pr-sentinel-watch.sh", "The watcher"),
-    ("scripts/pr_sentinel_overlap.py", "scripts/pr_sentinel_guard.py"),
-)
+# A helper module whose `gh --json` read is disclosed in the section of the
+# component importing it, since a helper gets no section of its own.
+JSON_HELPERS = {"scripts/pr_sentinel_overlap.py": "scripts/pr_sentinel_guard.py"}
+
+
+def json_readers():
+    """Each script to check, with the PRIVACY.md heading that owns its reads."""
+    readers = {c: c for c in plugin_components()}
+    readers.update(JSON_HELPERS)
+    return sorted(readers.items())
 
 
 def json_fields(script):
@@ -3059,7 +3063,9 @@ class PrivacyDisclosure(unittest.TestCase):
         PreToolUse section that discloses its one query."""
         privacy = PRIVACY.read_text(encoding="utf-8")
         missing = {}
-        for script, heading in JSON_READERS:
+        for script, heading in json_readers():
+            if not (REPO / script).exists():
+                continue
             gaps = undisclosed_json_fields(
                 (REPO / script).read_text(encoding="utf-8"),
                 privacy_section(privacy, heading))
@@ -3081,6 +3087,18 @@ class PrivacyDisclosure(unittest.TestCase):
             json_fields((REPO / "scripts" / "pr_sentinel_overlap.py")
                         .read_text(encoding="utf-8")),
             {"number", "headRefName", "headRefOid", "files"})
+
+    def test_every_json_reader_is_checked(self):
+        """The gate reads components plus `JSON_HELPERS`, so a `--json` read
+        added to some other helper would go unchecked. Every script carrying
+        one has to be on that list."""
+        checked = {script for script, _ in json_readers()}
+        readers = {"scripts/" + p.name for p in (REPO / "scripts").iterdir()
+                   if p.suffix in (".py", ".sh")
+                   and json_fields(p.read_text(encoding="utf-8"))}
+        self.assertTrue(readers, "no script makes a `--json` read")
+        self.assertEqual(readers - checked, set(),
+                         "add these to JSON_HELPERS with their owning section")
 
     def test_the_json_check_can_fail(self):
         """Both directions a field goes undisclosed: a planted field in the
