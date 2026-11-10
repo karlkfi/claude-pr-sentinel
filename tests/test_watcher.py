@@ -3444,6 +3444,112 @@ def undisclosed_globs(script, privacy):
     return sorted(p for p in patterns if p not in privacy)
 
 
+# A write a Python script makes by itself. `os.replace` is spelled out so a
+# `str.replace` is not one, and an `open` counts only with a quoted mode that
+# writes, so `encoding='ascii'` is not one either. Invisible here: a write a
+# subprocess makes (`git merge-tree --write-tree`), an `open` whose mode is a
+# variable or sits on a later line, and `Path.replace`, which reads exactly
+# like `str.replace`.
+_PY_WRITE = re.compile(
+    r"""\bopen\([^)\n]*['"][rbt]*[wax][rbt+]*['"]"""
+    r"""|\.write_(?:text|bytes)\("""
+    r"""|\b(?:shutil|tempfile)\.\w+\("""
+    r"""|\bos\.(?:open|replace|rename|remove|unlink|makedirs|mkdir|rmdir"""
+    r"""|symlink|link)\("""
+    r"""|\bsqlite3\.connect\("""
+    r"""|\.(?:mkdir|touch|unlink|rmdir|rename|symlink_to|hardlink_to)\(""")
+
+_LOCAL_IMPORT = re.compile(r"^\s*(?:from|import)\s+(pr_sentinel_\w+)", re.M)
+
+# The policy is hard-wrapped, so every claim is read from a sentence with its
+# whitespace collapsed. A sentence about writing to disk is a denial when a
+# negation comes before `disk` ("never writes to disk", "writes no file to
+# disk") and a claim otherwise; "apart from" or "except" qualifies a denial.
+_WRITE_SENTENCE = re.compile(r"\bwrit(?:e|es|ing)\b[^.]{0,60}?\bdisk\b", re.I)
+_NEGATION = re.compile(r"\b(?:never|not|no|nothing|none)\b|n't\b", re.I)
+_QUALIFIED = re.compile(r"\bdisk\b\W*(?:apart|except)\b", re.I)
+_CLAIMS_SOLE_WRITER = re.compile(
+    r"the only (?:component|one|script)[^.]{0,30}\bwrites?\b", re.I)
+
+
+def _sentences(section):
+    flat = re.sub(r"\s+", " ", section)
+    return re.split(r"(?<=[.;:])\s", flat)
+
+
+def write_claims(section):
+    """(says it writes to disk, says it writes nothing to disk) for one
+    section of the policy."""
+    claims = denials = False
+    for sentence in _sentences(section):
+        m = _WRITE_SENTENCE.search(sentence)
+        if not m:
+            continue
+        head = sentence[max(0, m.start() - 20):m.end()]
+        if not _NEGATION.search(head):
+            claims = True
+        elif not _QUALIFIED.search(sentence):
+            denials = True
+    return claims, denials
+
+
+def writes_to_disk(component, repo=REPO, components=None):
+    """Whether `component` writes a file, counting the helper modules it
+    imports, since a helper has no section of its own. The bash watcher's
+    targets are variables built from variables, so for it the write knob
+    stands in, as `undisclosed_writes` already has it."""
+    path = repo / component
+    if path.suffix == ".sh":
+        return bool(re.search(r"\bPR_SENTINEL_STATE_DIR\b",
+                              path.read_text(encoding="utf-8")))
+    components = set(plugin_components() if components is None
+                     else components)
+    seen, frontier = set(), [path]
+    while frontier:
+        script = frontier.pop()
+        if script in seen or not script.exists():
+            continue
+        seen.add(script)
+        text = script.read_text(encoding="utf-8", errors="replace")
+        code = "\n".join(line for line in text.splitlines()
+                         if not line.strip().startswith("#"))
+        if _PY_WRITE.search(code):
+            return True
+        frontier += [repo / "scripts" / (m + ".py")
+                     for m in _LOCAL_IMPORT.findall(code)
+                     if "scripts/%s.py" % m not in components]
+    return False
+
+
+def undisclosed_component_writes(privacy, writers=None):
+    """What each writing component's own section fails to say, plus any
+    section claiming to be the only writer while another component writes.
+
+    The second is a cross-section question: the migration helper's "the only
+    component that does" was made false by the watcher acquiring a write, in
+    a different section, which no per-component check can see.
+    """
+    if writers is None:
+        writers = [c for c in plugin_components() if writes_to_disk(c)]
+    gaps = {}
+    for c in writers:
+        claims, denials = write_claims(privacy_section(privacy, c))
+        missing = []
+        if not claims:
+            missing.append("does not say it writes to disk")
+        if denials:
+            missing.append("still says it writes nothing to disk")
+        if missing:
+            gaps[c] = missing
+    if len(writers) > 1:
+        for c in plugin_components():
+            if _CLAIMS_SOLE_WRITER.search(
+                    re.sub(r"\s+", " ", privacy_section(privacy, c))):
+                gaps.setdefault(c, []).append(
+                    "claims to be the only writer of %d" % len(writers))
+    return gaps
+
+
 class PrivacyComponents(unittest.TestCase):
     def test_every_component_has_a_privacy_section(self):
         """Every script the plugin runs gets its own section. v0.9.0 registered
@@ -3491,6 +3597,106 @@ class PrivacyComponents(unittest.TestCase):
             undisclosed_globs(
                 report.read_text(encoding="utf-8"),
                 privacy_section(privacy, "scripts/friction-report.py")))
+
+    def test_every_writing_component_says_so(self):
+        """Q50: the read gates had no counterpart for a write. A component
+        that writes to disk must say so in its own section and must not still
+        say it writes nothing, and no section may claim to be the only writer
+        while another component writes."""
+        gaps = undisclosed_component_writes(
+            PRIVACY.read_text(encoding="utf-8"))
+        self.assertEqual(gaps, {}, msg="PRIVACY.md on writes: %r" % gaps)
+
+    def test_the_writers_are_the_ones_that_write(self):
+        """The gate above passes vacuously if the predicate finds no writer,
+        and over-reports if it finds the hooks, so pin the set it finds."""
+        self.assertEqual(
+            [c for c in plugin_components() if writes_to_disk(c)],
+            ["scripts/pr-sentinel-migrate-autofix.py",
+             "scripts/pr-sentinel-watch.sh"])
+
+    def test_the_write_predicate_reads_a_write_not_its_lookalikes(self):
+        """Each shape counted as a write, and the reads and string methods
+        spelled like one that must not count."""
+        writes = ["open(p, 'w')", 'open(p, mode="ab")', "p.write_text(s)",
+                  "p.write_bytes(b)", "shutil.copy2(a, b)", "os.replace(a, b)",
+                  "d.mkdir(parents=True)", "p.unlink()",
+                  "tempfile.mkstemp()", "os.open(p, os.O_WRONLY)",
+                  "p.rename(q)", "p.symlink_to(q)", "sqlite3.connect(db)"]
+        reads = ["open(p, encoding='ascii')", "open(p, errors='replace')",
+                 "open(p, 'r')", "s.replace('a', 'b')", "open(p)"]
+        for line in writes:
+            self.assertTrue(_PY_WRITE.search(line), line)
+        for line in reads:
+            self.assertFalse(_PY_WRITE.search(line), line)
+
+    def test_the_component_write_check_can_fail(self):
+        """Every way the gate reports, each driven from the shipped text.
+        The planted write goes in the activity report, the component the
+        policy says writes nothing, which is the miss this gate exists for."""
+        privacy = PRIVACY.read_text(encoding="utf-8")
+        migrate = "scripts/pr-sentinel-migrate-autofix.py"
+        report = "scripts/friction-report.py"
+        writers = [migrate, "scripts/pr-sentinel-watch.sh"]
+
+        unsaid = privacy.replace("it **writes to disk** —", "it **edits** —")
+        self.assertNotEqual(unsaid, privacy)
+        self.assertEqual(undisclosed_component_writes(unsaid, writers),
+                         {migrate: ["does not say it writes to disk"]})
+
+        stale = privacy.replace(
+            "With `--apply` it **writes to disk**",
+            "It writes nothing to disk. With `--apply` it **writes to disk**")
+        self.assertNotEqual(stale, privacy)
+        self.assertEqual(undisclosed_component_writes(stale, writers),
+                         {migrate: ["still says it writes nothing to disk"]})
+
+        sole = privacy.replace("the only component that edits files",
+                               "the only component that writes files")
+        self.assertNotEqual(sole, privacy)
+        self.assertEqual(undisclosed_component_writes(sole, writers),
+                         {migrate: ["claims to be the only writer of 2"]})
+
+        for denial in ("It never writes to disk.", "It does not write to disk.",
+                       "It writes no file to disk."):
+            negated = privacy.replace("With `--apply` it **writes to disk**",
+                                      denial + " With `--apply` it edits")
+            self.assertNotEqual(negated, privacy)
+            self.assertEqual(
+                undisclosed_component_writes(negated, writers),
+                {migrate: ["does not say it writes to disk",
+                           "still says it writes nothing to disk"]}, denial)
+
+        wrapped_ok = privacy.replace("it **writes to disk**",
+                                     "it **writes to\n  disk**")
+        self.assertNotEqual(wrapped_ok, privacy)
+        self.assertEqual(undisclosed_component_writes(wrapped_ok, writers), {})
+        wrapped_stale = privacy.replace(
+            "With `--apply` it **writes to disk**",
+            "It writes nothing to\n  disk. With `--apply` it **writes to disk**")
+        self.assertEqual(undisclosed_component_writes(wrapped_stale, writers),
+                         {migrate: ["still says it writes nothing to disk"]})
+        wrapped_sole = privacy.replace("the only component that edits files",
+                                       "the only component that\n  writes files")
+        self.assertEqual(undisclosed_component_writes(wrapped_sole, writers),
+                         {migrate: ["claims to be the only writer of 2"]})
+
+        gaps = undisclosed_component_writes(privacy, writers + [report])
+        self.assertEqual(gaps, {report: ["does not say it writes to disk",
+                                         "still says it writes nothing to disk"]})
+
+    def test_a_planted_write_makes_its_component_a_writer(self):
+        """The detection half, against a real script: the activity report
+        given one `write_text` is a writer, and the shipped one is not."""
+        report = REPO / "scripts" / "friction-report.py"
+        name = "scripts/friction-report.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "scripts").mkdir()
+            (Path(tmp) / name).write_text(
+                report.read_text(encoding="utf-8")
+                + "\npathlib.Path('out').write_text('x')\n", encoding="utf-8")
+            self.assertTrue(writes_to_disk(name, Path(tmp), [name]))
+        self.assertFalse(writes_to_disk(name))
 
 
 if __name__ == "__main__":
