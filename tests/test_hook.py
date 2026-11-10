@@ -142,6 +142,33 @@ class ClassificationUnit(unittest.TestCase):
         self.assertIsNone(hook.detect_action("git push origin --delete claude/foo"))
         self.assertIsNone(hook.detect_action("git push --tags"))
 
+    def test_a_push_that_sends_nothing_is_silent(self):
+        # A dry run moves no ref and `--help` reads a manual page (Q63).
+        for cmd in ("git push --dry-run origin HEAD:refs/heads/x",
+                    "git push -n origin claude/foo",
+                    "git push -fn origin claude/foo",
+                    "git push -nv origin claude/foo",
+                    "git push --dr origin claude/foo",
+                    "git push --dry-ru origin claude/foo",
+                    "git push -u --dry-run",
+                    "git push --help",
+                    "git push -h",
+                    "git -C . push --dry-run origin claude/foo"):
+            self.assertIsNone(hook.detect_action(cmd), cmd)
+
+    def test_an_n_inside_an_option_value_is_not_a_dry_run(self):
+        # `-o` takes the rest of its word as the value, and after `--` every
+        # word is positional.
+        for cmd in ("git push -onotify origin claude/foo",
+                    "git push -o no-ci origin claude/foo",
+                    "git push --no-verify origin claude/foo",
+                    "git push -o -n origin claude/foo",
+                    "git push -fo -n origin claude/foo",
+                    "git push --push-option -n origin claude/foo",
+                    "git push --d origin claude/foo",
+                    "git push origin -- -n"):
+            self.assertEqual(hook.detect_action(cmd), "git_push", cmd)
+
     def test_ignore_tag_refspec_push(self):
         # A release cut is not PR work — issue #34.
         self.assertIsNone(
