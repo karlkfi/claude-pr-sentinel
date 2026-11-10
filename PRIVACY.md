@@ -70,6 +70,7 @@ report).
   the auto-allow and the duplicate deny make no network call at all.
 - **The overlap check talks to GitHub**, through your already-authenticated
   `gh` CLI, and only when you run a `gh pr create`. It reads your local repo
+  — the one a `cd` earlier in the same command moves to, else the session's —
   with `git diff` / `git merge-base` / `git rev-parse` / `git merge-tree` to learn
   which lines the
   branch being opened changes — the `--head` the create names, else the branch a

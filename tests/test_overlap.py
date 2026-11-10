@@ -1685,6 +1685,67 @@ class NamedRepo(unittest.TestCase):
         self.assertIn("#9", reason)
         self.assertNotIn("#7", reason)
 
+    def test_a_create_into_a_fork_from_a_branch_only_there_is_allowed(self):
+        """The shape 0.12.0 refused: this checkout's branch overlaps #7, and
+        the create opens a different repo's branch that does not exist here."""
+        self.deny_reason(self.s.guard("gh pr create --base main --fill"))
+        self.s.pr_list([], repo="someone/fork")
+        for head in ("fork-probe", "someone:fork-probe"):
+            for flag in ("--repo", "-R"):
+                cmd = (f"gh pr create {flag} someone/fork --base main "
+                       f"--head {head} --draft --title t --body b")
+                self.assertEqual(self.s.guard(cmd), "", cmd)
+
+
+class ChainedCd(unittest.TestCase):
+    """The hook runs before the command it judges, so in `cd ../fork && gh pr
+    create` the session's directory is still the old checkout. Judging from
+    there compares the old checkout's branch against the old repo's PRs."""
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", tmp])
+        self.s = Scenario(tmp, {"app.py": numbered(80)},
+                          {"app.py": numbered(80, 40, "OURS")})
+        self.s.pr_list([(7, "other", ["app.py"])])
+        self.s.pr_diff(7, "app.py", 40)
+        fork_tmp = Path(tmp) / "fork"
+        fork_tmp.mkdir()
+        # Another checkout whose branch edits nothing #7 touches.
+        self.fork = Scenario(str(fork_tmp), {"lib.py": numbered(80)},
+                             {"lib.py": numbered(80, 40, "FORK")},
+                             branch="fork-probe").root
+
+    deny_reason = GuardDeny.deny_reason
+
+    def test_a_cd_into_another_checkout_judges_that_checkout(self):
+        self.deny_reason(self.s.guard("gh pr create --fill"))
+        rel = os.path.relpath(self.fork, self.s.root)
+        for cmd in (f"cd {self.fork} && gh pr create --fill",
+                    f"cd {rel} && gh pr create --fill",
+                    f"cd {self.fork}; gh pr create --repo someone/fork "
+                    f"--head fork-probe --fill"):
+            self.assertEqual(self.s.guard(cmd), "", cmd)
+
+    def test_a_cd_within_the_checkout_still_denies(self):
+        (self.s.root / "sub").mkdir()
+        for cmd in ("cd sub && gh pr create --fill",
+                    f"cd {self.s.root} && gh pr create --fill"):
+            self.assertIn("#7", self.deny_reason(self.s.guard(cmd)), cmd)
+
+    def test_a_cd_after_the_create_is_not_borrowed(self):
+        self.deny_reason(
+            self.s.guard(f"gh pr create --fill && cd {self.fork}"))
+
+    def test_a_cd_the_command_cannot_name_declines(self):
+        for cmd in ("cd - && gh pr create --fill",
+                    "cd \"$FORK\" && gh pr create --fill"):
+            self.assertEqual(self.s.guard(cmd), "", cmd)
+
+    def test_a_checkout_before_the_cd_belonged_to_the_old_repo(self):
+        self.assertEqual(guard.pr_create_head(
+            f"git checkout x && cd {self.fork} && gh pr create"), "")
+
 
 class ReadDisclosure(unittest.TestCase):
     """The invariant the watcher's own suite guards, applied to the second file
