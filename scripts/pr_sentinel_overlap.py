@@ -15,7 +15,9 @@ Everything here shells out, so everything here FAILS SILENT: no `gh`, no
 credentials, a detached HEAD, a base ref that doesn't resolve, a rate-limited
 token, a slow call — every one returns "no opinion" and the create proceeds.
 A missed catch is the acceptable failure; a create blocked by a probe that
-could not run is not.
+could not run is not. That covers a `gh pr diff` that failed or was never
+spent: an entry resting on a shared path alone is listed in a deny some other
+entry justifies, and never denies by itself (`deciding`).
 
 **Line ranges, not paths.** Two branches touching one file is ordinary; two
 branches touching one function is the finding. Both sides are read from the
@@ -545,10 +547,21 @@ def overlapping_prs(cwd, declared_base='', head='', repo=''):
     return hits
 
 
+def deciding(hits):
+    """`hits` if any of them justifies a deny, else [].
+
+    A `PATHED` entry is what a diff fetch that failed, or was never spent,
+    leaves behind — the probe could not run. So it rides along in a deny a
+    `RANGED` or `MERGED` entry already justifies, and decides nothing alone.
+    """
+    return hits if any(basis != PATHED for _n, _p, basis in hits) else []
+
+
 BASIS_NOTE = {
     MERGED: 'a trial merge conflicts, or both make the same edit',
     RANGED: 'edits within six lines, not trial-merged',
-    PATHED: 'shared path only, diff not fetched, not trial-merged',
+    PATHED: 'shared path only, diff not fetched, not trial-merged; listed, '
+            'not counted',
 }
 
 

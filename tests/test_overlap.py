@@ -651,12 +651,24 @@ class OverlapDetection(unittest.TestCase):
 
     def test_a_failed_diff_fetch_falls_back_to_the_shared_path(self):
         """No `pr_diff.7` fixture: the fetch fails, so the entry rests on the
-        path and must announce that rather than pass itself off as precise."""
+        path and must announce that rather than pass itself off as precise.
+
+        And it must not deny on that alone: the probe could not run, which the
+        check fails open on. The first `guard` call is the control — the same
+        scenario denies once the diff can be fetched, so the silence after it
+        is the path-only rule and not a probe that never reached `gh`."""
         s = self.one_file(40)
         s.pr_list([(7, "other", ["app.py"])])
+        s.pr_diff(7, "app.py", 40)
+        self.assertIn('"deny"', s.guard("gh pr create --fill"))
+        (s.stub_dir / "pr_diff.7").unlink()
         self.assertEqual(s.hits(), [[7, ["app.py"], overlap.PATHED]])
+        self.assertEqual(s.guard("gh pr create --fill"), "",
+                         "a shared path alone must not deny")
 
     def test_only_three_diffs_are_fetched(self):
+        """The fourth PR's diff is never fetched, so it rests on the path. A
+        deny the first three justify still lists it, marked not counted."""
         s = self.one_file(40)
         s.pr_list([(n, "other%d" % n, ["app.py"]) for n in (1, 2, 3, 4)])
         for n in (1, 2, 3, 4):
@@ -665,6 +677,23 @@ class OverlapDetection(unittest.TestCase):
         self.assertEqual([h[0] for h in hits], [1, 2, 3, 4])
         self.assertEqual([h[2] for h in hits], [overlap.RANGED] * 3 + [overlap.PATHED],
                          "the fourth PR must be reported as path-only")
+        reason = json.loads(s.guard("gh pr create --fill"))[
+            "hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("#4 (app.py; shared path only", reason)
+        self.assertIn("listed, not counted", reason)
+
+    def test_path_only_entries_alone_do_not_deny(self):
+        """Past the cap with no precise hit left: every PR whose diff was read
+        is ranged clear, and the unread one must not deny by itself."""
+        s = self.one_file(40)
+        s.pr_list([(n, "other%d" % n, ["app.py"]) for n in (1, 2, 3, 4)])
+        for n in (1, 2, 3):
+            s.pr_diff(n, "app.py", 40)
+        self.assertIn('"deny"', s.guard("gh pr create --fill"))
+        for n in (1, 2, 3):
+            s.pr_diff(n, "app.py", 70)
+        self.assertEqual([h[2] for h in s.hits()], [overlap.PATHED])
+        self.assertEqual(s.guard("gh pr create --fill"), "")
 
     def full_list(self, s):
         """A PR whose `gh pr list` entry is cut at the cap before `app.py`,
@@ -1423,6 +1452,15 @@ class ReplacedPrs(unittest.TestCase):
         reason = hso["permissionDecisionReason"]
         self.assertIn("#8 (app.py", reason)
         self.assertNotIn("#7 (", reason)
+
+    def test_naming_the_precise_pr_leaves_no_path_only_deny(self):
+        """#8's diff cannot be fetched, so it rests on the path. Once #7 is
+        named, nothing precise is left to justify a deny that lists #8."""
+        (self.s.stub_dir / "pr_diff.8").unlink()
+        self.assertEqual(self.decision("gh pr create --fill")
+                         ["permissionDecision"], "deny")
+        self.assertEqual(
+            self.s.guard('gh pr create --title t --body "Supersedes #7."'), "")
 
     def test_the_deny_names_the_route(self):
         reason = self.decision("gh pr create --fill")["permissionDecisionReason"]
