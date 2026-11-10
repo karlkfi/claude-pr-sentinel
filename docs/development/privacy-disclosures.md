@@ -8,16 +8,18 @@ check instead.
 
 ## What the gates check
 
-Each gate asks one question: does a name the code uses occur in the component's
-own section of `PRIVACY.md`?
+Each gate asks one question: does something the code does appear in the
+component's own section of `PRIVACY.md`?
 
-| Gate | Name it looks for |
+| Gate | What it looks for |
 |---|---|
 | `undisclosed_reads` | a GraphQL object or enum the watcher's queries traverse |
 | `undisclosed_rest_reads` | a literal segment of a `gh api` REST path |
+| `undisclosed_json_fields` | each field of a `gh --json` list, inside a backtick code span |
 | `undisclosed_globs` | a glob pattern a component opens files by |
 | `undisclosed_components` | a section for every script the plugin runs |
 | `undisclosed_writes` | the watcher's `PR_SENTINEL_STATE_DIR` write knob, and no "writes nothing to disk" left beside it |
+| `undisclosed_component_writes` | for every component that writes, a sentence saying it writes to disk and none denying it, and no "only component that writes" while two do |
 
 They catch the miss that keeps recurring: a read nobody mentioned at all.
 None of them can tell whether the sentence around the name is true. The
