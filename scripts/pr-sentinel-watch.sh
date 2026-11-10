@@ -238,6 +238,22 @@ BASE_GREEN_DETAIL=""
 BASE_GREEN_SHA=""
 BASE_GREEN_REPO=""
 
+# The rest of what base_fixed needs to know about that green run: its workflow
+# id and age in seconds, and the PR's own failing run of the same workflow
+# (`repos/<o>/<r>/actions/runs/<id>`). The age is a difference computed inside
+# the query, never a timestamp.
+BASE_GREEN_WF=""
+BASE_GREEN_AGE=""
+BASE_GREEN_PR_RUN=""
+
+# The commit this head forked from the base at, read from the same compare
+# response head_contains reads `.status` from. Empty when unread.
+HEAD_MERGE_BASE=""
+
+# What base_broken_at_fork found, one line for whichever report it leads to:
+# the base run at the fork point that settled the verdict, or why none did.
+FORK_DETAIL=""
+
 # The failed-check set last reported as an already-seen repeat, so the
 # `repeat_failure` notice fires once per distinct failure rather than on every
 # poll — the same reason BASE_FAILURE_REPORTED exists, and the same role in the
@@ -545,7 +561,8 @@ fmt_age() {
 }
 
 # The base branch's latest COMPLETED run of one workflow, as
-# "<conclusion>\t<workflow-file> (run <id>, <sha>, <conclusion>, <age> ago)".
+# "<conclusion>\t<sha>\t<age-seconds>\t<workflow-file> (run <id>, <sha>,
+# <conclusion>, <age> ago)".
 # Returns 1 only when the base has no readable run of that workflow: which
 # conclusions count as red is the caller's decision, not this function's.
 #
@@ -574,7 +591,9 @@ base_run_state() {
 	# prefix: it is the commit the base's verdict is attested AT, which is the
 	# operand head_contains needs. The detail stays last so the caller's `read`
 	# cannot lose a field to it.
-	printf '%s\t%s\t%s (run %s, %s, %s%s)' "$conclusion" "$sha" \
+	# `-` for a dropped age: tab is IFS whitespace, so an empty field would
+	# collapse and shift the detail into it.
+	printf '%s\t%s\t%s\t%s (run %s, %s, %s%s)' "$conclusion" "$sha" "${age:--}" \
 		"${file##*/}" "$run_id" "${sha:0:7}" "$conclusion" \
 		"${age:+, $(fmt_age "$age") ago}"
 }
@@ -642,11 +661,14 @@ resolve_expected_duration() {
 # unknown stays a wake. Two `gh api` calls per distinct run, only on a poll that
 # already found a failure. Sets BASE_FAIL_DETAIL and BASE_GREEN_DETAIL.
 base_failures_only() {
-	local links="$1" link path wf_id state conclusion sha detail seen="" resolved=0
+	local links="$1" link path wf_id state conclusion sha age detail seen="" resolved=0
 	BASE_FAIL_DETAIL=""
 	BASE_GREEN_DETAIL=""
 	BASE_GREEN_SHA=""
 	BASE_GREEN_REPO=""
+	BASE_GREEN_WF=""
+	BASE_GREEN_AGE=""
+	BASE_GREEN_PR_RUN=""
 	BASE_UNRESOLVED=""
 	while IFS= read -r link; do
 		[[ -z "$link" ]] && continue
@@ -666,7 +688,7 @@ base_failures_only() {
 			BASE_UNRESOLVED="${BASE} has no completed run of that workflow"
 			return 1
 		fi
-		IFS=$'\t' read -r conclusion sha detail <<<"$state"
+		IFS=$'\t' read -r conclusion sha age detail <<<"$state"
 		# `cancelled` is deliberately not red: a run someone stopped by hand says
 		# nothing about the base's health, and falling through to `check_failure`
 		# is the safe direction.
@@ -680,6 +702,9 @@ base_failures_only() {
 				BASE_GREEN_DETAIL="Last ${BASE} run: ${detail}"$'\n'
 				BASE_GREEN_SHA="$sha"
 				BASE_GREEN_REPO="${path%/actions/runs/*}"
+				BASE_GREEN_WF="$wf_id"
+				BASE_GREEN_AGE="${age#-}"
+				BASE_GREEN_PR_RUN="$path"
 				return 1 ;;
 		esac
 		BASE_FAIL_DETAIL="${BASE_FAIL_DETAIL}Also failing on ${BASE}: ${detail}"$'\n'
@@ -701,18 +726,24 @@ base_failures_only() {
 # more than the saved round trip — a watcher that runs git in the session's
 # worktree is a watcher that can touch the branch it is watching.
 #
-# Reads `.status` alone, which GitHub computes from the commit graph:
+# Reads `.status`, which GitHub computes from the commit graph:
 # `identical`/`ahead` mean the head has the base commit behind it, `behind` and
 # `diverged` mean it does not. Anything else — an unreadable response, a repo
 # the token cannot compare in, a `gh` too old for the endpoint — is 2, and
-# every caller treats 2 as the current behaviour rather than the new one.
+# every caller treats 2 as the current behaviour rather than the new one. The
+# same response's `merge_base_commit.sha` goes into HEAD_MERGE_BASE, so the
+# fork point costs no call of its own.
 head_contains() {
-	local repo="$1" sha="$2" status
+	local repo="$1" sha="$2" out status mb
+	HEAD_MERGE_BASE=""
 	[[ "$repo" == repos/*/* ]] || return 2
 	[[ "$sha" =~ ^[0-9a-f]{7,40}$ ]] || return 2
 	[[ "${HEAD_SHA:-}" =~ ^[0-9a-f]{7,40}$ ]] || return 2
-	status=$(gh api "${repo}/compare/${sha}...${HEAD_SHA}" -q '.status' \
+	out=$(gh api "${repo}/compare/${sha}...${HEAD_SHA}" \
+		-q '[.status, (.merge_base_commit.sha // "")] | @tsv' \
 		2>/dev/null || true)
+	IFS=$'\t' read -r status mb <<<"$out"
+	[[ "$mb" =~ ^[0-9a-f]{40}$ ]] && HEAD_MERGE_BASE="$mb"
 	case "$status" in
 		identical|ahead) return 0 ;;
 		behind|diverged) return 1 ;;
@@ -720,18 +751,105 @@ head_contains() {
 	esac
 }
 
-# True only when base_failures_only proved the base GREEN and head_contains
-# proved this head does not have that green commit behind it.
+# Red, green, or neither, for one completed run's conclusion. `cancelled`,
+# `skipped` and the rest say nothing about the code, so they settle nothing.
+run_verdict() {
+	case "$1" in
+		failure|timed_out|startup_failure) echo red ;;
+		success) echo green ;;
+		*) echo none ;;
+	esac
+}
+
+# The base's verdict on one workflow at this head's fork point, as
+# "red|green\t<workflow-file> (run <id>, <sha>, <conclusion>)". Returns 1 when
+# no run settles it.
 #
-# Undecidable is false, in both directions: no green base run (the fail-safe
-# returns of base_failures_only leave BASE_GREEN_SHA empty) and an unreadable
-# compare (head_contains' 2) both leave attribution exactly where it was, which
-# is the wake. Every uncertainty here falls through to the old behaviour.
-head_predates_base_green() {
-	local rc=0
+# The run AT the merge base is read first. A path-filtered workflow skips most
+# commits, so failing that, it walks the base's recent completed runs of the
+# workflow, newest first, and takes the first red-or-green one this head has
+# behind it: the nearest earlier base run the branch actually contains. The walk
+# is capped at FORK_WALK_COMPARES compares, so a head far behind a busy base
+# comes back unsettled rather than costing a call per run.
+FORK_WALK_COMPARES=5
+fork_point_state() {
+	local repo="$1" wf="$2" mb="$3" out conclusion run_id sha file verdict
+	local rc compares=0
+	out=$(gh api \
+		"${repo}/actions/workflows/${wf}/runs?branch=${BASE}&status=completed&head_sha=${mb}&per_page=1" \
+		-q '.workflow_runs[] | [.conclusion, (.id|tostring), .head_sha, .path] | @tsv' \
+		2>/dev/null || true)
+	if [[ -n "$out" ]]; then
+		IFS=$'\t' read -r conclusion run_id sha file <<<"$out"
+		verdict=$(run_verdict "$conclusion")
+		if [[ "$verdict" != none ]]; then
+			printf '%s\t%s (run %s, %s, %s)' "$verdict" "${file##*/}" \
+				"$run_id" "${sha:0:7}" "$conclusion"
+			return 0
+		fi
+	fi
+	out=$(gh api \
+		"${repo}/actions/workflows/${wf}/runs?branch=${BASE}&status=completed&per_page=20" \
+		-q '.workflow_runs[] | [.conclusion, (.id|tostring), .head_sha, .path] | @tsv' \
+		2>/dev/null || true)
+	while IFS=$'\t' read -r conclusion run_id sha file; do
+		[[ -z "$sha" || "$sha" == "$BASE_GREEN_SHA" ]] && continue
+		verdict=$(run_verdict "$conclusion")
+		[[ "$verdict" == none ]] && continue
+		(( compares >= FORK_WALK_COMPARES )) && return 1
+		compares=$(( compares + 1 ))
+		rc=0
+		head_contains "$repo" "$sha" || rc=$?
+		(( rc == 0 )) || continue
+		printf '%s\t%s (run %s, %s, %s)' "$verdict" "${file##*/}" \
+			"$run_id" "${sha:0:7}" "$conclusion"
+		return 0
+	done <<<"$out"
+	return 1
+}
+
+# Whether the PR's own failing run is a `pull_request` run created after the
+# green base run was. Such a run tests the head merged into the base as it
+# stood at the time, so it already had the base's fix and still failed. Both
+# ages are differences computed inside the query; no timestamp is read.
+pr_run_tested_the_fix() {
+	local out event age
+	[[ -n "$BASE_GREEN_PR_RUN" && "$BASE_GREEN_AGE" =~ ^[0-9]+$ ]] || return 1
+	out=$(gh api "$BASE_GREEN_PR_RUN" \
+		-q '[.event, ((now - (.created_at|fromdateiso8601))|floor|tostring)] | @tsv' \
+		2>/dev/null || true)
+	IFS=$'\t' read -r event age <<<"$out"
+	[[ "$event" == "pull_request" && "$age" =~ ^[0-9]+$ ]] || return 1
+	(( age < BASE_GREEN_AGE ))
+}
+
+# True only when the base is green now, this head lacks that green commit, AND
+# the base was red where this head forked from it — the one state base_fixed
+# describes. A head merely behind a green base is not that state: a fork point
+# that was green too means the PR broke it, so the wake stays check_failure.
+#
+# Every uncertainty is false and leaves the wake as check_failure, which is
+# where attribution sat before base_fixed existed: no green base run, an
+# unreadable compare, no merge base in it, no base run that settles the fork
+# point. FORK_DETAIL names what was found, for whichever report follows.
+base_broken_at_fork() {
+	local rc=0 state verdict detail
+	FORK_DETAIL=""
 	[[ -n "$BASE_GREEN_SHA" ]] || return 1
 	head_contains "$BASE_GREEN_REPO" "$BASE_GREEN_SHA" || rc=$?
-	(( rc == 1 ))
+	(( rc == 1 )) || return 1
+	if pr_run_tested_the_fix; then
+		FORK_DETAIL="This PR's failing run is a pull_request run started after that ${BASE} run, so it tested a merge that already had it."$'\n'
+		return 1
+	fi
+	if [[ -z "$HEAD_MERGE_BASE" ]] \
+		|| ! state=$(fork_point_state "$BASE_GREEN_REPO" "$BASE_GREEN_WF" "$HEAD_MERGE_BASE"); then
+		FORK_DETAIL="This head does not have that run's commit behind it, and no ${BASE} run of that workflow at or before its fork point${HEAD_MERGE_BASE:+ (${HEAD_MERGE_BASE:0:7})} settled whether ${BASE} was broken there."$'\n'
+		return 1
+	fi
+	IFS=$'\t' read -r verdict detail <<<"$state"
+	FORK_DETAIL="${BASE} at this head's fork point: ${detail}"$'\n'
+	[[ "$verdict" == red ]]
 }
 
 # --------------------------------------------------------------------------
@@ -889,6 +1007,7 @@ emit_check_failure() {
 	echo "Head SHA: ${HEAD_SHA}"
 	echo "Failed checks: ${failed}"
 	printf '%s' "$BASE_GREEN_DETAIL"
+	printf '%s' "$FORK_DETAIL"
 	base_comparison_note
 	echo
 	echo "Next action: diagnose and fix the failing check(s) below in this local"
@@ -951,14 +1070,16 @@ notice_base_failure() {
 	echo "This is a NOTICE, not a wake-up: the watcher keeps polling until the check"
 	echo "clears on ${BASE}. If it clears there while still failing here, the next"
 	echo "poll wakes this session — with check_failure once this head has the fix"
-	echo "behind it, and with base_fixed while it still predates it, where the"
-	echo "action is to rebase rather than to diagnose."
+	echo "behind it, and with base_fixed while it still predates it and forked"
+	echo "from ${BASE} where it was red, where the action is to rebase rather than"
+	echo "to diagnose."
 }
 
 # The third state between the two notice_base_failure names. The base run that
-# ended the comparison is GREEN, this PR is still failing, and this head does
-# not have that green commit behind it — so the run the watcher would attribute
-# the failure by exercised code this head does not contain.
+# ended the comparison is GREEN, this PR is still failing, this head does not
+# have that green commit behind it, and the base was RED where this head forked
+# — so the run the watcher would attribute the failure by exercised code this
+# head does not contain, and the code it does contain was broken on the base.
 #
 # That makes attribution undecidable rather than settled the other way, which is
 # what the report says: the PR may still own the failure, and the way to find
@@ -978,12 +1099,14 @@ emit_base_fixed() {
 	echo "Head SHA: ${HEAD_SHA}"
 	echo "Failed checks: ${failed}"
 	printf '%s' "$BASE_GREEN_DETAIL"
+	printf '%s' "$FORK_DETAIL"
 	echo "Base branch: ${BASE} (this head does not have that run's commit behind it)"
 	echo
-	echo "The ${BASE} run above is green again, and this head predates it. So the"
-	echo "only evidence that would attribute this failure to this PR is a run of"
-	echo "code this branch does not contain yet, and what is still red here may be"
-	echo "the base breakage that run fixed."
+	echo "${BASE} was red where this branch forked from it and is green again in"
+	echo "the run above, which this head predates. So the only evidence that would"
+	echo "attribute this failure to this PR is a run of code this branch does not"
+	echo "contain yet, and what is still red here may be the base breakage that"
+	echo "run fixed."
 	base_partial_inherited
 	echo
 	echo "Do NOT diagnose and fix it from here. If it is the base's, the fix is"
@@ -1556,12 +1679,13 @@ main() {
 						notice_base_failure "$failed_names"
 						BASE_FAILURE_REPORTED="$failed_names"
 					fi
-				elif head_predates_base_green; then
-					# The base is green again and this head predates the run
-					# that proved it, so the evidence for "yours" is code this
-					# branch does not have. Terminal, and NOT recorded for the
-					# repeat dampening — a gap rather than a property, and the
-					# same one conflict/behind/dequeued already have: the Stop
+				elif base_broken_at_fork; then
+					# The base is green again, this head predates the run that
+					# proved it, and the base was red where this head forked —
+					# so what is red here may be that breakage. Terminal, and NOT
+					# recorded for the repeat dampening — a gap rather than a
+					# property, and the same one conflict/behind/dequeued already
+					# have: the Stop
 					# hook counts all four as dampenable, so a repeat quiets the
 					# block while the wake still fires. An unmoved head does say
 					# the rebase did not happen, but deferring it is a legitimate

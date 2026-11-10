@@ -139,23 +139,35 @@ report).
     `PR_SENTINEL_POLL_CLAMP=0` to switch this read off;
   - whether this PR's head commit has the base's green run behind it, when a
     failing check turns out to be green on the base after all — a `compare`
-    between those two commits, whose **`status`** word alone is read (`ahead`,
-    `behind`, `identical`, `diverged`). It distinguishes a failure this PR
+    between those two commits, whose **`status`** word (`ahead`, `behind`,
+    `identical`, `diverged`) and merge-base commit SHA are all that is read. It distinguishes a failure this PR
     caused from the base's own breakage that this branch has not picked up the
     fix for yet, so the report can say "rebase" instead of "diagnose". Read at
     most once per watch, and only on the poll where the base goes green while
-    this PR is still failing.
+    this PR is still failing. Then — to learn whether the base was red where this head
+    forked — the base branch's run of that workflow at that commit
+    (`actions/workflows/{id}/runs?head_sha=`), and when there is none, the
+    workflow's 20 most recent completed base runs followed by up to five more
+    `compare` reads to find the nearest one this head contains. Of each run, its
+    conclusion, id, head commit and workflow file are read. One more read of
+    this PR's own failing run takes its `event` and how long ago it was created,
+    as a difference computed inside the query, to recognise a `pull_request` run
+    that tested a merge already carrying the base's fix. Those run responses
+    also carry each run's name, commit message and actor; `gh`'s own query
+    reduces them to the fields named here on your machine, and **none** of the
+    rest reaches the watcher.
 
     GitHub has no narrower endpoint for that question, and its answer is not
     narrow: the response also carries the intervening commits — their messages
     and author names — and the patches of the files they changed (106 KB for a
-    seven-commit comparison, measured 2026-09-18). The `status` word is
-    extracted from it by `gh`'s own query, on your machine, before anything
+    seven-commit comparison, measured 2026-09-18). The `status` word and the
+    merge-base SHA are extracted from it by `gh`'s own query, on your machine, before anything
     reaches the watcher. **None** of the rest is parsed, stored, or printed, and
     no part of it can reach your session: `base_fixed` names the base run, the
     head commit and the failing checks, and nothing drawn from this response but
-    that one word. Setting `PR_SENTINEL_BASE_CHECK=0` switches the read off
-    along with the rest of the base comparison;
+    that one word and the merge-base SHA, whose first seven characters
+    `base_fixed` and `check_failure` may name. Setting
+    `PR_SENTINEL_BASE_CHECK=0` switches these reads off along with the rest of the base comparison;
   - a failing run's step log (`gh run view --log-failed`), only on a failure.
 - The workflow-run reads above go to GitHub's Actions REST API under your own
   repository, and nowhere else: `actions/runs/{id}` for a single run, and

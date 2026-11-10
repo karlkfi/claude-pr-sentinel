@@ -30,6 +30,13 @@ scenario is a directory of small fixture files:
   base_run.<wf> -> "conclusion\\trun-id\\thead-sha\\tworkflow-path" for the base
                  branch's latest completed run of workflow <wf> (absent = the
                  base has no run of that workflow at all)
+  fork_run.<wf> -> "conclusion\trun-id\thead-sha\tworkflow-path" for the
+                 base's run of <wf> at this head's merge base (absent = none)
+  base_runs.<wf> -> the same, one line per run, newest first, for the walk back
+                 to the nearest earlier base run this head contains
+  compare[.<sha>] -> "status[\tmerge-base-sha]" for compare/<sha>...<head>;
+                 the suffixed file wins for that base sha
+  run_event.<id> -> "event\tage-seconds" of run <id> (absent = unreadable)
   base_duration.<wf> -> seconds the base branch's latest SUCCESSFUL run of
                  workflow <wf> took, for the poll clamp's projection (absent =
                  the base has no green run of it, so the clamp stays inert)
@@ -126,18 +133,28 @@ GH_STUB = textwrap.dedent(
         # and differs only by projection. Both project a date difference, so the
         # discriminator is `.run_started_at`, which only the clamp's reads. No
         # fixture means the base has no such run of that workflow at all.
+        # A `head_sha=` filter is the run at this head's fork point
+        # (fork_run.<wf>), and `per_page=20` the walk back from it
+        # (base_runs.<wf>).
         */actions/workflows/*)
           wf="${2#*/actions/workflows/}"; wf="${wf%%/*}"
           case "${4:-}" in
             *run_started_at*) emit "base_duration.$wf" || true ;;
-            *)                emit "base_run.$wf" || true ;;
+            *)
+              case "$2" in
+                *head_sha=*)   emit "fork_run.$wf" || true ;;
+                *per_page=20*) emit "base_runs.$wf" || true ;;
+                *)             emit "base_run.$wf" || true ;;
+              esac ;;
           esac
           exit 0 ;;
-        # repos/<o>/<r>/compare/<base>...<head> -> the `compare` fixture, whose
-        # whole content is GitHub's `.status` word. No fixture means the
-        # endpoint was unreadable, which the watcher treats as undecidable.
+        # repos/<o>/<r>/compare/<base>...<head> -> `compare.<base>`, else the
+        # `compare` fixture: GitHub's `.status` word, then a tab and the merge
+        # base's SHA where the case needs one. No fixture means the endpoint
+        # was unreadable, which the watcher treats as undecidable.
         */compare/*)
-          emit "compare" || true
+          c="${2#*/compare/}"; c="${c%%...*}"
+          emit "compare.$c" || emit "compare" || true
           exit 0 ;;
         *'/actions/runs?head_sha='*)
           emit "head_runs" || echo 0
@@ -149,6 +166,7 @@ GH_STUB = textwrap.dedent(
       id="${2##*/}"
       case "${4:-}" in
         .workflow_id) emit "run_workflow.$id" || exit 1 ;;
+        *.event*)     emit "run_event.$id" || exit 1 ;;
         *)            emit "run_conclusion.$id" || exit 1 ;;
       esac
       exit 0
@@ -1096,7 +1114,9 @@ class WatcherCase(unittest.TestCase):
         """base_fixed reaches the mixed set by the same route, and its own
         comment says so — the report has to carry the same caveat."""
         files = self._mixed()
-        files["compare"] = "behind\n"
+        files["compare"] = "behind\t" + "f0" * 20 + "\n"
+        files["fork_run.77"] = ("failure\t31274900000\t" + "f0" * 20
+                                + "\t.github/workflows/tests.yml\n")
         rc, out, _ = self.run_watcher(files)
         self.assertIn("PR-SENTINEL EVENT: base_fixed", out)
         self.assertIn("Also failing on main: doc-links.yml", out)
@@ -1114,11 +1134,21 @@ class WatcherCase(unittest.TestCase):
     # above it. Without those, a stub that never reached the endpoint would pass
     # it exactly as a working one does.
 
-    def _fixed_base(self, status=None):
-        """Base green, this PR still failing, `compare` reporting `status`."""
+    MERGE_BASE = "f0" * 20
+
+    def _fixed_base(self, status=None, fork=None):
+        """Base green, this PR still failing, `compare` reporting `status`, and
+        the base's run at this head's fork point concluding `fork` — red unless
+        the case says otherwise (Q65), since base_fixed is only true of a head
+        that forked from a broken base."""
         files = self._inherited(base_conclusion="success", base_age="120")
         if status is not None:
-            files["compare"] = status + "\n"
+            files["compare"] = "%s\t%s\n" % (status, self.MERGE_BASE)
+        fork = "failure" if fork is None else fork
+        if fork:
+            files["fork_run.99"] = (
+                "%s\t31274900000\t%s\t.github/workflows/doc-links.yml\n"
+                % (fork, self.MERGE_BASE))
         return files
 
     def test_a_head_behind_the_green_base_run_reports_base_fixed(self):
@@ -1245,6 +1275,132 @@ class WatcherCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertNotIn("EVENT: timeout", out)
         self.assertEqual(out.count("PR-SENTINEL EVENT: base_fixed"), 1)
+
+    # -- base_fixed needs the base red where this head forked (Q65) ---------
+
+    # Everything above holds the fork point red. Behind a green base is true of
+    # almost every failing PR on a busy repo, so the fork point is what tells a
+    # head that inherited a breakage from one that caused its own failure. Each
+    # case below differs from `_fixed_base("behind")` — which reports
+    # base_fixed — in the fork-point fixture alone.
+
+    def test_a_green_fork_point_makes_the_failure_this_prs_own(self):
+        """The measured misfire: the PR broke its own check, the base was green
+        where it forked, and the watcher told it not to diagnose. The base
+        worked where this branch started, so the failure is the branch's."""
+        rc, out, _ = self.run_watcher(self._fixed_base("behind", fork="success"))
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: base_fixed", out)
+        self.assertIn("main at this head's fork point: doc-links.yml "
+                      "(run 31274900000, f0f0f0f, success)", out)
+        self.assertIn("BEGIN CI LOG EXCERPT", out)
+
+    def test_base_fixed_names_the_red_fork_point_run(self):
+        """The verdict now rests on two runs, so the report names both."""
+        rc, out, _ = self.run_watcher(self._fixed_base("behind"))
+        self.assertIn("PR-SENTINEL EVENT: base_fixed", out)
+        self.assertIn("main at this head's fork point: doc-links.yml "
+                      "(run 31274900000, f0f0f0f, failure)", out)
+        self.assertIn("was red where this branch forked", out)
+
+    def _walk(self, runs, contains=()):
+        """No run at the fork point itself; `runs` are the base's recent runs,
+        newest first, and `contains` the SHAs this head has behind it."""
+        files = self._fixed_base("behind", fork="")
+        files["base_runs.99"] = "".join(
+            "%s\t%d\t%s\t.github/workflows/doc-links.yml\n" % (c, 900 + i, sha)
+            for i, (c, sha) in enumerate(runs))
+        for _, sha in runs:
+            if sha == "47815b6adeadbeef":
+                continue  # the green run's own compare is _fixed_base's
+            files["compare." + sha] = (
+                "ahead" if sha in contains else "behind") + "\n"
+        return files
+
+    def test_a_path_filtered_fork_point_walks_back_to_a_red_run(self):
+        """A path-filtered workflow did not run at the merge base. The nearest
+        earlier base run this head contains is red, so the base was broken
+        where the branch started."""
+        files = self._walk([("success", "47815b6adeadbeef"),
+                            ("failure", "aaaa111"), ("failure", "bbbb222")],
+                           contains={"bbbb222"})
+        rc, out, _ = self.run_watcher(files)
+        self.assertIn("PR-SENTINEL EVENT: base_fixed", out)
+        # aaaa111 is a red run this head does NOT have, and is skipped.
+        self.assertIn("doc-links.yml (run 902, bbbb222, failure)", out)
+
+    def test_a_walk_back_to_a_green_run_is_this_prs_own(self):
+        """Control for the case above: the same walk, the contained run green."""
+        files = self._walk([("success", "47815b6adeadbeef"),
+                            ("failure", "aaaa111"), ("success", "bbbb222")],
+                           contains={"bbbb222"})
+        rc, out, _ = self.run_watcher(files)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertIn("doc-links.yml (run 902, bbbb222, success)", out)
+
+    def test_runs_that_settle_nothing_are_walked_past(self):
+        """A cancelled run says nothing about the code, at the fork point or
+        on the walk."""
+        files = self._walk([("cancelled", "cccc333"), ("failure", "bbbb222")],
+                           contains={"cccc333", "bbbb222"})
+        files["fork_run.99"] = ("cancelled\t1\t" + self.MERGE_BASE
+                                + "\t.github/workflows/doc-links.yml\n")
+        rc, out, _ = self.run_watcher(files)
+        self.assertIn("PR-SENTINEL EVENT: base_fixed", out)
+        self.assertIn("(run 901, bbbb222, failure)", out)
+
+    def test_no_base_run_at_or_before_the_fork_point_stays_a_wake(self):
+        """Nothing establishes the base was broken, so base_fixed has no
+        evidence and the wake is check_failure, which says why."""
+        files = self._walk([("success", "47815b6adeadbeef"),
+                            ("failure", "aaaa111")])
+        rc, out, _ = self.run_watcher(files)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertIn("no main run of that workflow at or before its fork "
+                      "point (f0f0f0f) settled", out)
+
+    def test_the_walk_is_capped(self):
+        """A head far behind a busy base must not cost a compare per run."""
+        runs = [("failure", "%07x" % (0xa000000 + i)) for i in range(8)]
+        files = self._walk(runs, contains={runs[-1][1]})
+        rc, out, _ = self.run_watcher(files)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertNotIn("EVENT: base_fixed", out)
+
+    def test_a_compare_with_no_merge_base_stays_a_wake(self):
+        """An old compare response, or one whose merge base is unreadable,
+        leaves no fork point to read."""
+        files = self._fixed_base("behind")
+        files["compare"] = "behind\n"
+        rc, out, _ = self.run_watcher(files)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertIn("at or before its fork point settled", out)
+
+    def test_a_pull_request_run_after_the_fix_already_tested_it(self):
+        """A pull_request run tests the head merged into the base as it stood.
+        Started after the green base run (60s ago against 120s), it had the
+        fix and still failed — yours, whatever the fork point says."""
+        files = self._fixed_base("behind")
+        files["run_event.22"] = "pull_request\t60\n"
+        rc, out, _ = self.run_watcher(files)
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out)
+        self.assertIn("tested a merge that already had it", out)
+
+    def test_a_pull_request_run_before_the_fix_is_still_base_fixed(self):
+        """Control: the same run started before the green run did."""
+        files = self._fixed_base("behind")
+        files["run_event.22"] = "pull_request\t600\n"
+        rc, out, _ = self.run_watcher(files)
+        self.assertIn("PR-SENTINEL EVENT: base_fixed", out)
+
+    def test_a_push_run_tests_the_head_alone(self):
+        """Control: a push run tests the head commit, never a merge, so its age
+        says nothing about whether it had the fix."""
+        files = self._fixed_base("behind")
+        files["run_event.22"] = "push\t60\n"
+        rc, out, _ = self.run_watcher(files)
+        self.assertIn("PR-SENTINEL EVENT: base_fixed", out)
 
     def test_base_failure_notice_promises_the_right_successor(self):
         """The notice's closing paragraph promised `check_failure` outright,

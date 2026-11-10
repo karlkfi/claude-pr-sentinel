@@ -265,8 +265,28 @@ landed. So before attributing the failure, the watcher asks whether this head
 has the green run's own commit behind it — `repos/<o>/<r>/compare/<base-run
 -sha>...<head-sha>`, reading the `.status` word alone. `ahead`/`identical` means
 it does, and the wake is `check_failure` as before; `behind`/`diverged` means it
-does not, and the wake is **`base_fixed`**, whose instruction is to update the
-branch and relaunch rather than to diagnose anything.
+does not, the wake *can* be **`base_fixed`**, whose instruction is to update
+the branch and relaunch rather than to diagnose anything.
+
+Predating the green commit is necessary and not sufficient, which the first
+version missed. On a busy repository nearly every failing PR is a commit or two
+behind a green base, so "behind" alone routed most genuine failures away from
+`check_failure` — stripping the log excerpt and telling the session not to
+diagnose a defect that was its own (measured on a PR that edited the exact line
+its failing job asserts on, so it failed on any base). The question that settles
+attribution is whether the base was broken **where this head forked**, so the
+watcher also reads the base's run of the same workflow at the merge base, which
+the same `compare` response already names: red there is `base_fixed`, green is
+`check_failure`. A path-filtered workflow usually has no run at that commit, so
+it walks back through the base's recent runs of the workflow and takes the
+first red-or-green one the head contains, capped at five `compare` reads. A
+cheaper heuristic — require the run before the green one to be red — was
+rejected because it answers a different question: whether the base was broken
+recently, not whether it was broken where this branch started. And a
+`pull_request` run created after the green base run is `check_failure` whatever
+the fork point says: that event tests the head merged into the base as it stood,
+so it already had the fix. The two run ages are compared as differences computed
+inside the query, so no timestamp reaches the watcher.
 
 The operand is the commit the base's verdict is attested **at**, not the base's
 tip: the tip may have moved since that run, and a head missing those later
@@ -282,8 +302,8 @@ not establish that every failing check is green on the base; what it establishes
 is that the evidence for "yours" is code this head does not contain, which makes
 attribution undecidable rather than settled the other way. Overclaiming would be
 the same defect mirrored. Every uncertainty falls through to the old behaviour:
-an unreadable compare, a `gh` too old for the endpoint, and no green base run
-all leave `check_failure` exactly as it was. Like absorption it is
+an unreadable compare, a `gh` too old for the endpoint, no green base run, and a
+fork point no base run settles all leave `check_failure` exactly as it was. Like absorption it is
 all-or-nothing and fails safe — an unresolvable run, an unreadable workflow id, a
 `cancelled` base run, or a base with no run of that workflow at all all stay a
 wake. Unlike absorption it carries an off switch (`PR_SENTINEL_BASE_CHECK=0`),

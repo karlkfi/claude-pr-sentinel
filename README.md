@@ -357,7 +357,7 @@ needed:
 | a check concluded fail/cancel and its workflow run didn't conclude `success` | **check_failure** | fix the failure (log excerpt attached), push, relaunch |
 | every failing check belongs to a run that concluded `success` (`continue-on-error: true`) | *(treated as passing, keep polling)* | nothing — GitHub already ruled the failure non-blocking; the suppression is noted on the task's stderr |
 | every failing check's workflow is **already red on the base branch** | *(notice: **base_failure**, keep polling)* | nothing — the PR inherited the failure; don't add the fix here (see [Failures inherited from the base branch](#failures-inherited-from-the-base-branch)) |
-| the base is **green again** but this head does **not** have that green commit behind it | **base_fixed** | don't diagnose it — rebase onto `<base>` (default) and force-push with lease, relaunch, and let the next run say whose the failure is (see [A head that predates the base's fix](#a-head-that-predates-the-bases-fix)) |
+| the base is **green again**, this head does **not** have that green commit behind it, and the base was **red where this head forked** | **base_fixed** | don't diagnose it — rebase onto `<base>` (default) and force-push with lease, relaunch, and let the next run say whose the failure is (see [A head that predates the base's fix](#a-head-that-predates-the-bases-fix)) |
 | the **same** failure (same head commit, same failed set) was already reported by an earlier watcher run, inside `PR_SENTINEL_DAMPEN` | *(notice: **repeat_failure**, keep polling)* | nothing — you were told this last time and nothing has been pushed since (see [A relaunch over a failure you already declined](#a-relaunch-over-a-failure-you-already-declined)) |
 | `mergeStateStatus == DIRTY` | **conflict** | rebase onto `<base>` (default), resolve, `git push --force-with-lease`, relaunch — or merge (`PR_SENTINEL_HEAL=merge`). On a [stacked PR](#a-stacked-pull-request-needs-the---onto-form) the rebase report names the `--onto` escape |
 | `mergeStateStatus == BEHIND` | **behind** | rebase onto `<base>` (default) and force-push with lease, relaunch — or merge to fast-forward (`PR_SENTINEL_HEAL=merge`) |
@@ -948,24 +948,41 @@ than a loss, since the still-red check wakes you the moment it clears there.
 ### A head that predates the base's fix
 
 The rule above has two states and the world has three. The base goes green, your
-PR is still red — and whether that failure is yours turns on one more fact:
-whether your head has the commit that green run ran at behind it.
+PR is still red — and whether that failure is yours turns on two more facts:
+whether your head has the commit that green run ran at behind it, and whether
+the base was broken where your branch forked from it.
 
-If it doesn't, nothing has been proven about your branch. The run that cleared
-the base tested code you don't have. What's red on your PR is the base breakage
-you haven't picked up the fix for, and "diagnose and fix the failing check" sends
-you to write a second copy of a fix that has already landed — onto a branch that
-only needed updating, and into a conflict with the original.
+Being behind a green base is not enough on its own. On a busy repository almost
+every failing PR is a commit or two behind, and most of them broke their own
+check. What makes a failure plausibly the base's is a base that was **red where
+your branch started**, then fixed in a commit you don't have. In that state the
+run that cleared the base tested code you don't have, what's red on your PR may
+be the breakage you haven't picked up the fix for, and "diagnose and fix the
+failing check" sends you to write a second copy of a fix that has already
+landed — onto a branch that only needed updating, and into a conflict with the
+original.
 
-So the watcher asks GitHub whether the two commits are related, and reports
-**`base_fixed`** instead:
+So the watcher asks GitHub whether the two commits are related, then reads the
+base's run of the same workflow at your branch's fork point, and reports
+**`base_fixed`** only when that run was red:
 
 ```
 PR-SENTINEL EVENT: base_fixed
 Failed checks: doc-links (fail)
 Last main run: doc-links.yml (run 31274922338, 47815b6, success, 2m ago)
+main at this head's fork point: doc-links.yml (run 31274900000, f0f0f0f, failure)
 Base branch: main (this head does not have that run's commit behind it)
 ```
+
+A green run at the fork point means the base worked where your branch started,
+so the failure is yours and the report is `check_failure`, naming that run. A
+path-filtered workflow usually did not run at the fork point itself; the
+watcher then walks back through the base's recent runs of it, newest first, and
+takes the first red or green one your head has behind it. The walk spends at
+most five `compare` reads, and a fork point it cannot settle stays
+`check_failure`, with a line saying so. One more case is `check_failure` by
+construction: a `pull_request` run started after the green base run tested your
+head merged into a base that already had the fix.
 
 It's a wake-up, not a notice — you have something to do — and the action is to
 update the branch, not to fix anything:
@@ -990,13 +1007,17 @@ conflict.
 The ancestry question is one read of GitHub's `compare` endpoint, taken at most
 once per watch and only on the poll where the base goes green while the PR is
 still failing. Only the `status` word (`ahead`, `behind`, `identical`,
-`diverged`) is read. The watcher shells out to `git` nowhere — every `git` string
+`diverged`) and the merge base's commit SHA are read. The fork point then costs
+one Actions read, plus a list of recent base runs and up to five more `compare`
+reads when the workflow did not run there, plus one read of your failing run's
+event and age. The watcher shells out to `git` nowhere — every `git` string
 in its reports is text for you to run, never something it runs itself — so a
 local `merge-base` was the wrong instrument however much cheaper it looks.
 
 Every uncertainty falls through to the old behaviour: no readable `compare`, no
-green base run, a `gh` too old for the endpoint, or `PR_SENTINEL_BASE_CHECK=0`
-all leave you with `check_failure` exactly as before.
+merge base in it, no base run that settles the fork point, no green base run, a
+`gh` too old for the endpoint, or `PR_SENTINEL_BASE_CHECK=0` all leave you with
+`check_failure` exactly as before.
 
 ### A relaunch over a failure you already declined
 
