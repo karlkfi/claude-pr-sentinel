@@ -58,7 +58,8 @@ or follows a `git checkout`/`git switch` in the same command, is judged on that
 branch rather than on whatever HEAD is when the hook runs — the hook runs before
 any of the command does, so a chained checkout has not happened yet. A head that
 resolves to no commit here leaves nothing to compare, and the check declines.
-A create that names `--repo` is compared against that repo's open PRs.
+A create that names `--repo` is compared against that repo's open PRs, and one
+after a `cd` in the same command is judged in the checkout the `cd` lands in.
 """
 import fnmatch
 import json

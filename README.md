@@ -207,7 +207,10 @@ and failing that, the last `git checkout <branch>` or `git switch <branch>`
 earlier in the same command does; otherwise it is the checked-out branch. A
 named head that is no branch here, locally or on `origin`, leaves nothing to
 compare and the check declines. A create that names `--repo` is compared
-against that repository's open PRs rather than the checkout's.
+against that repository's open PRs rather than the checkout's. A `cd` earlier
+in the same command moves the check to the checkout it lands in, so `cd
+../fork && gh pr create` is judged there; a `cd` whose target the command
+alone cannot name (`cd -`, `cd "$DIR"`) leaves the check declining.
 
 This is the one part of the hooks that **talks to GitHub**: `gh pr list` for the
 open PRs and their paths, then `gh pr diff` for at most three of them, and only

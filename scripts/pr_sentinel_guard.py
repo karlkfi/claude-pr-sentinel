@@ -438,13 +438,53 @@ def pr_create_head(command, lenient=False):
     for group in tokenize.simple_commands(command, lenient):
         if _is_gh_pr_create(group):
             return _pr_create_head(group) or moved
+        if _is_cd(group):
+            moved = ''                   # a checkout before it was another repo's
         moved = _switch_target(group) or moved
     return ''
+
+
+def _is_cd(group):
+    argv = _strip_env_prefix(list(group))
+    return bool(argv) and argv[0] == 'cd'
+
+
+def _cd_target(group, here):
+    """The directory a `cd` lands in from `here`, or None when the command
+    alone cannot say — `cd -`, a variable, a substitution."""
+    operands = [a for a in _strip_env_prefix(list(group))[1:]
+                if a not in ('-L', '-P', '-e', '--')]
+    if not operands:
+        return os.path.expanduser('~')
+    target = operands[0]
+    if target == '-' or '$' in target or '`' in target:
+        return None
+    return os.path.normpath(os.path.join(here, os.path.expanduser(target)))
+
+
+def pr_create_cwd(cwd, command, lenient=False):
+    """The directory a `gh pr create` runs in, or None when it is unknowable.
+
+    The hook runs before the command does, so in `cd ../fork && gh pr create`
+    the session's directory is still the old checkout, and judging from there
+    compares another repo's branch against another repo's open PRs."""
+    here = cwd
+    for group in tokenize.simple_commands(command, lenient):
+        if _is_gh_pr_create(group):
+            return here
+        if _is_cd(group):
+            here = _cd_target(group, here or '.')
+            if here is None:
+                return None
+    return here
 
 
 def create_overlaps(cwd, command, lenient=False):
     """The overlap hits that decide about this create: the PRs it collides
     with, less any it says it replaces, and none at all on path-only ones."""
+    cwd = pr_create_cwd(cwd, command, lenient)
+    if cwd is None:
+        return []                        # somewhere the command alone can't name
     hits = overlap.overlapping_prs(cwd,
                                    pr_create_base(command, lenient),
                                    pr_create_head(command, lenient),
