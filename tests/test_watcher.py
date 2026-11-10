@@ -1682,6 +1682,64 @@ class WatcherCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("PR-SENTINEL EVENT: ready", out)
 
+    # -- ready's summary follows the merge state (Q36) ------------------------
+
+    # On UNSTABLE every check row is green to the watcher while GitHub reports a
+    # non-passing commit status for the same head. The report used to print a
+    # fixed "All checks are green" four lines under `mergeStateStatus: UNSTABLE`.
+    # Each UNSTABLE case has a CLEAN control on the same fixture, so the merge
+    # state is the only thing that differs.
+
+    def _green_at(self, merge):
+        return {
+            "pr_view": "OPEN\t%s\tmain\tabc1234def\n" % merge,
+            "pr_checks": "pass\tbuild\thttps://github.com/o/r/actions/runs/11/job/1\n",
+        }
+
+    def test_unstable_ready_does_not_call_the_pr_green(self):
+        rc, out, _ = self.run_watcher(self._green_at("UNSTABLE"))
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: ready", out)
+        self.assertNotIn("All checks are green", out)
+        self.assertNotIn("Nothing left to", out)
+        self.assertIn("non-passing commit status", out)
+        # Both causes, and the command that separates them.
+        self.assertIn("advisory check is failing", out)
+        self.assertIn("registered after these check rows were read", out)
+        self.assertIn("gh run list --commit abc1234def", out)
+        self.assertIn("hand back to a human", out)
+        self.assertIn("Do NOT auto-merge", out)
+
+    def test_clean_ready_keeps_the_plain_summary(self):
+        rc, out, _ = self.run_watcher(self._green_at("CLEAN"))
+        self.assertIn("PR-SENTINEL EVENT: ready", out)
+        self.assertIn("All checks are green and the PR has no merge conflict.",
+                      out)
+        self.assertIn("Nothing left to babysit", out)
+        self.assertNotIn("non-passing commit status", out)
+
+    def test_has_hooks_ready_keeps_the_plain_summary(self):
+        rc, out, _ = self.run_watcher(self._green_at("HAS_HOOKS"))
+        self.assertIn("PR-SENTINEL EVENT: ready", out)
+        self.assertIn("All checks are green", out)
+        self.assertNotIn("non-passing commit status", out)
+
+    def test_unstable_ready_watching_does_not_call_the_pr_green(self):
+        rc, out, _ = self.run_watcher(
+            self._green_at("UNSTABLE"), virtual_clock=True,
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed", "PR_SENTINEL_TIMEOUT": "20"})
+        self.assertIn("PR-SENTINEL EVENT: ready_watching", out)
+        self.assertNotIn("All checks are green", out)
+        self.assertIn("gh run list --commit abc1234def", out)
+
+    def test_clean_ready_watching_keeps_the_plain_summary(self):
+        rc, out, _ = self.run_watcher(
+            self._green_at("CLEAN"), virtual_clock=True,
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed", "PR_SENTINEL_TIMEOUT": "20"})
+        self.assertIn("PR-SENTINEL EVENT: ready_watching", out)
+        self.assertIn("All checks are green", out)
+        self.assertNotIn("non-passing commit status", out)
+
     # -- green confirmed across polls (issue #37) -----------------------------
 
     def test_ready_waits_for_a_second_green_poll(self):

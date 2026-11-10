@@ -615,6 +615,28 @@ ready. An allowlist (`ready` only on `CLEAN`) was rejected: `UNSTABLE` (a
 non-required check failing) and `HAS_HOOKS` are legitimately mergeable, and a
 repo can sit in them indefinitely.
 
+What `ready` *says* on `UNSTABLE` is a separate question from whether it fires.
+The watcher creates that state on purpose: a failing check whose workflow run
+concluded `success` (`continue-on-error`) is counted as passing, so every row is
+green to the watcher while GitHub reports a failing commit status for the same
+head. That holds for the life of the head. It can also be a race, with a run
+registered before the view read while the checks endpoint still serves older
+rows. A fixed "all checks are green" under `mergeStateStatus: UNSTABLE` left the
+reader to pick which line to believe, so the summary is derived from the merge
+state. `CLEAN` and `HAS_HOOKS` keep the plain wording. `UNSTABLE` names both
+causes, refuses to pick, as `unchecked` does, and adds `gh run list --commit
+<head>` as a step before the handback.
+
+An `UNSTABLE` hold was rejected in both forms. The unconditional one is the
+allowlist above. The transient form, N consecutive polls like `BLOCKED`, has
+nothing to release into: `BLOCKED`'s hold ends in a distinct event that refuses
+to call the PR green, while an `UNSTABLE` PR is mergeable, so the event after
+the wait would be `ready` again. It would add more consecutive polls, beyond
+`PR_SENTINEL_GREEN_POLLS`, against a state the `continue-on-error` route holds
+forever. And when `gh pr checks` and `mergeStateStatus` disagree, the watcher
+cannot tell which is stale, so a hold would pick a side. The derived summary
+hands the disagreement to the reader instead, with the command that settles it.
+
 `blocked` and `unchecked` join `ready`/`closed` in the Stop hook's concluded
 set. Both of `blocked`'s causes need a human — a review gate is the human's turn
 by definition, and a gate that never registered can't be waited out, since the

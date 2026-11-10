@@ -1325,15 +1325,44 @@ emit_dequeued() {
 	exit 0
 }
 
+# What `ready` and `ready_watching` say about the checks, derived from the merge
+# state rather than fixed. Every check row is green to the watcher by the time
+# either is reached, but on UNSTABLE GitHub reports a non-passing commit status
+# for the same head, and a fixed "all checks are green" four lines under that
+# header leaves the reader to pick which to believe. The two causes cannot be
+# told apart from here, so this names both and refuses to pick, like
+# unchecked_detail, and hands over the command that separates them.
+ready_summary() {
+	if [[ "$MERGE" == "UNSTABLE" ]]; then
+		echo "Every check row reported here is green, but GitHub reports a"
+		echo "non-passing commit status for this head (mergeStateStatus UNSTABLE)."
+		echo "The two causes look identical from here:"
+		echo "  - a non-required or advisory check is failing — e.g. a"
+		echo "    continue-on-error job, which this watcher counts as passing"
+		echo "    because its workflow run concluded success"
+		echo "  - a run registered after these check rows were read"
+		echo "Separate them with: gh run list --commit ${HEAD_SHA}"
+		echo "If nothing is still running, the PR is mergeable as it stands: say"
+		echo "which check is red when handing it back."
+	else
+		echo "All checks are green and the PR has no merge conflict."
+	fi
+}
+
 emit_ready() {
 	report_header ready
 	echo "State: OPEN"
 	echo "mergeStateStatus: ${MERGE}"
 	echo "Head SHA: ${HEAD_SHA}"
 	echo
-	echo "All checks are green and the PR has no merge conflict. Nothing left to"
-	echo "babysit. Next action: hand back to a human for merge review. Do NOT"
-	echo "auto-merge."
+	ready_summary
+	if [[ "$MERGE" == "UNSTABLE" ]]; then
+		echo "Next action: confirm with the command above, then hand back to a human"
+		echo "for merge review. Do NOT auto-merge."
+	else
+		echo "Nothing left to babysit. Next action: hand back to a human for merge"
+		echo "review. Do NOT auto-merge."
+	fi
 	runs_unread_note
 	exit 0
 }
@@ -1349,8 +1378,8 @@ notice_ready_watching() {
 	echo "mergeStateStatus: ${MERGE}"
 	echo "Head SHA: ${HEAD_SHA}"
 	echo
-	echo "All checks are green and the PR has no merge conflict. Hand it back to a"
-	echo "human for merge review; do NOT auto-merge."
+	ready_summary
+	echo "Hand it back to a human for merge review; do NOT auto-merge."
 	runs_unread_note
 	echo
 	echo "This is a NOTICE, not a wake-up: PR_SENTINEL_WATCH_UNTIL=closed, so the"
