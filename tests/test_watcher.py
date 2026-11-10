@@ -1707,6 +1707,9 @@ class WatcherCase(unittest.TestCase):
         self.assertIn("advisory check is failing", out)
         self.assertIn("registered after these check rows were read", out)
         self.assertIn("gh run list --commit abc1234def", out)
+        # That list shows a continue-on-error run as success, so it cannot
+        # name the red check; the checks view can.
+        self.assertIn("gh pr checks 123", out)
         self.assertIn("hand back to a human", out)
         self.assertIn("Do NOT auto-merge", out)
 

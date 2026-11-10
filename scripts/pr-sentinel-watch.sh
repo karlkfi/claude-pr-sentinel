@@ -1342,8 +1342,9 @@ ready_summary() {
 		echo "    because its workflow run concluded success"
 		echo "  - a run registered after these check rows were read"
 		echo "Separate them with: gh run list --commit ${HEAD_SHA}"
-		echo "If nothing is still running, the PR is mergeable as it stands: say"
-		echo "which check is red when handing it back."
+		echo "If nothing is still running, the PR is mergeable as it stands. That"
+		echo "list shows a continue-on-error run as success, so name the red check"
+		echo "from gh pr checks ${PR} when handing it back."
 	else
 		echo "All checks are green and the PR has no merge conflict."
 	fi
