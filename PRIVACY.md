@@ -142,9 +142,11 @@ report).
     between those two commits, whose **`status`** word (`ahead`, `behind`,
     `identical`, `diverged`) and merge-base commit SHA are all that is read. It distinguishes a failure this PR
     caused from the base's own breakage that this branch has not picked up the
-    fix for yet, so the report can say "rebase" instead of "diagnose". Read at
-    most once per watch, and only on the poll where the base goes green while
-    this PR is still failing. Then — to learn whether the base was red where this head
+    fix for yet, so the report can say "rebase" instead of "diagnose". Read only
+    on a poll where the base is green while this PR is still failing, and once
+    per head commit and green base run — a watch that keeps polling past it
+    reuses the answer. The same holds for every read below that serves this
+    question. Then — to learn whether the base was red where this head
     forked — the base branch's run of that workflow at that commit
     (`actions/workflows/{id}/runs?head_sha=`), and when there is none, the
     workflow's 20 most recent completed base runs followed by up to five more

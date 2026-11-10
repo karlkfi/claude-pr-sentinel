@@ -254,6 +254,14 @@ HEAD_MERGE_BASE=""
 # the base run at the fork point that settled the verdict, or why none did.
 FORK_DETAIL=""
 
+# base_broken_at_fork's last verdict, and the inputs it was taken for. A
+# relaunch over an already-reported failure polls on with repeat_failure, and
+# reaches base_broken_at_fork every poll; none of these inputs moves without a
+# push or a new base run, so the reads are taken once per distinct key.
+FORK_KEY=""
+FORK_RC=1
+FORK_DETAIL_SEEN=""
+
 # The failed-check set last reported as an already-seen repeat, so the
 # `repeat_failure` notice fires once per distinct failure rather than on every
 # poll — the same reason BASE_FAILURE_REPORTED exists, and the same role in the
@@ -716,9 +724,10 @@ base_failures_only() {
 # Whether this PR's head has $2 behind it, in the repository $1 names.
 # 0 = yes (or the two are the same commit), 1 = no, 2 = undecidable.
 #
-# Called only on the poll where base_failures_only reported the base GREEN and
-# this PR still failing, which is the poll that already wakes the session — so
-# it costs one `gh api` call once per watch, not one per poll.
+# Called only when base_failures_only reported the base GREEN and this PR still
+# failing, and through base_broken_at_fork's cache, so it costs one `gh api`
+# call per head and green base run rather than one per poll — a repeat_failure
+# watch reaches it on every poll.
 #
 # `gh api`'s compare endpoint rather than `git merge-base --is-ancestor`: the
 # watcher shells out to `git` nowhere, and every `git` string in it is text
@@ -833,9 +842,22 @@ pr_run_tested_the_fix() {
 # unreadable compare, no merge base in it, no base run that settles the fork
 # point. FORK_DETAIL names what was found, for whichever report follows.
 base_broken_at_fork() {
-	local rc=0 state verdict detail
+	local key="${HEAD_SHA}|${BASE_GREEN_SHA}|${BASE_GREEN_WF}|${BASE_GREEN_PR_RUN}"
 	FORK_DETAIL=""
 	[[ -n "$BASE_GREEN_SHA" ]] || return 1
+	if [[ "$key" != "$FORK_KEY" ]]; then
+		FORK_RC=0
+		fork_verdict || FORK_RC=$?
+		FORK_KEY="$key"
+		FORK_DETAIL_SEEN="$FORK_DETAIL"
+	fi
+	FORK_DETAIL="$FORK_DETAIL_SEEN"
+	return "$FORK_RC"
+}
+
+# The uncached body of base_broken_at_fork.
+fork_verdict() {
+	local rc=0 state verdict detail
 	head_contains "$BASE_GREEN_REPO" "$BASE_GREEN_SHA" || rc=$?
 	(( rc == 1 )) || return 1
 	if pr_run_tested_the_fix; then

@@ -263,10 +263,11 @@ after the base goes green, and reading that as "the base is clear, so this is
 yours" sends the session to write a second copy of a fix that has already
 landed. So before attributing the failure, the watcher asks whether this head
 has the green run's own commit behind it — `repos/<o>/<r>/compare/<base-run
--sha>...<head-sha>`, reading the `.status` word alone. `ahead`/`identical` means
-it does, and the wake is `check_failure` as before; `behind`/`diverged` means it
-does not, the wake *can* be **`base_fixed`**, whose instruction is to update
-the branch and relaunch rather than to diagnose anything.
+-sha>...<head-sha>`, reading the `.status` word and the merge base's SHA.
+`ahead`/`identical` means it does, and the wake is `check_failure` as before;
+`behind`/`diverged` means it does not, and the wake *can* be **`base_fixed`**,
+whose instruction is to update the branch and relaunch rather than to diagnose
+anything.
 
 Predating the green commit is necessary and not sufficient, which the first
 version missed. On a busy repository nearly every failing PR is a commit or two

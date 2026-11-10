@@ -1004,9 +1004,10 @@ isn't red, so a green one doesn't prove every failing check is green there. And
 it doesn't rebase for you: the branch belongs to your session, and a rebase can
 conflict.
 
-The ancestry question is one read of GitHub's `compare` endpoint, taken at most
-once per watch and only on the poll where the base goes green while the PR is
-still failing. Only the `status` word (`ahead`, `behind`, `identical`,
+The ancestry question is one read of GitHub's `compare` endpoint, taken only on
+a poll where the base is green while the PR is still failing, and once per head
+and green base run: a watch that keeps polling past it, such as a relaunch that
+reports `repeat_failure`, reuses the verdict instead of reading again. Only the `status` word (`ahead`, `behind`, `identical`,
 `diverged`) and the merge base's commit SHA are read. The fork point then costs
 one Actions read, plus a list of recent base runs and up to five more `compare`
 reads when the workflow did not run there, plus one read of your failing run's

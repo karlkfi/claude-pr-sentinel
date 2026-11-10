@@ -1402,6 +1402,25 @@ class WatcherCase(unittest.TestCase):
         rc, out, _ = self.run_watcher(files)
         self.assertIn("PR-SENTINEL EVENT: base_fixed", out)
 
+    def test_a_repeat_watch_reads_the_fork_point_once(self):
+        """A relaunch over a reported check_failure polls on with the
+        repeat_failure notice, and every poll reaches the fork-point verdict.
+        Its inputs do not move without a push or a new base run, so the reads
+        are taken once. The fork-point run here answers green on the first
+        read and red on every later one: a second read would turn the notice
+        into base_fixed."""
+        first = self._fixed_base("behind", fork="success")
+        second = dict(first)
+        second["fork_run.99.1"] = first["fork_run.99"]
+        second["fork_run.99"] = first["fork_run.99"].replace("success", "failure")
+        (_, out1, _), (rc2, out2, _) = self.relaunch(
+            first, second, virtual_clock=True,
+            env={"PR_SENTINEL_TIMEOUT": "10"})
+        self.assertIn("PR-SENTINEL EVENT: check_failure", out1)
+        self.assertIn("PR-SENTINEL EVENT: repeat_failure", out2)
+        self.assertNotIn("EVENT: base_fixed", out2)
+        self.assertIn("PR-SENTINEL EVENT: timeout", out2)
+
     def test_base_failure_notice_promises_the_right_successor(self):
         """The notice's closing paragraph promised `check_failure` outright,
         which is the promise this defect made good on wrongly. It now names
