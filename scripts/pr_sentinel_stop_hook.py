@@ -144,7 +144,9 @@ pr_number = watchers.pr_number
 # that re-reports it (the livelock the check_failure dampening exists to avoid).
 # `unchecked` counts for the same reason: no check has reported on the head at
 # all, which is either a repo that runs none on this PR or an Actions incident,
-# and neither is a thing the session can fix by pushing.
+# and neither is a thing the session can fix by pushing. `ready_draft` counts as
+# `ready` does: green, with the one remaining step (`gh pr ready`) the session's
+# own, so a watcher relaunched over it would re-report it forever.
 # The trailing guard is load-bearing: under `PR_SENTINEL_WATCH_UNTIL=closed` the
 # watcher emits non-terminal `ready_watching`/`blocked_watching` NOTICES and
 # keeps polling, and those must NOT read as a handoff — the PR is still open,
@@ -152,7 +154,7 @@ pr_number = watchers.pr_number
 # word-or-dash continuation keeps a future `ready_*`/`closed_*` event from
 # silently inheriting "concluded" too.
 CONCLUDED_EVENT_RE = re.compile(
-    r'PR-SENTINEL EVENT:\s*(?:ready|closed|blocked|unchecked)(?![\w-])')
+    r'PR-SENTINEL EVENT:\s*(?:ready|ready_draft|closed|blocked|unchecked)(?![\w-])')
 
 # The banner the watcher prints before every embedded CI-log excerpt. Everything
 # from the FIRST such banner onward is semi-untrusted log text (a compromised

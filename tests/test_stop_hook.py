@@ -850,6 +850,28 @@ class NeedsWatcherLogic(unittest.TestCase):
             read_file(OUTFILE, "PR-SENTINEL EVENT: ready\nPR: 42\nState: OPEN\n"),
         ]), set())
 
+    # -- Q37: `ready_draft` concludes; its closed-mode notice does not --------
+
+    def test_ready_draft_concludes(self):
+        # A green draft's report is terminal: the one step left is the
+        # session's own `gh pr ready`, so a relaunch would only re-report it.
+        self.assertEqual(needs([
+            *created_pr(42),
+            *launch_watcher(42, "toolu_w"),
+            task_notification("toolu_w", outfile=OUTFILE),
+            read_file(OUTFILE, "PR-SENTINEL EVENT: ready_draft\nPR: 42\n"
+                               "State: OPEN (draft)\n"),
+        ]), set())
+
+    def test_ready_draft_watching_notice_does_not_conclude(self):
+        with real_outfile("PR-SENTINEL EVENT: ready_draft_watching\nPR: 42\n"
+                          "State: OPEN (draft)\nmergeStateStatus: CLEAN\n") as fp:
+            self.assertEqual(needs([
+                *created_pr(42),
+                *launch_watcher(42, "toolu_w"),
+                task_notification("toolu_w", outfile=fp),
+            ]), {"42"})
+
     # -- issue #23: `ready_watching` is a NOTICE, not a handoff ---------------
 
     def test_ready_watching_notice_does_not_conclude(self):

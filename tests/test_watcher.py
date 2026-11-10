@@ -1743,6 +1743,131 @@ class WatcherCase(unittest.TestCase):
         self.assertIn("All checks are green", out)
         self.assertNotIn("non-passing commit status", out)
 
+    # -- a green draft is not ready for merge review (Q37) --------------------
+
+    # mergeStateStatus has no DRAFT value, so a green draft read CLEAN and fired
+    # `ready`, whose next action is a merge-review handback. Each draft case has
+    # a control on the same fixture with only the draft bit flipped, so the bit
+    # is what the assertions measure.
+
+    def _green_pr(self, merge="CLEAN", draft="true"):
+        return {
+            "pr_view": "OPEN\t%s\tmain\tabc1234def\thttps://github.com/o/r/pull/123\t%s\n"
+                       % (merge, draft),
+            "pr_checks": "pass\tbuild\thttps://github.com/o/r/actions/runs/11/job/1\n",
+        }
+
+    def test_a_green_draft_reports_ready_draft(self):
+        rc, out, _ = self.run_watcher(self._green_pr())
+        self.assertEqual(rc, 0)
+        self.assertIn("PR-SENTINEL EVENT: ready_draft", out)
+        self.assertNotIn("PR-SENTINEL EVENT: ready\n", out)
+        self.assertIn("State: OPEN (draft)", out)
+        self.assertIn("gh pr ready 123", out)
+        self.assertNotIn("merge review.", out)
+        self.assertNotIn("Nothing left to babysit", out)
+        self.assertIn("Do NOT auto-merge", out)
+
+    def test_a_green_non_draft_still_reports_ready(self):
+        """Control: same fixture, draft bit false."""
+        rc, out, _ = self.run_watcher(self._green_pr(draft="false"))
+        self.assertIn("PR-SENTINEL EVENT: ready\n", out)
+        self.assertNotIn("ready_draft", out)
+        self.assertNotIn("gh pr ready", out)
+
+    def test_an_unstable_draft_derives_its_summary_too(self):
+        """A draft can be UNSTABLE as well; Q36's derived summary applies."""
+        rc, out, _ = self.run_watcher(self._green_pr(merge="UNSTABLE"))
+        self.assertIn("PR-SENTINEL EVENT: ready_draft", out)
+        self.assertNotIn("All checks are green", out)
+        self.assertIn("gh run list --commit abc1234def", out)
+
+    def test_a_blocked_draft_is_still_blocked(self):
+        """The draft branch sits inside the readiness guard, so BLOCKED still
+        withholds it and ends in `blocked`, as for any PR."""
+        rc, out, _ = self.run_watcher(self._green_pr(merge="BLOCKED"))
+        self.assertIn("PR-SENTINEL EVENT: blocked", out)
+        self.assertNotIn("ready_draft", out)
+
+    def test_a_green_draft_in_closed_mode_is_a_notice(self):
+        rc, out, _ = self.run_watcher(
+            self._green_pr(), virtual_clock=True,
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed", "PR_SENTINEL_TIMEOUT": "20"})
+        self.assertIn("PR-SENTINEL EVENT: ready_draft_watching", out)
+        self.assertEqual(out.count("PR-SENTINEL EVENT: ready_draft_watching"), 1)
+        self.assertIn("gh pr ready 123", out)
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+
+    def test_a_green_non_draft_in_closed_mode_is_ready_watching(self):
+        """Control for the case above."""
+        rc, out, _ = self.run_watcher(
+            self._green_pr(draft="false"), virtual_clock=True,
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed", "PR_SENTINEL_TIMEOUT": "20"})
+        self.assertIn("PR-SENTINEL EVENT: ready_watching", out)
+        self.assertNotIn("ready_draft", out)
+
+    # Jobs gated on the draft flag report as skipping on a draft, and skipping
+    # counts as passing, so they first run after `gh pr ready`. Nothing nudges
+    # on that command and the Stop hook has stood down, so the terminal report
+    # has to say it. The closed-mode notice must not: its watcher is still live.
+    RELAUNCH = "After gh pr ready, relaunch this watcher"
+
+    def test_ready_draft_says_to_relaunch_after_the_undraft(self):
+        rc, out, _ = self.run_watcher(self._green_pr())
+        self.assertIn("PR-SENTINEL EVENT: ready_draft", out)
+        self.assertIn(self.RELAUNCH, out)
+
+    def test_ready_and_the_draft_notice_do_not_say_relaunch(self):
+        """Controls: a non-draft `ready`, and the closed-mode draft notice."""
+        rc, out, _ = self.run_watcher(self._green_pr(draft="false"))
+        self.assertIn("PR-SENTINEL EVENT: ready\n", out)
+        self.assertNotIn(self.RELAUNCH, out)
+        rc, out, _ = self.run_watcher(
+            self._green_pr(), virtual_clock=True,
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed", "PR_SENTINEL_TIMEOUT": "20"})
+        self.assertIn("PR-SENTINEL EVENT: ready_draft_watching", out)
+        self.assertNotIn(self.RELAUNCH, out)
+
+    def test_a_draft_timeout_does_not_claim_merge_review(self):
+        rc, out, _ = self.run_watcher(
+            self._green_pr(), virtual_clock=True,
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed", "PR_SENTINEL_TIMEOUT": "20"})
+        self.assertIn("PR-SENTINEL EVENT: timeout", out)
+        self.assertIn("waiting on gh pr ready 123", out)
+        self.assertNotIn("waiting on human merge review", out)
+
+    def test_an_undraft_during_a_closed_watch_reports_ready_watching(self):
+        """The draft notice has its own once-flag, so undrafting mid-watch
+        still produces the merge-review notice, once, and timeout names it."""
+        files = self._green_pr(draft="false")
+        draft = self._green_pr()["pr_view"]
+        for n in range(1, 5):
+            files["pr_view.%d" % n] = draft
+        rc, out, _ = self.run_watcher(
+            files, virtual_clock=True,
+            env={"PR_SENTINEL_WATCH_UNTIL": "closed", "PR_SENTINEL_TIMEOUT": "60"})
+        self.assertEqual(out.count("PR-SENTINEL EVENT: ready_draft_watching"), 1)
+        self.assertEqual(out.count("PR-SENTINEL EVENT: ready_watching"), 1)
+        self.assertLess(out.index("EVENT: ready_draft_watching"),
+                        out.index("EVENT: ready_watching"))
+        self.assertIn("waiting on human merge review", out)
+
+    def test_the_view_projection_feeds_every_field_the_read_unpacks(self):
+        """The stub prints already-projected rows, so no fixture can see the
+        `-q` projection. Dropping `.isDraft` from it passed every scenario in
+        this file, with every PR reading as not a draft. Pin the projection's
+        order against the variables the poll loop unpacks it into."""
+        watcher = WATCHER.read_text(encoding="utf-8")
+        body = re.search(r"gh_pr_state\(\) \{(.*?)\n\}", watcher, re.S).group(1)
+        projection = re.search(r"-q '\[(.*?)\] \| @tsv'", body).group(1)
+        fields = [f.strip().lstrip(".") for f in projection.split(",")]
+        unpacked = re.search(
+            r'read -r (STATE MERGE [A-Z_ ]+) <<<"\$gh_state"', watcher).group(1).split()
+        self.assertEqual(fields, ["state", "mergeStateStatus", "baseRefName",
+                                  "headRefOid", "url", "isDraft"])
+        self.assertEqual(unpacked, ["STATE", "MERGE", "BASE", "HEAD_SHA",
+                                    "PR_URL", "IS_DRAFT"])
+
     # -- green confirmed across polls (issue #37) -----------------------------
 
     def test_ready_waits_for_a_second_green_poll(self):
@@ -2999,7 +3124,8 @@ class WatcherCase(unittest.TestCase):
         self.assertIsNotNone(m, "the `gh pr view --json` query moved")
         self.assertEqual(
             set(m.group(1).split(",")),
-            {"state", "mergeStateStatus", "baseRefName", "headRefOid", "url"})
+            {"state", "mergeStateStatus", "baseRefName", "headRefOid", "url",
+             "isDraft"})
 
     def test_the_checks_query_sorts_at_the_source(self):
         """Q45: the `Failed checks:` line built from this read is compared for
@@ -3330,7 +3456,7 @@ class PrivacyDisclosure(unittest.TestCase):
         self.assertEqual(
             json_fields(WATCHER.read_text(encoding="utf-8")),
             {"state", "mergeStateStatus", "baseRefName", "headRefOid", "url",
-             "name", "bucket", "link"})
+             "isDraft", "name", "bucket", "link"})
         self.assertEqual(
             json_fields((REPO / "scripts" / "pr_sentinel_overlap.py")
                         .read_text(encoding="utf-8")),
@@ -3366,15 +3492,18 @@ class PrivacyDisclosure(unittest.TestCase):
         watcher = WATCHER.read_text(encoding="utf-8")
         section = self.watcher_section(privacy)
         checks = "--json name,bucket,link"
-        for planted in (watcher.replace("headRefOid,url", "headRefOid,url,isDraft"),
+        # The watcher's planted field is one it does not read. It was isDraft
+        # until Q37 made the watcher read and disclose that one.
+        field = "isCrossRepository"
+        for planted in (watcher.replace("headRefOid,url", "headRefOid,url," + field),
                         watcher.replace("state,mergeStateStatus",
-                                        "state,isDraft,mergeStateStatus"),
-                        watcher.replace(checks, '--json "name,bucket,link,isDraft"'),
-                        watcher.replace(checks, "--json 'name,bucket,link,isDraft'"),
-                        watcher.replace(checks, "--json=name,bucket,link,isDraft")):
+                                        "state,%s,mergeStateStatus" % field),
+                        watcher.replace(checks, '--json "name,bucket,link,%s"' % field),
+                        watcher.replace(checks, "--json 'name,bucket,link,%s'" % field),
+                        watcher.replace(checks, "--json=name,bucket,link," + field)):
             self.assertNotEqual(planted, watcher)
             self.assertEqual(undisclosed_json_fields(planted, section),
-                             ["isDraft"])
+                             [field])
         overlap = (REPO / "scripts" / "pr_sentinel_overlap.py").read_text(
             encoding="utf-8")
         planted = overlap.replace("headRefOid,files", "headRefOid,files,isDraft")

@@ -91,12 +91,14 @@ EVENT_KIND = {
     'blocked':       'work',      # green but a merge requirement is unmet
     'unchecked':     'work',      # no check reported at all — verify, don't merge
     'ready':         'done',      # green and mergeable — hand back
+    'ready_draft':   'done',      # green, but a draft — the author undrafts
     'closed':        'done',      # merged or closed
     'timeout':       'degraded',  # watch budget elapsed with no verdict
     'error':         'degraded',  # gh unreachable after retries
     'base_failure':  'notice',    # inherited from the base; watch continues
     'repeat_failure': 'notice',   # already reported at this head; watch continues
     'ready_watching': 'notice',   # green, still watching for a sibling merge
+    'ready_draft_watching': 'notice',
     'blocked_watching': 'notice',
     'unchecked_watching': 'notice',
 }
