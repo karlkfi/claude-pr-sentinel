@@ -46,10 +46,11 @@ call it is auditing.
 A sentence saying something did **not** happen is a claim about everything
 the code doesn't do: "no X is requested", "reads nothing else", "writes
 nothing to disk", "the only component that does". Reading the code that runs
-can't confirm a claim like that. The watcher's "It writes nothing to disk"
-and the migration helper's "the only component that does" were both false.
-Both stayed in the tree until a change to another component made them false,
-and no gate noticed either one.
+can't confirm a claim like that. Two such sentences went false in one
+branch, the one that gave the watcher its first disk write. The watcher's own
+"It writes nothing to disk" was falsified by that write. The migration
+helper's "the only component that does" was falsified by the same change,
+though it sat in another component's section. No gate noticed either one.
 
 So a disclosure may state an absolute negative only when it names what
 established it:
