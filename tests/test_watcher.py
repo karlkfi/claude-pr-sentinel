@@ -2879,17 +2879,29 @@ def json_readers():
 def json_fields(script):
     """The fields every `gh ... --json <list>` in `script` requests.
 
-    Two spellings carry a list: the shell's `--json a,b,c` and an argv tuple's
-    `'--json', 'a,b,c'`. The quote has to sit directly on the list in the
-    second, so an argparse `'--json', action=...` is not read as a field.
+    The shell spells a list `--json a,b,c`, `--json=a,b,c` or either one
+    quoted, and an argv tuple `'--json', 'a,b,c'`. The quote has to sit
+    directly on the list in the tuple form, so an argparse
+    `'--json', action=...` is not read as a field. A list taken from a shell
+    variable is not read at all; `json_lists_from_variables` refuses one.
     """
     code = "\n".join(line for line in script.splitlines()
                      if not line.strip().startswith("#"))
     fields = set()
-    for lst in re.findall(r"""--json(?:\s+|['"],\s*['"])(\w+(?:,\w+)*)""",
-                          code):
+    for lst in re.findall(
+            r"""--json(?:[=\s]+['"]?|['"],\s*['"])(\w+(?:,\w+)*)""", code):
         fields |= set(lst.split(","))
     return fields
+
+
+def json_lists_from_variables(script):
+    """The lines in `script` whose `--json` list comes from a shell variable.
+
+    The extractor cannot read such a list, so the gate would pass it unread.
+    """
+    return [line.strip() for line in script.splitlines()
+            if not line.strip().startswith("#")
+            and re.search(r"""--json[=\s]+['"]?\$""", line)]
 
 
 def undisclosed_json_fields(script, privacy):
@@ -3099,6 +3111,16 @@ class PrivacyDisclosure(unittest.TestCase):
         self.assertTrue(readers, "no script makes a `--json` read")
         self.assertEqual(readers - checked, set(),
                          "add these to JSON_HELPERS with their owning section")
+        from_vars = {p.name: json_lists_from_variables(
+                         p.read_text(encoding="utf-8"))
+                     for p in (REPO / "scripts").iterdir()
+                     if p.suffix in (".py", ".sh")}
+        self.assertEqual({k: v for k, v in from_vars.items() if v}, {},
+                         "a `--json` list from a variable is invisible to "
+                         "the disclosure gate; spell the fields out")
+        self.assertEqual(
+            json_lists_from_variables('gh pr view --json "$FIELDS"\n'),
+            ['gh pr view --json "$FIELDS"'])
 
     def test_the_json_check_can_fail(self):
         """Both directions a field goes undisclosed: a planted field in the
@@ -3107,9 +3129,13 @@ class PrivacyDisclosure(unittest.TestCase):
         privacy = PRIVACY.read_text(encoding="utf-8")
         watcher = WATCHER.read_text(encoding="utf-8")
         section = self.watcher_section(privacy)
+        checks = "--json name,bucket,link"
         for planted in (watcher.replace("headRefOid,url", "headRefOid,url,isDraft"),
                         watcher.replace("state,mergeStateStatus",
-                                        "state,isDraft,mergeStateStatus")):
+                                        "state,isDraft,mergeStateStatus"),
+                        watcher.replace(checks, '--json "name,bucket,link,isDraft"'),
+                        watcher.replace(checks, "--json 'name,bucket,link,isDraft'"),
+                        watcher.replace(checks, "--json=name,bucket,link,isDraft")):
             self.assertNotEqual(planted, watcher)
             self.assertEqual(undisclosed_json_fields(planted, section),
                              ["isDraft"])
