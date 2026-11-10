@@ -1,6 +1,6 @@
 # Privacy Policy — pr-sentinel
 
-_Last updated: 2026-09-18_
+_Last updated: 2026-11-09_
 
 pr-sentinel is a Claude Code plugin that runs on your local machine. Its
 components have different data profiles, described honestly below: two hooks,
@@ -108,8 +108,9 @@ report).
 
 - **Talks to GitHub** through your already-authenticated `gh` CLI — this is its
   purpose. It issues read-only queries for:
-  - the PR's `state`, `mergeStateStatus`, base branch name, head commit, and
-    canonical URL (`gh pr view --json`);
+  - the PR's `state`, `mergeStateStatus`, base branch name (`baseRefName`),
+    head commit (`headRefOid`), and canonical URL (`url`), from
+    `gh pr view --json`;
   - whether the PR currently holds a merge-queue entry (a GraphQL
     `mergeQueueEntry` read);
   - who removed the PR from the merge queue — the `__typename` and `login` of
@@ -117,7 +118,8 @@ report).
     `timelineItems` read), so the report can tell a queue eviction from a person
     removing it deliberately. Read once, when that event is reported, never
     per poll. The event's own free-form text is not requested;
-  - the PR's check results (`gh pr checks`);
+  - the PR's check results — each check's `name`, its `bucket` (pass, fail,
+    pending, skipping or cancel), and the `link` to its run (`gh pr checks --json`);
   - on a poll where every check is green, how many workflow runs on the PR's
     head commit have not finished (`actions/runs?head_sha=`), so a queued re-run
     with no check row yet cannot read as green. The response also carries each
