@@ -331,7 +331,7 @@ def _pr_create_base(group):
     return _flag_value(group, '--base', '-B')
 
 
-def pr_create_base(command):
+def pr_create_base(command, lenient=False):
     """The branch a `gh pr create` says it targets, or '' when it says nothing.
 
     On a stacked branch this is the parent PR's head rather than the default
@@ -340,7 +340,7 @@ def pr_create_base(command):
     same simple command that matched the create, so a `--base` belonging to
     some other command in the chain is not borrowed.
     """
-    for group in simple_commands(command):
+    for group in tokenize.simple_commands(command, lenient):
         if _is_gh_pr_create(group):
             base = _pr_create_base(group)
             if base:
@@ -373,7 +373,7 @@ def replaced_prs(text):
     return numbers
 
 
-def pr_create_replaced(command):
+def pr_create_replaced(command, lenient=False):
     """The open PRs a `gh pr create` says, in its own `--title` or `--body`,
     that it replaces.
 
@@ -386,18 +386,18 @@ def pr_create_replaced(command):
     not open, and nothing is read from GitHub — the replaced PR's own text is
     as closed a channel here as everywhere else.
     """
-    for group in simple_commands(command):
+    for group in tokenize.simple_commands(command, lenient):
         if _is_gh_pr_create(group):
             return (replaced_prs(_flag_value(group, '--title', '-t'))
                     | replaced_prs(_flag_value(group, '--body', '-b')))
     return set()
 
 
-def pr_create_repo(command):
+def pr_create_repo(command, lenient=False):
     """The `--repo` a `gh pr create` opens its PR in, or '' for the one `gh`
     resolves from the working directory. The open PRs compared have to be that
     repo's, or a create into an upstream is judged against the fork's queue."""
-    for group in simple_commands(command):
+    for group in tokenize.simple_commands(command, lenient):
         if _is_gh_pr_create(group):
             return _flag_value(group, '--repo', '-R')
     return ''
@@ -426,7 +426,7 @@ def _switch_target(group):
     return operands[0] if len(operands) == 1 else ''
 
 
-def pr_create_head(command):
+def pr_create_head(command, lenient=False):
     """The branch a `gh pr create` opens, or '' for the checked-out one.
 
     The hook runs before the command does, so in `git checkout x && gh pr
@@ -435,11 +435,22 @@ def pr_create_head(command):
     branch.
     """
     moved = ''
-    for group in simple_commands(command):
+    for group in tokenize.simple_commands(command, lenient):
         if _is_gh_pr_create(group):
             return _pr_create_head(group) or moved
         moved = _switch_target(group) or moved
     return ''
+
+
+def create_overlaps(cwd, command, lenient=False):
+    """The overlap hits that decide about this create: the PRs it collides
+    with, less any it says it replaces, and none at all on path-only ones."""
+    hits = overlap.overlapping_prs(cwd,
+                                   pr_create_base(command, lenient),
+                                   pr_create_head(command, lenient),
+                                   pr_create_repo(command, lenient))
+    replaced = pr_create_replaced(command, lenient)
+    return overlap.deciding([hit for hit in hits if hit[0] not in replaced])
 
 
 # `gh` in command position: at the start, after whitespace or a shell operator,
@@ -600,18 +611,25 @@ def run(data):
     # machine with no `gh`, no credentials, or a base ref that won't resolve
     # yields no hits and the create proceeds.
     if overlap.enabled() and not overridden and is_pr_create(command):
-        hits = overlap.overlapping_prs(data.get('cwd'),
-                                       pr_create_base(command),
-                                       pr_create_head(command),
-                                       pr_create_repo(command))
-        replaced = pr_create_replaced(command)
-        hits = overlap.deciding([hit for hit in hits if hit[0] not in replaced])
+        hits = create_overlaps(data.get('cwd'), command)
         if hits:
             print(json.dumps({'hookSpecificOutput': {
                 'hookEventName': 'PreToolUse',
                 'permissionDecision': 'deny',
                 'permissionDecisionReason': overlap.build_reason(hits)}}))
             return
+    # A create the strict parse cannot lex — an apostrophe in its body is
+    # enough — is one this side must not deny on. The lenient parse may still
+    # find it, and then the check runs and REPORTS, so a defer here is no
+    # longer silence the session reads as a deny it overrode. No decision is
+    # set: the create takes the normal permission flow either way.
+    elif (overlap.enabled() and not overridden
+          and is_pr_create(command, lenient=True)):
+        print(json.dumps({'hookSpecificOutput': {
+            'hookEventName': 'PreToolUse',
+            'additionalContext': overlap.build_report(
+                create_overlaps(data.get('cwd'), command, lenient=True))}}))
+        return
 
     # A backgrounded call can't block the session or burn idle tokens, so the
     # harm the deny names doesn't apply. Checked after the auto-allow, which the

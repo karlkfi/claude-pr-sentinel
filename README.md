@@ -93,6 +93,7 @@ advisory nudge, a deny is *enforced* — the command never runs.
 | `gh pr create` whose own `--title` or `--body` says it replaces the overlapping PR (`Replaces #N`, `Supersedes #N`, `Closes #N`) | allow — that PR is not counted; any open PR it does not name still denies |
 | `gh pr create` sharing a *file* with an open PR, but edits 7+ lines apart | allow (a shared file is not a finding — the comparison is line ranges) |
 | `gh pr create` sharing a file with an open PR whose diff could not be fetched (the fetch failed, or three were already fetched) | allow — a shared path alone never denies; it is listed, marked not counted, only in a denial another PR justifies |
+| a command that shlex cannot lex — a heredoc body holding an apostrophe — with a `gh pr create` on a line of its own | allow, with a **report** — the overlap check runs on a line-by-line parse and says what it found, colliding PR or none, but never denies on a parse it could not make whole |
 | the same create submitted with `run_in_background` | **deny** — backgrounding still opens the PR, so it is not the fix here |
 | `gh pr create --help` · `gh pr list` · `gh pr view` · `gh pr edit` | allow (opens no PR) |
 | any create, with `PR_SENTINEL_OVERLAP_ENABLED=false` | allow (check off — and no GitHub query is made) |
@@ -226,6 +227,14 @@ decides it, and a shared path alone never denies: such an entry is listed in a
 denial another PR already justifies, marked as not counted, and is otherwise
 silent. The denial says which each entry rests on rather than passing a guess
 off as a finding.
+
+A command the shell lexer cannot balance — an apostrophe in a heredoc PR body is
+enough — is never denied, because a denial on a parse that could not be made is
+the wrong direction. It is not silent either: where a line-by-line parse still
+finds a `gh pr create`, the check runs and the hook **reports** what it found,
+without a decision. A silent defer there read as a denial the session's
+`PR_SENTINEL_OVERRIDE` had stopped, and sessions spent one on a denial that could
+not have fired.
 
 Turn it off with `PR_SENTINEL_OVERLAP_ENABLED=false` — which also stops the two
 queries being made at all. For the file every branch edits by construction (a

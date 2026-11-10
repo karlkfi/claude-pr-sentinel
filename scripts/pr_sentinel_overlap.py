@@ -570,6 +570,31 @@ BASIS_NOTE = {
 }
 
 
+def entries(prs):
+    """One `#N (paths; basis)` per hit — the PR's number, never its title."""
+    return ['#%s (%s; %s)' % (number, ', '.join(paths), BASIS_NOTE[basis])
+            for number, paths, basis in prs]
+
+
+def build_report(prs):
+    """What the guard says, without denying, about a create only the lenient
+    parse could read. `prs` is what the check found, possibly nothing — both
+    are worth saying, because a silent defer reads as a deny overridden."""
+    found = (
+        f'it collides with an open PR: {"; ".join(entries(prs))}. Read that '
+        f'diff (`gh pr diff {prs[0][0]}`) before this PR lands beside it.'
+    ) if prs else 'it collides with no open PR the check could confirm.'
+    return (
+        f'pr-sentinel: this command may run a `gh pr create`, but it could not '
+        f'be parsed strictly — an unbalanced quote, often an apostrophe in the '
+        f'body — so the overlap check reports rather than denies. Read '
+        f'leniently, {found}\n'
+        f'Nothing was refused, so a PR_SENTINEL_OVERRIDE prefix on this '
+        f'command changes nothing. A body written to a file in an earlier, '
+        f'separate Bash call, then passed as --body-file, lets the check decide.'
+    )
+
+
 def build_reason(prs):
     """The deny reason. Names each PR by number and the paths it shares — never
     its title, which its author writes.
@@ -577,8 +602,7 @@ def build_reason(prs):
     An entry no trial merge decided gets the fetch that lets a re-run decide it.
     That is the model's to run, and spends no override on what may merge clean.
     """
-    parts = ['#%s (%s; %s)' % (number, ', '.join(paths), BASIS_NOTE[basis])
-             for number, paths, basis in prs]
+    parts = entries(prs)
     first = prs[0][0]
     untried = [number for number, _paths, basis in prs if basis != MERGED]
     fetch = (
