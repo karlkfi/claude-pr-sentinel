@@ -38,7 +38,9 @@ report).
   then writes that nudge (or nothing) to standard output.
 - Writes nothing to disk. On a `git push` it may run `git rev-parse`,
   `git symbolic-ref`, `git config --get` / `--get-all` and `git remote get-url`
-  in your working directory, to tell a tag from a branch, to learn which branch
+  in the repository the push runs in — your working directory, moved by any
+  literal `cd`, `pushd`, `git -C` or `--git-dir` earlier in the same command —
+  to tell a tag from a branch, to learn which branch
   the remote calls its default, to see whether the push target is a forge or a
   filesystem path, and (on a push naming no refspec) to read which ref your
   `remote.<name>.push`, `push.default` and `branch.<name>.merge` settings send
