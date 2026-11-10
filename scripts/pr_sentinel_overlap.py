@@ -548,13 +548,18 @@ def overlapping_prs(cwd, declared_base='', head='', repo=''):
 
 
 def deciding(hits):
-    """`hits` if any of them justifies a deny, else [].
+    """`hits` if any of them justifies a deny, else [], with the `PATHED`
+    entries last.
 
     A `PATHED` entry is what a diff fetch that failed, or was never spent,
     leaves behind — the probe could not run. So it rides along in a deny a
     `RANGED` or `MERGED` entry already justifies, and decides nothing alone.
+    Last, because the deny's advice names its first entry, and an entry that
+    is not counted is the wrong PR to diff, fold into, or call superseded.
     """
-    return hits if any(basis != PATHED for _n, _p, basis in hits) else []
+    if not any(basis != PATHED for _n, _p, basis in hits):
+        return []
+    return sorted(hits, key=lambda hit: hit[2] == PATHED)
 
 
 BASIS_NOTE = {

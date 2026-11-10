@@ -682,6 +682,22 @@ class OverlapDetection(unittest.TestCase):
         self.assertIn("#4 (app.py; shared path only", reason)
         self.assertIn("listed, not counted", reason)
 
+    def test_the_deny_never_points_at_a_path_only_entry(self):
+        """The Q43 shape: the fetches that failed came first. The deny's advice
+        names its first entry — the diff to read, the PR to call superseded —
+        so that must be the PR the deny rests on, not one it does not count."""
+        s = self.one_file(40)
+        s.pr_list([(4, "other4", ["app.py"]), (7, "other7", ["app.py"])])
+        s.pr_diff(7, "app.py", 40)
+        self.assertEqual([h[0] for h in s.hits()], [4, 7], "control: #4 first")
+        reason = json.loads(s.guard("gh pr create --fill"))[
+            "hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("gh pr diff 7", reason)
+        self.assertIn('"Supersedes #7"', reason)
+        self.assertNotIn("gh pr diff 4", reason)
+        self.assertNotIn("close #4", reason)
+        self.assertIn("#4 (app.py; shared path only", reason)
+
     def test_path_only_entries_alone_do_not_deny(self):
         """Past the cap with no precise hit left: every PR whose diff was read
         is ranged clear, and the unread one must not deny by itself."""
