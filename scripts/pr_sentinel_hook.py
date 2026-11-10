@@ -318,6 +318,33 @@ def _implied_refspecs(remote, cwd):
     return []
 
 
+def _sends_nothing(args):
+    """True for a push that moves no ref: `--dry-run` or any abbreviation git
+    takes for it (`--dr` up), `-n` alone or in a cluster like `-fn`, or
+    `--help` / `-h`, which print text and stop (Q63). An option's value is
+    skipped, so `-o -n` stays a real push carrying the push option `-n`;
+    measured on git 2.55.0."""
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        i += 1
+        if arg == '--':
+            break
+        if arg in ('--help', '-h') \
+                or (len(arg) >= 4 and '--dry-run'.startswith(arg)):
+            return True
+        if arg in GIT_VALUE_FLAGS or arg in PUSH_VALUE_FLAGS:
+            i += 1
+        elif arg.startswith('-') and not arg.startswith('--'):
+            for j, flag in enumerate(arg[1:], 1):
+                if flag == 'n':
+                    return True
+                if flag == 'o':
+                    i += j == len(arg) - 1   # `-fo VALUE`: the value is next
+                    break
+    return False
+
+
 def classify_command(argv, cwd=None):
     """Return 'pr_create', 'git_push', or None for one simple command's argv,
     run in `cwd` — which a caller passes as UNKNOWN_DIR when it can't name it."""
@@ -342,6 +369,8 @@ def classify_command(argv, cwd=None):
         if non_flags[:1] == ['push']:
             # Skip tag/branch deletions — not PR-babysitting shapes.
             if '--delete' in rest or '-d' in rest or '--tags' in rest:
+                return None
+            if _sends_nothing(rest):
                 return None
             remote = _push_remote(non_flags, cwd)
             # A push to a filesystem path is a scratch or bare repo, not PR

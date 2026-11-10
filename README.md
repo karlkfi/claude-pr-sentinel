@@ -59,6 +59,7 @@ nudge to (re)launch the watcher after a PR-opening or branch-push command:
 | `gh pr create` · `git push` that printed `HTTP 503` (or any 4xx/5xx) | silent (the API call failed) |
 | `gh pr create` · `git push` you cancelled mid-run (`interrupted`) | silent (the command never finished) |
 | `git push origin --delete claude/foo` | silent (branch deletion) |
+| `git push --dry-run …` (or an abbreviation git takes, `--dr` up) · `git push -n …` (also inside a cluster like `-fn`) · `git push --help` · `git push -h` | silent (nothing was pushed — a dry run moves no ref, and help prints text and stops). An option's value is not a flag: `git push -o -n …` is a real push and still nudges |
 | `git push --tags` · `git push origin refs/tags/v1.2.3` · `git push origin v1.2.3` (a local tag) | silent (release cut, not a PR shape) |
 | `git push origin main v1.2.3` · `git push origin HEAD:main` (`main` being the default branch) | silent (release cut — the default branch never has a PR of its own) |
 | `git push` naming no refspec, from the default branch | silent (release cut — what a bare push targets is read from `remote.<name>.push`, else `push.default`: `simple`/`current` send the current branch's own name, `upstream` sends `branch.<name>.merge`. A config naming no single ref — `matching`, `nothing`, a detached `HEAD` — still nudges) |
