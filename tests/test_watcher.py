@@ -3699,5 +3699,34 @@ class PrivacyComponents(unittest.TestCase):
         self.assertFalse(writes_to_disk(name))
 
 
+DISCLOSURE_DOC = REPO / "docs" / "development" / "privacy-disclosures.md"
+
+
+def untabled_gates(doc):
+    """The `undisclosed_*` gates in this module with no row in `doc`'s table.
+
+    The table went stale the first time two gates merged after the page that
+    lists them, because nothing asked."""
+    gates = re.findall(r"^def (undisclosed_\w+)\(", Path(__file__).read_text(
+        encoding="utf-8"), re.M)
+    rows = set(re.findall(r"^\| `(undisclosed_\w+)` \|", doc, re.M))
+    return sorted(set(gates) - rows)
+
+
+class DisclosureDoc(unittest.TestCase):
+    def test_every_gate_has_a_row(self):
+        missing = untabled_gates(DISCLOSURE_DOC.read_text(encoding="utf-8"))
+        self.assertEqual(missing, [], msg=(
+            "docs/development/privacy-disclosures.md has no table row for: "
+            + ", ".join(missing)))
+
+    def test_the_row_check_can_fail(self):
+        doc = DISCLOSURE_DOC.read_text(encoding="utf-8")
+        cut = re.sub(r"^\| `undisclosed_json_fields` \|.*\n", "", doc,
+                     flags=re.M)
+        self.assertNotEqual(cut, doc)
+        self.assertEqual(untabled_gates(cut), ["undisclosed_json_fields"])
+
+
 if __name__ == "__main__":
     unittest.main()
