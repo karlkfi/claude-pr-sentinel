@@ -605,7 +605,7 @@ def run(data):
                                        pr_create_head(command),
                                        pr_create_repo(command))
         replaced = pr_create_replaced(command)
-        hits = [hit for hit in hits if hit[0] not in replaced]
+        hits = overlap.deciding([hit for hit in hits if hit[0] not in replaced])
         if hits:
             print(json.dumps({'hookSpecificOutput': {
                 'hookEventName': 'PreToolUse',

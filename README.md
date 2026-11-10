@@ -91,6 +91,7 @@ advisory nudge, a deny is *enforced* — the command never runs.
 | `gh pr create` with edits within six lines of an open PR's that merge clean | allow (proximity was only the suspicion, and the trial merge settled it) |
 | `gh pr create` whose own `--title` or `--body` says it replaces the overlapping PR (`Replaces #N`, `Supersedes #N`, `Closes #N`) | allow — that PR is not counted; any open PR it does not name still denies |
 | `gh pr create` sharing a *file* with an open PR, but edits 7+ lines apart | allow (a shared file is not a finding — the comparison is line ranges) |
+| `gh pr create` sharing a file with an open PR whose diff could not be fetched (the fetch failed, or three were already fetched) | allow — a shared path alone never denies; it is listed, marked not counted, only in a denial another PR justifies |
 | the same create submitted with `run_in_background` | **deny** — backgrounding still opens the PR, so it is not the fix here |
 | `gh pr create --help` · `gh pr list` · `gh pr view` · `gh pr edit` | allow (opens no PR) |
 | any create, with `PR_SENTINEL_OVERLAP_ENABLED=false` | allow (check off — and no GitHub query is made) |
@@ -218,9 +219,12 @@ unreferenced objects in your repository's store until `git gc` takes them.
 
 Every probe fails silent. No `gh`, no credentials, a base ref that won't
 resolve, a rate-limited token, a slow call: each costs a missed catch, never a
-blocked create. When the three-diff cap is reached the remaining entries rest on
-a shared path alone unless a trial merge decides them, and the denial says which
-each one rests on rather than passing a guess off as a finding.
+blocked create. A PR whose diff was not fetched — the fetch failed, or the
+three-diff cap was reached — rests on a shared path alone unless a trial merge
+decides it, and a shared path alone never denies: such an entry is listed in a
+denial another PR already justifies, marked as not counted, and is otherwise
+silent. The denial says which each entry rests on rather than passing a guess
+off as a finding.
 
 Turn it off with `PR_SENTINEL_OVERLAP_ENABLED=false` — which also stops the two
 queries being made at all. For the file every branch edits by construction (a
