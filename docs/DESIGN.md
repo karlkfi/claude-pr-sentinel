@@ -161,7 +161,11 @@ duplicate the check exists for. The verdict can only narrow the range result,
 which keeps the citation and ignore-list discounts. A clean merge is silent, not
 advisory: the clean-merging denies whose outcome was recorded were all overridden
 rather than folded. The cost is that two rewrites of one function in non-touching
-hunks now pass. Nothing is fetched, because a head known only to GitHub is reachable by the
+hunks now pass. Where no merge can run, the ranges stand in for it with git's
+own rule, and a suspect denies only where changed lines touch with no unchanged
+line between. Proximity alone there had refused a one-row table edit five lines
+from a row an open draft inserted, which git merges, and auto mode refused the
+override that create then needed. Nothing is fetched, because a head known only to GitHub is reachable by the
 deny's own `git fetch` line, which the model can run and a hook should not.
 
 This is the one place a hook talks to GitHub, so the field list is the security

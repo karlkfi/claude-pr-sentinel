@@ -262,6 +262,9 @@ class Scenario:
         shape `gh pr diff` returns: the hunk spans changed_line-3 .. +3."""
         start = max(1, changed_line - 3)
         count = (changed_line + 3) - start + 1
+        body = "".join(
+            "-line %d\n+THEIRS\n" % n if n == changed_line else " line %d\n" % n
+            for n in range(start, start + count))
         self.fixture("pr_diff.%d%s" % (number, self._at(repo)), textwrap.dedent(
             """\
             diff --git a/{p} b/{p}
@@ -269,7 +272,7 @@ class Scenario:
             --- a/{p}
             +++ b/{p}
             @@ -{s},{c} +{s},{c} @@
-            """).format(p=path, s=start, c=count))
+            """).format(p=path, s=start, c=count) + body)
 
     def env(self, extra=None):
         env = dict(os.environ)
@@ -531,6 +534,46 @@ class HunkParsing(unittest.TestCase):
         self.assertEqual(overlap.parse_hunks(diff), {"f.py": [(7, 13)]})
 
 
+class TouchSpans(unittest.TestCase):
+    """The boundaries a run of changed lines touches, read from a hunk's body
+    rather than its header, so context lines are not counted as edits."""
+
+    def touches(self, hunk):
+        diff = "diff --git a/f.md b/f.md\n--- a/f.md\n+++ b/f.md\n" + hunk
+        return overlap.touches_by_path(overlap.parse_edits(diff, widen=False))
+
+    def test_an_insertion_inside_context_touches_one_boundary(self):
+        self.assertEqual(self.touches("@@ -37,6 +37,7 @@\n a\n b\n c\n+new\n"
+                                      " d\n e\n f\n"), {"f.md": [(39, 39)]})
+
+    def test_a_changed_line_touches_both_its_edges(self):
+        self.assertEqual(self.touches("@@ -31,7 +31,7 @@\n a\n b\n c\n-x\n+y\n"
+                                      " d\n e\n f\n"), {"f.md": [(33, 34)]})
+
+    def test_a_zero_context_insertion_follows_its_line(self):
+        self.assertEqual(self.touches("@@ -40,0 +41,2 @@\n+a\n+b\n"),
+                         {"f.md": [(40, 40)]})
+
+    def test_context_splits_one_hunk_into_runs(self):
+        self.assertEqual(self.touches("@@ -10,5 +10,5 @@\n-a\n+A\n b\n c\n"
+                                      " d\n-e\n+E\n"),
+                         {"f.md": [(9, 10), (13, 14)]})
+
+    def test_git_conflict_boundary(self):
+        """The cases measured against `git merge-tree` on 2026-11-11: a change
+        at 38 or 40 conflicts with one at 39, 37 does not; an insertion after
+        39 conflicts with a change at 39 or 40, not 38 or 41."""
+        change = lambda n: [overlap.touch_span(n, 1)]
+        insert_after = lambda n: [overlap.touch_span(n + 1, 0)]
+        for n, meets in ((37, False), (38, True), (40, True), (41, False)):
+            self.assertEqual(overlap.ranges_meet(change(n), change(39)), meets, n)
+        for n, meets in ((38, False), (39, True), (40, True), (41, False)):
+            self.assertEqual(overlap.ranges_meet(change(n), insert_after(39)),
+                             meets, n)
+        self.assertFalse(overlap.ranges_meet(insert_after(38), insert_after(39)))
+        self.assertTrue(overlap.ranges_meet(insert_after(39), insert_after(39)))
+
+
 class RangesMeet(unittest.TestCase):
     """Pins the reach. A mutation to path-only intersection has to go red here
     as well as in the end-to-end cases."""
@@ -621,12 +664,72 @@ class OverlapDetection(unittest.TestCase):
         s.pr_diff(7, "app.py", 40)
         self.assertEqual(s.hits(), [[7, ["app.py"], overlap.RANGED]])
 
-    def test_four_lines_apart_still_overlaps(self):
-        """Our -U0 range reaches 3 either side, theirs carries 3 of context."""
+    def test_neighbouring_lines_overlap(self):
+        """No unchanged line between the two edits, so git conflicts on them."""
+        s = self.one_file(40)
+        s.pr_list([(7, "other", ["app.py"])])
+        s.pr_diff(7, "app.py", 41)
+        self.assertEqual(s.hits(), [[7, ["app.py"], overlap.RANGED]])
+
+    def test_four_lines_apart_untried_is_silent(self):
+        """Within the six-line reach, so it is a suspect, but with no head here
+        to trial-merge the deny rests on what git would say, and git merges
+        edits an unchanged line apart. The `CHANGED` head is the control: the
+        same suspect, trial-merged, is still clean."""
         s = self.one_file(40)
         s.pr_list([(7, "other", ["app.py"])])
         s.pr_diff(7, "app.py", 44)
-        self.assertEqual(s.hits(), [[7, ["app.py"], overlap.RANGED]])
+        self.assertEqual(s.hits(), [])
+        s.branch_off("other", {"app.py": numbered(80, 44, "THEIRS")})
+        s.pr_list([(7, "other", ["app.py"], s.oid("other"))])
+        self.assertEqual(s.hits(), [])
+
+    def table_row_edit(self):
+        """The 2026-11-11 refusal: this branch rewrote one row of an index
+        table, an open draft inserted a row five lines below it. The PR's diff
+        is the shape `gh pr diff` gave, `@@ -37,6 +37,7 @@` with the insertion
+        after the hunk's third line."""
+        rows = ["| row%d.md | desc %d |" % (n, n) for n in range(1, 61)]
+        base = "\n".join(rows) + "\n"
+        ours = list(rows)
+        ours[33] = "| row34.md | CHANGED |"
+        s = self.scenario({"docs/plan/README.md": base},
+                          {"docs/plan/README.md": "\n".join(ours) + "\n"})
+        s.pr_list([(2084, "draft", ["docs/plan/README.md"])])
+        body = "".join(" %s\n" % rows[n - 1] for n in (37, 38, 39))
+        body += "+| new.md | inserted |\n"
+        body += "".join(" %s\n" % rows[n - 1] for n in (40, 41, 42))
+        s.fixture("pr_diff.2084", textwrap.dedent(
+            """\
+            diff --git a/docs/plan/README.md b/docs/plan/README.md
+            --- a/docs/plan/README.md
+            +++ b/docs/plan/README.md
+            @@ -37,6 +37,7 @@
+            """) + body)
+        return s
+
+    def test_a_row_five_lines_from_an_inserted_row_is_silent(self):
+        """The head is not in this clone, as it was not there: no trial merge,
+        so the range result alone decides, and it must not deny what git
+        merges clean. The guard call is what cost the override."""
+        s = self.table_row_edit()
+        self.assertEqual(s.hits(), [])
+        self.assertEqual(s.guard("gh pr create --fill"), "")
+
+    def test_a_row_beside_an_inserted_row_still_denies(self):
+        """The control on the same fixture: move our edit to row 40, the line
+        the insertion sits before, and git conflicts — so the check must too."""
+        s = self.table_row_edit()
+        rows = ["| row%d.md | desc %d |" % (n, n) for n in range(1, 61)]
+        rows[39] = "| row40.md | CHANGED |"
+        (s.root / "docs/plan/README.md").write_text("\n".join(rows) + "\n",
+                                                    encoding="utf-8")
+        git(s.root, "commit", "-qam", "edit beside the insertion")
+        self.assertEqual(s.hits(),
+                         [[2084, ["docs/plan/README.md"], overlap.RANGED]])
+        reason = json.loads(s.guard("gh pr create --fill"))[
+            "hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("changed lines touch, not trial-merged", reason)
 
     def test_a_slow_probe_is_refused_rather_than_read_as_an_answer(self):
         """`hits` is the instrument every other test in this class trusts, so
@@ -882,10 +985,16 @@ class TrialMerge(unittest.TestCase):
         s = self.beside(40, 44)
         self.assertEqual(s.hits(), [])
 
-    def test_the_same_edits_still_meet_when_no_merge_can_run(self):
-        """The control on the test above: without a head here the same two
-        edits are a range hit, so it was the merge that silenced them."""
+    def test_without_a_merge_the_ranges_predict_its_verdict(self):
+        """With no head here the fallback must say what the merge would: the
+        edits above are silent, and neighbouring ones, which git conflicts on,
+        still hit. A fallback looser than the merge denies a create only
+        because a ref happens not to be fetched."""
         s = self.beside(40, 44)
+        s.pr_list([(7, "other", ["app.py"])])
+        self.assertEqual(s.hits(), [])
+        s = self.beside(40, 41)
+        self.assertEqual(s.hits(), [[7, ["app.py"], overlap.MERGED]])
         s.pr_list([(7, "other", ["app.py"])])
         self.assertEqual(s.hits(), [[7, ["app.py"], overlap.RANGED]])
 
@@ -996,12 +1105,12 @@ class TrialMerge(unittest.TestCase):
         self.assertEqual(s.hits(), [])
 
     def test_a_head_that_is_not_here_keeps_the_range_result(self):
-        s = self.beside(40, 44)
+        s = self.beside(40, 41)
         s.pr_list([(7, "other", ["app.py"], "0" * 40)])
         self.assertEqual(s.hits(), [[7, ["app.py"], overlap.RANGED]])
 
     def test_a_git_without_write_tree_keeps_the_range_result(self):
-        s = self.beside(40, 44)
+        s = self.beside(40, 41)
         shim = s.bin_dir / "git"
         shim.write_text(self.MERGE_TREE_MISSING.format(real=shutil.which("git")),
                         encoding="utf-8")
@@ -1045,7 +1154,7 @@ class DenyWording(unittest.TestCase):
 
     def test_a_range_hit_claims_only_proximity(self):
         reason = self.reason(overlap.RANGED)
-        self.assertIn("edits within six lines, not trial-merged", reason)
+        self.assertIn("changed lines touch, not trial-merged", reason)
         self.assertNotIn("edits lines", reason)
 
     def test_an_undecided_hit_names_the_fetch_that_decides_it(self):
