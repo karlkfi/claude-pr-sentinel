@@ -89,7 +89,8 @@ advisory nudge, a deny is *enforced* — the command never runs.
 | the same launch with any **other** leading assignment (`BASH_ENV=…`, `PATH=…`, `GH_TOKEN=…`) | allow (deferred — not a recognised shape, so it takes the base Bash prompt) |
 | the same launch for a PR this session is **already watching** | **deny** — one watcher is enough; the reason names the `TaskStop` call that frees the PR for a fresh one |
 | `gh pr create` on a branch that **conflicts in a trial merge** with an open PR, or makes one of its edits again | **deny** — names that PR's number and the paths (see [Overlapping pull requests](#overlapping-pull-requests)) |
-| `gh pr create` with edits within six lines of an open PR's, whose head is not in this clone | **deny** — says it was not trial-merged, and names the `git fetch` after which a re-run decides it |
+| `gh pr create` whose changed lines touch an open PR's (no unchanged line between them), whose head is not in this clone | **deny** — says it was not trial-merged, and names the `git fetch` after which a re-run decides it |
+| `gh pr create` with edits within six lines of an open PR's but an unchanged line apart, whose head is not in this clone | allow (git merges that, so the range result predicts a clean merge) |
 | `gh pr create` with edits within six lines of an open PR's that merge clean | allow (proximity was only the suspicion, and the trial merge settled it) |
 | `gh pr create` whose own `--title` or `--body` says it replaces the overlapping PR (`Replaces #N`, `Supersedes #N`, `Closes #N`) | allow — that PR is not counted; any open PR it does not name still denies |
 | `gh pr create` sharing a *file* with an open PR, but edits 7+ lines apart | allow (a shared file is not a finding — the comparison is line ranges) |
@@ -172,8 +173,14 @@ ranges did not suspect never becomes a finding from it.
 Clean means silent, so two branches that rewrite one function in hunks that do
 not touch are no longer caught here. That is the trade for not refusing work git
 would merge. Nothing is fetched for this. If the head is not in this clone, or
-git is too old, the range result stands and the denial says so, naming the
-`git fetch origin pull/<N>/head` after which a re-run decides it.
+git is too old, the ranges predict the merge instead: the create is denied only
+where the two sides' changed lines touch with no unchanged line between them,
+which is where git conflicts. Measured against `git merge-tree`: changes to lines
+38 and 39 conflict, 37 and 39 do not, and a row inserted after line 39 conflicts
+only with a change to line 39 or 40. The denial says it was not trial-merged and
+names the `git fetch origin pull/<N>/head` after which a re-run decides it. The
+open PR's lines are numbered from its own merge base, so a long-lived PR can
+drift and slip past this, which is a missed catch and not a refused create.
 
 **A renumbered citation is not an edit.** A doc that quotes `file.py:1063:…`
 goes stale whenever a branch moves that line, so two unrelated branches each

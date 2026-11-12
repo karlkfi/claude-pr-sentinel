@@ -35,8 +35,9 @@ not, or where both sides made one identical edit. Git merges an identical edit
 clean, and it is the duplicate this check exists for. Only a path the ranges
 already suspected can stand, so a renumbered citation stays discounted and the
 merge can only ever narrow a deny. Nothing is fetched: a head known only to
-GitHub, or a git older than 2.38, leaves the range result, and the deny says so
-and names the fetch that lets a re-run decide it.
+GitHub, or a git older than 2.38, leaves the ranges to predict the merge, so a
+suspect stands only where changed lines touch (`touch_span`). The deny says it
+was not trial-merged and names the fetch that lets a re-run decide it.
 
 **A stacked branch is numbered from its own base.** A create that declares
 `--base <another open PR's head>` is numbered from that head rather than from
@@ -79,7 +80,7 @@ TIMED_OUT = 'timed out'  # a `capture()` status: ran, and blew its budget
 
 # What a hit rests on, weakest last. `build_reason` words the deny from it.
 MERGED = 'merged'        # a trial merge conflicts, or both made one edit
-RANGED = 'ranged'        # edits within six lines, and no trial merge ran
+RANGED = 'ranged'        # changed lines touch, and no trial merge ran
 PATHED = 'pathed'        # a shared path alone: no diff, no trial merge
 
 HUNK_RE = re.compile(r'^@@ -([0-9]+)(?:,([0-9]+))? \+')
@@ -239,9 +240,24 @@ def is_repoint(removed, added):
     return bool(removed) and removed != added and norm(removed) == norm(added)
 
 
+def touch_span(start, removed):
+    """The pre-image line boundaries one run of `-`/`+` lines touches, where
+    boundary `n` sits between lines `n` and `n + 1`.
+
+    Git's merge conflicts exactly when two sides' runs share a boundary:
+    changes to lines 38 and 39 do, 37 and 39 do not, and an insertion after
+    line 39 meets a change to 39 or 40 and nothing further. So a change to
+    lines `a..b` touches `a - 1 .. b`, and an insertion before line `a`
+    touches `a - 1` alone.
+    """
+    return start - 1, start + removed - 1
+
+
 def parse_edits(diff, widen=True):
-    """[(path, (start, end), removed, added)] from a unified diff, in pre-image
-    line numbers. A hunk that only renumbers citations is left out — see
+    """[(path, (start, end), removed, added, touches)] from a unified diff, in
+    pre-image line numbers. `(start, end)` is the hunk's reach, from its header;
+    `touches` is a `touch_span` per run of changed lines in its body, which a
+    context line ends. A hunk that only renumbers citations is left out — see
     `is_repoint`.
 
     A `--- ` line only names a file inside a header run, because a removed line
@@ -255,8 +271,16 @@ def parse_edits(diff, widen=True):
     nothing.
     """
     edits, path, in_header, hunk = [], '', False, None
+    old, run = 0, None                   # next pre-image line; [start, removed]
+
+    def end_run():
+        nonlocal run
+        if hunk and run:
+            hunk[4].append(touch_span(*run))
+        run = None
 
     def flush():
+        end_run()
         if hunk and not is_repoint(hunk[2], hunk[3]):
             edits.append(hunk)
 
@@ -274,12 +298,20 @@ def parse_edits(diff, widen=True):
         if m:
             flush()
             in_header = False
-            hunk = (path, hunk_range(int(m.group(1)),
-                                     1 if m.group(2) is None
-                                     else int(m.group(2)),
-                                     widen), [], [])
-        elif hunk and not in_header and line[:1] in '-+':
+            start = int(m.group(1))
+            count = 1 if m.group(2) is None else int(m.group(2))
+            old = start if count else start + 1
+            hunk = (path, hunk_range(start, count, widen), [], [], [])
+        elif hunk and not in_header and line[:1] in ('-', '+'):
+            if run is None:
+                run = [old, 0]
+            if line[0] == '-':
+                run[1] += 1
+                old += 1
             hunk[2 if line[0] == '-' else 3].append(line[1:])
+        elif hunk and not in_header and line[:1] in (' ', ''):
+            end_run()
+            old += 1
     flush()
     return edits
 
@@ -287,9 +319,17 @@ def parse_edits(diff, widen=True):
 def by_path(edits):
     """{path: [(start, end)]} from `parse_edits`."""
     ranges = {}
-    for path, span, _removed, _added in edits:
+    for path, span, _removed, _added, _touches in edits:
         ranges.setdefault(path, []).append(span)
     return ranges
+
+
+def touches_by_path(edits):
+    """{path: [(first, last)]} boundaries touched, from `parse_edits`."""
+    touched = {}
+    for path, _span, _removed, _added, touches in edits:
+        touched.setdefault(path, []).extend(touches)
+    return touched
 
 
 def parse_hunks(diff, widen=True):
@@ -311,9 +351,12 @@ def changed_edits(root, old, new):
 
 
 def changed_ranges(root, old, new):
-    """What changed between two revisions, or None."""
+    """(reach, touches) by path for what changed between two revisions, or
+    (None, None)."""
     edits = changed_edits(root, old, new)
-    return None if edits is None else by_path(edits)
+    if edits is None:
+        return None, None
+    return by_path(edits), touches_by_path(edits)
 
 
 def ranges_meet(mine, theirs):
@@ -345,7 +388,8 @@ def same_edits(root, fork, tip, head):
         return set()
 
     def keys(edits):
-        return {(p, span, tuple(rm), tuple(add)) for p, span, rm, add in edits}
+        return {(p, span, tuple(rm), tuple(add))
+                for p, span, rm, add, _touches in edits}
 
     return {key[0] for key in keys(mine) & keys(theirs)}
 
@@ -432,7 +476,7 @@ def may_share(pr, mine):
 
 
 def pr_ranges(root, number, repo=''):
-    """What an open PR changes, or None.
+    """(reach, touches) by path for what an open PR changes, or (None, None).
 
     Numbered from that PR's own merge base rather than this branch's, so a
     long-lived PR's ranges drift. Close enough to tell an edit in the same
@@ -443,7 +487,10 @@ def pr_ranges(root, number, repo=''):
     """
     status, out = capture(('gh', 'pr', 'diff', str(number)) + repo_args(repo),
                           root)
-    return None if status != 0 else parse_hunks(out, widen=False)
+    if status != 0:
+        return None, None
+    edits = parse_edits(out, widen=False)
+    return by_path(edits), touches_by_path(edits)
 
 
 def built_on(root, prs, branch, tip, mine):
@@ -497,7 +544,7 @@ def overlapping_prs(cwd, declared_base='', head='', repo=''):
     fork = (git(root, 'merge-base', tip, base) or '').strip()
     if not fork:
         return []
-    mine = changed_ranges(root, fork, tip)
+    mine, my_touches = changed_ranges(root, fork, tip)
     if not mine:
         return []                        # nothing committed yet, or git said no
     prs = open_prs(root, repo)
@@ -513,7 +560,7 @@ def overlapping_prs(cwd, declared_base='', head='', repo=''):
         found = built_on(root, prs, branch, tip, mine)
         if found:
             fork = found[0]
-            mine = changed_ranges(root, fork, tip)
+            mine, my_touches = changed_ranges(root, fork, tip)
             if not mine:
                 return []
             inherited = found[1]
@@ -528,10 +575,10 @@ def overlapping_prs(cwd, declared_base='', head='', repo=''):
                   if not is_ignored(p, patterns)]
         if not shared:
             continue
-        theirs = None
+        theirs = their_touches = None
         if fetched < MAX_PR_DIFFS:
             fetched += 1                 # a failed fetch spends it too
-            theirs = pr_ranges(root, pr.get('number'), repo)
+            theirs, their_touches = pr_ranges(root, pr.get('number'), repo)
         if theirs is not None:
             shared = [p for p in shared
                       if p in theirs and ranges_meet(mine[p], theirs[p])]
@@ -543,6 +590,10 @@ def overlapping_prs(cwd, declared_base='', head='', repo=''):
         collided = collisions(root, fork, tip, pr.get('headRefOid'))
         if collided is not None:
             shared, basis = [p for p in shared if p in collided], MERGED
+        elif basis == RANGED:            # no merge ran: predict what it would say
+            shared = [p for p in shared
+                      if ranges_meet(my_touches.get(p, []),
+                                     their_touches.get(p, []))]
         if shared:
             hits.append((pr.get('number'), shared, basis))
     return hits
@@ -565,7 +616,7 @@ def deciding(hits):
 
 BASIS_NOTE = {
     MERGED: 'a trial merge conflicts, or both make the same edit',
-    RANGED: 'edits within six lines, not trial-merged',
+    RANGED: 'changed lines touch, not trial-merged',
     PATHED: 'shared path only, diff not fetched, not trial-merged; listed, '
             'not counted',
 }
