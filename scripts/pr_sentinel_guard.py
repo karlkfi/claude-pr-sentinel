@@ -2,7 +2,8 @@
 """PreToolUse hook: DENY foreground CI-poll commands and ALLOW the plugin's own
 background watcher launch, pointing the session at the watcher either way.
 
-Fires on a `Bash` command the session is *about to run*. Four branches:
+Fires on a `Bash` or `Monitor` command the session is *about to run*. Four
+branches:
 
 * **Duplicate deny** — if the command is this plugin's own watcher launch for a
   PR this session already has a live watcher on, it returns a `deny` naming the
@@ -37,8 +38,9 @@ Fires on a `Bash` command the session is *about to run*. Four branches:
 
   The deny is scoped to the harm it names. A call submitted with
   `run_in_background` cannot block the session or burn idle tokens, so it is
-  never denied — backgrounding IS the fix, and it's the only one available for a
-  run with no PR to watch (a tag-triggered release build). A poll loop is denied
+  never denied, and neither is a Monitor, which always runs off the main thread.
+  For a run with no PR to watch (a tag-triggered release build) those two are
+  the fix, so the deny names both. A poll loop is denied
   only when it polls GitHub via `gh`; a loop around `curl` against an unrelated
   host isn't CI polling under any reading, and this hook has no business
   refusing it.
@@ -52,8 +54,8 @@ Fires on a `Bash` command the session is *about to run*. Four branches:
   `0`/`false` disables) and off under `PR_SENTINEL_DISABLE=1`. An open PR the
   create's own `--title` or `--body` says it replaces ("Supersedes #N") is not
   counted; see `pr_create_replaced`. Unlike the poll
-  deny this one applies to a backgrounded call too — backgrounding a create
-  still opens the PR, so it is not the fix here.
+  deny this one applies to a detached call too — backgrounding a create still
+  opens the PR, so it is not the fix here.
 
 Escape hatch: `PR_SENTINEL_OVERRIDE=<reason>` (any non-empty value) downgrades
 the deny — the hook defers, letting the command proceed under the normal
@@ -70,7 +72,7 @@ launched. The overlap deny is the one exception and asks GitHub, through the
 the few that share a path. It reads code, never prose: no PR body, no comments,
 no review text, not even the PR title. See `PRIVACY.md`.
 
-Fail modes: defers silently (emits nothing) on ANY uncertainty — non-Bash tool,
+Fail modes: defers silently (emits nothing) on ANY uncertainty — any other tool,
 unparseable command/input, a shape it doesn't recognise. It NEVER denies a
 command it isn't sure about, and it can never break a session.
 `PR_SENTINEL_DEBUG=1` re-raises for debugging.
@@ -563,9 +565,12 @@ def build_reason(shape):
         f'fails, a conflict appears, the PR goes green, or the PR closes. '
         f'When it wakes you, act on the reported event, push, and relaunch it. '
         f'Never auto-merge.\n'
-        f'If there is no PR to watch — a tag-triggered release build, say — '
-        f're-run this same command as a background task '
-        f'(run_in_background: true); only the foreground form is denied.\n'
+        f'If there is no PR to watch — a tag-triggered release build, or a '
+        f'push to main — run a bounded watch as a background task '
+        f'(run_in_background: true):\n'
+        f'    timeout <seconds> gh run watch <run-id> --exit-status\n'
+        f'or give a polling loop to the Monitor tool, bounded by its '
+        f'timeout_ms; only a foreground call is denied.\n'
         f'If you genuinely need this one command, re-run it with an inline '
         f'PR_SENTINEL_OVERRIDE=<reason> prefix on the command itself '
         f'(PR_SENTINEL_OVERRIDE="why this once" <command>).'
@@ -602,7 +607,12 @@ def run(data):
 
     Called by the `pr-sentinel.py` entry point, which owns the stdin parse and
     the fail-open wrapper. Emitting nothing is the defer."""
-    if data.get('tool_name') != 'Bash':
+    # `hooks.json` names Monitor so that it arrives as itself. A bare "Bash"
+    # matcher catches it too (seen on Claude Code 2.1.317 and later), rewritten
+    # to `Bash` with only the command and description, which reads as a
+    # foreground call.
+    tool_name = data.get('tool_name')
+    if tool_name not in ('Bash', 'Monitor'):
         return
     tool_input = data.get('tool_input') or {}
     command = tool_input.get('command') or ''
@@ -671,10 +681,10 @@ def run(data):
                 create_overlaps(data.get('cwd'), command, lenient=True))}}))
         return
 
-    # A backgrounded call can't block the session or burn idle tokens, so the
-    # harm the deny names doesn't apply. Checked after the auto-allow, which the
+    # A detached call can't block the session or burn idle tokens, so the harm
+    # the deny names doesn't apply. Checked after the auto-allow, which the
     # watcher's own (backgrounded) launch still needs.
-    if is_backgrounded(tool_input):
+    if tool_name == 'Monitor' or is_backgrounded(tool_input):
         return
 
     if overridden:

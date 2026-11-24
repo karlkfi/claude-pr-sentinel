@@ -126,7 +126,9 @@ class Wiring(unittest.TestCase):
         hooks = load("hooks/hooks.json")
         entries = hooks["hooks"]["PreToolUse"]
         self.assertTrue(entries)
-        self.assertEqual(entries[0]["matcher"], "Bash")
+        # Monitor by name, so it arrives as itself. A bare "Bash" also catches
+        # it (Claude Code 2.1.317 and later), disguised as a foreground call.
+        self.assertEqual(entries[0]["matcher"], "Bash|Monitor")
         self.assertIn(ENTRY_POINT.name, entries[0]["hooks"][0]["command"])
 
     def test_stop_hook_registered(self):
