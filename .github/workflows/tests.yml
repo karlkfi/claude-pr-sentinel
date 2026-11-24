@@ -42,3 +42,13 @@ jobs:
       - name: Publish the ordered backlog
         if: always()
         run: python3 scripts/queue.py render --format table --all >> "$GITHUB_STEP_SUMMARY"
+
+  md-reflow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: tools/go.mod
+          cache-dependency-path: tools/go.sum
+      - run: make md-reflow-check

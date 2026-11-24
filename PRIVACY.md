@@ -2,314 +2,160 @@
 
 _Last updated: 2026-11-09_
 
-pr-sentinel is a Claude Code plugin that runs on your local machine. Its
-components have different data profiles, described honestly below: two hooks,
-a migration helper and an activity report that never leave your machine, one
-watcher that talks to GitHub, and one hook that asks GitHub a single narrow
-question before you open a pull request.
+pr-sentinel is a Claude Code plugin that runs on your local machine.
+Its components have different data profiles, described honestly below: two hooks, a migration helper and an activity report that never leave your machine, one watcher that talks to GitHub, and one hook that asks GitHub a single narrow question before you open a pull request.
 
-All three hooks are one script — Claude Code runs `scripts/pr-sentinel.py`
-whichever event fires, and it hands the payload to the handler for that event.
+All three hooks are one script — Claude Code runs `scripts/pr-sentinel.py` whichever event fires, and it hands the payload to the handler for that event.
 Each handler has its own section below, because each reads different things.
 
 ## Data we collect
 
-None. The plugin has no analytics, no telemetry, and no data collection of any
-kind. It ships as one bash watcher and a few stdlib-only Python scripts (the
-hook entry point and its three handlers, the migration helper, and the activity
-report).
+None.
+The plugin has no analytics, no telemetry, and no data collection of any kind.
+It ships as one bash watcher and a few stdlib-only Python scripts (the hook entry point and its three handlers, the migration helper, and the activity report).
 
 ## The hook entry point (`scripts/pr-sentinel.py`)
 
-- Runs **entirely locally with no network access.** It is the script Claude
-  Code invokes for all three hook events.
-- Receives the hook payload via standard input, reads the `hook_event_name`
-  field to decide which handler runs, and passes the payload straight through.
+- Runs **entirely locally with no network access.** It is the script Claude Code invokes for all three hook events.
+- Receives the hook payload via standard input, reads the `hook_event_name` field to decide which handler runs, and passes the payload straight through.
   It inspects nothing else and writes nothing to disk.
 - An event it does not recognise produces no output at all.
 
 ## The PostToolUse handler (`scripts/pr_sentinel_hook.py`)
 
 - Runs **entirely locally with no network access.**
-- Receives, via standard input, the Bash command Claude Code just ran and that
-  command's output text, plus `CLAUDE_PLUGIN_ROOT` and the optional
-  `PR_SENTINEL_*` configuration values (via environment).
-- Processes these **in memory** to decide whether to emit an advisory nudge,
-  then writes that nudge (or nothing) to standard output.
-- Writes nothing to disk. On a `git push` it may run `git rev-parse`,
-  `git symbolic-ref`, `git config --get` / `--get-all` and `git remote get-url`
-  in the repository the push runs in — your working directory, moved by any
-  literal `cd`, `pushd`, `git -C` or `--git-dir` earlier in the same command —
-  to tell a tag from a branch, to learn which branch
-  the remote calls its default, to see whether the push target is a forge or a
-  filesystem path, and (on a push naming no refspec) to read which ref your
-  `remote.<name>.push`, `push.default` and `branch.<name>.merge` settings send
-  it to — reads of your local repo's refs and remote configuration, nothing
-  else. A remote's URL is used to classify the push and is never
-  emitted. The only PR data it handles is a PR URL that the
-  command itself already printed, which it echoes back in the nudge.
-- Reads your Claude Code **session transcript** (the harness supplies the path)
-  for one thing only: the watchers this session launched and which of them have
-  reported completion or been stopped with `TaskStop`, so it does not ask for
-  a second watcher on a pull request one is already watching. It extracts the
-  PR number, the background task id, and nothing else.
+- Receives, via standard input, the Bash command Claude Code just ran and that command's output text, plus `CLAUDE_PLUGIN_ROOT` and the optional `PR_SENTINEL_*` configuration values (via environment).
+- Processes these **in memory** to decide whether to emit an advisory nudge, then writes that nudge (or nothing) to standard output.
+- Writes nothing to disk.
+  On a `git push` it may run `git rev-parse`, `git symbolic-ref`, `git config --get` / `--get-all` and `git remote get-url` in the repository the push runs in — your working directory, moved by any literal `cd`, `pushd`, `git -C` or `--git-dir` earlier in the same command — to tell a tag from a branch, to learn which branch the remote calls its default, to see whether the push target is a forge or a filesystem path, and (on a push naming no refspec) to read which ref your `remote.<name>.push`, `push.default` and `branch.<name>.merge` settings send it to — reads of your local repo's refs and remote configuration, nothing else.
+  A remote's URL is used to classify the push and is never emitted.
+  The only PR data it handles is a PR URL that the command itself already printed, which it echoes back in the nudge.
+- Reads your Claude Code **session transcript** (the harness supplies the path) for one thing only: the watchers this session launched and which of them have reported completion or been stopped with `TaskStop`, so it does not ask for a second watcher on a pull request one is already watching.
+  It extracts the PR number, the background task id, and nothing else.
 
 ## The PreToolUse handler (`scripts/pr_sentinel_guard.py`)
 
-- Denies a Bash command that would foreground-poll continuous integration (CI),
-  auto-approves the plugin's own watcher launch, and denies a `gh pr create`
-  that would open a second pull request over lines an open one already changes.
-- Receives, via standard input, the Bash command Claude Code is about to run
-  and your working directory, plus `CLAUDE_PLUGIN_ROOT` and the optional
-  `PR_SENTINEL_*` configuration values (via environment). It inspects the
-  command string only — never the command's output.
-- Reads your **session transcript** for the same narrow fact the PostToolUse
-  hook reads it for — which watchers are still running — so it can refuse a
-  duplicate watcher on a PR already covered.
-- **Runs locally for every decision except the overlap check.** The poll deny,
-  the auto-allow and the duplicate deny make no network call at all.
-- **The overlap check talks to GitHub**, through your already-authenticated
-  `gh` CLI, and only when you run a `gh pr create`. It reads your local repo
-  — the one a `cd` earlier in the same command moves to, else the session's —
-  with `git diff` / `git merge-base` / `git rev-parse` / `git merge-tree` to learn
-  which lines the
-  branch being opened changes — the `--head` the create names, else the branch a
-  `git checkout`/`git switch` earlier in the same command moves to, else the
-  checked-out one — and whether this branch is built on top of the `--base` the
-  create declares, or on an open PR's head commit — then issues two read-only
-  queries, against the repository the create's `--repo` names when it names one:
-  - `gh pr list --json number,headRefName,headRefOid,files` — the open PRs,
-    their head branch names and head commits, and the paths each one touches;
-  - `gh pr diff <number>` — the diff of at most **three** PRs, and only ones
-    that already share a path with your branch, to compare line ranges rather
-    than filenames. `gh` lists at most 100 paths per PR, so a PR listing 100
-    is fetched too: the paths past that cut are only in its diff.
-- **The overlap check trial-merges locally.** Where an open PR's head commit is
-  already in your clone, `git merge-tree` merges it with your branch and with
-  your fork point. It reads your clone and nothing from GitHub, and fetches
-  nothing. It does write: git stores the merge's trees and blobs as unreferenced
-  objects in your repository's own object store, until `git gc` removes them. It
-  moves no ref and touches no working tree.
-- That field list is the whole of it. The check **never** requests the PR body,
-  review comments, issue comments, or even the PR **title** — a title is
-  written by its author, and the denial message goes straight into your
-  session's context. A denial names the PR **number** and the shared **paths**
-  from your own diff, nothing else.
-- It reads the create's own `--title` and `--body` from the command string for
-  a `Replaces #N` / `Supersedes #N` / `Closes #N` naming an open PR this one
-  replaces, and leaves that PR out of the comparison. That is text you are
-  about to publish, read from the command and nowhere else: a `--body-file` is
-  not opened.
-- Every probe **fails silent**: no `gh`, no credentials, an unresolvable base
-  ref, or a slow call costs a missed catch, never a blocked command. Set
-  `PR_SENTINEL_OVERLAP_ENABLED=false` to switch the check — and its two
-  queries — off entirely.
-- Writes nothing to disk apart from those unreferenced git objects, and emits
-  only its allow/deny decision to standard output.
+- Denies a Bash command that would foreground-poll continuous integration (CI), auto-approves the plugin's own watcher launch, and denies a `gh pr create` that would open a second pull request over lines an open one already changes.
+- Receives, via standard input, the Bash command Claude Code is about to run and your working directory, plus `CLAUDE_PLUGIN_ROOT` and the optional `PR_SENTINEL_*` configuration values (via environment).
+  It inspects the command string only — never the command's output.
+- Reads your **session transcript** for the same narrow fact the PostToolUse hook reads it for — which watchers are still running — so it can refuse a duplicate watcher on a PR already covered.
+- **Runs locally for every decision except the overlap check.** The poll deny, the auto-allow and the duplicate deny make no network call at all.
+- **The overlap check talks to GitHub**, through your already-authenticated `gh` CLI, and only when you run a `gh pr create`.
+  It reads your local repo — the one a `cd` earlier in the same command moves to, else the session's — with `git diff` / `git merge-base` / `git rev-parse` / `git merge-tree` to learn which lines the branch being opened changes — the `--head` the create names, else the branch a `git checkout`/`git switch` earlier in the same command moves to, else the checked-out one — and whether this branch is built on top of the `--base` the create declares, or on an open PR's head commit — then issues two read-only queries, against the repository the create's `--repo` names when it names one:
+  - `gh pr list --json number,headRefName,headRefOid,files` — the open PRs, their head branch names and head commits, and the paths each one touches;
+  - `gh pr diff <number>` — the diff of at most **three** PRs, and only ones that already share a path with your branch, to compare line ranges rather than filenames.
+    `gh` lists at most 100 paths per PR, so a PR listing 100 is fetched too: the paths past that cut are only in its diff.
+- **The overlap check trial-merges locally.** Where an open PR's head commit is already in your clone, `git merge-tree` merges it with your branch and with your fork point.
+  It reads your clone and nothing from GitHub, and fetches nothing.
+  It does write: git stores the merge's trees and blobs as unreferenced objects in your repository's own object store, until `git gc` removes them.
+  It moves no ref and touches no working tree.
+- That field list is the whole of it.
+  The check **never** requests the PR body, review comments, issue comments, or even the PR **title** — a title is written by its author, and the denial message goes straight into your session's context.
+  A denial names the PR **number** and the shared **paths** from your own diff, nothing else.
+- It reads the create's own `--title` and `--body` from the command string for a `Replaces #N` / `Supersedes #N` / `Closes #N` naming an open PR this one replaces, and leaves that PR out of the comparison.
+  That is text you are about to publish, read from the command and nowhere else: a `--body-file` is not opened.
+- Every probe **fails silent**: no `gh`, no credentials, an unresolvable base ref, or a slow call costs a missed catch, never a blocked command.
+  Set `PR_SENTINEL_OVERLAP_ENABLED=false` to switch the check — and its two queries — off entirely.
+- Writes nothing to disk apart from those unreferenced git objects, and emits only its allow/deny decision to standard output.
 
 ## The watcher (`scripts/pr-sentinel-watch.sh`)
 
-- **Talks to GitHub** through your already-authenticated `gh` CLI — this is its
-  purpose. It issues read-only queries for:
-  - the PR's `state`, `mergeStateStatus`, base branch name (`baseRefName`),
-    head commit (`headRefOid`), canonical URL (`url`), and whether it is a
-    draft (`isDraft`, a boolean), from `gh pr view --json`;
-  - whether the PR currently holds a merge-queue entry (a GraphQL
-    `mergeQueueEntry` read);
-  - who removed the PR from the merge queue — the `__typename` and `login` of
-    the `actor` on the most recent `REMOVED_FROM_MERGE_QUEUE_EVENT` (a GraphQL
-    `timelineItems` read), so the report can tell a queue eviction from a person
-    removing it deliberately. Read once, when that event is reported, never
-    per poll. The event's own free-form text is not requested;
-  - the PR's check results — each check's `name`, its `bucket` (pass, fail,
-    pending, skipping or cancel), and the `link` to its run, from
-    `gh pr checks --json`;
-  - on a poll where every check is green, how many workflow runs on the PR's
-    head commit have not finished (`actions/runs?head_sha=`), so a queued re-run
-    with no check row yet cannot read as green. The response also carries each
-    run's name, commit message and actor; `gh`'s own query reduces it to one
-    number on your machine, and **none** of the rest reaches the watcher;
-  - a failing check's workflow run — its conclusion, and its workflow id and
-    that workflow's latest completed run on the **base branch**, to tell a
-    failure the PR caused from one it inherited — only on a failure. Of that
-    base run the report names its id, head commit, workflow **file** (never a
-    `run-name:` expression's rendered title, which can interpolate a commit
-    message), conclusion, and how long ago it started. The age is read as a
-    difference computed inside the query, so no timestamp itself reaches the
-    watcher;
-  - a *pending* check's workflow run — its workflow id, and how long that
-    workflow's latest **successful** run on the base branch took, so a poll
-    never sleeps past the expected end of the run. Only the two timestamps'
-    difference is read, never the timestamps themselves, and the measurement is
-    taken once per run of pending checks rather than per poll. Set
-    `PR_SENTINEL_POLL_CLAMP=0` to switch this read off;
-  - whether this PR's head commit has the base's green run behind it, when a
-    failing check turns out to be green on the base after all — a `compare`
-    between those two commits, whose **`status`** word (`ahead`, `behind`,
-    `identical`, `diverged`) and merge-base commit SHA are all that is read. It distinguishes a failure this PR
-    caused from the base's own breakage that this branch has not picked up the
-    fix for yet, so the report can say "rebase" instead of "diagnose". Read only
-    on a poll where the base is green while this PR is still failing, and once
-    per head commit and green base run — a watch that keeps polling past it
-    reuses the answer. The same holds for every read below that serves this
-    question. Then — to learn whether the base was red where this head
-    forked — the base branch's run of that workflow at that commit
-    (`actions/workflows/{id}/runs?head_sha=`), and when there is none, the
-    workflow's 20 most recent completed base runs followed by up to five more
-    `compare` reads to find the nearest one this head contains. Of each run, its
-    conclusion, id, head commit and workflow file are read. One more read of
-    this PR's own failing run takes its `event` and how long ago it was created,
-    as a difference computed inside the query, to recognise a `pull_request` run
-    that tested a merge already carrying the base's fix. Those run responses
-    also carry each run's name, commit message and actor; `gh`'s own query
-    reduces them to the fields named here on your machine, and **none** of the
-    rest reaches the watcher.
+- **Talks to GitHub** through your already-authenticated `gh` CLI — this is its purpose.
+  It issues read-only queries for:
+  - the PR's `state`, `mergeStateStatus`, base branch name (`baseRefName`), head commit (`headRefOid`), canonical URL (`url`), and whether it is a draft (`isDraft`, a boolean), from `gh pr view --json`;
+  - whether the PR currently holds a merge-queue entry (a GraphQL `mergeQueueEntry` read);
+  - who removed the PR from the merge queue — the `__typename` and `login` of the `actor` on the most recent `REMOVED_FROM_MERGE_QUEUE_EVENT` (a GraphQL `timelineItems` read), so the report can tell a queue eviction from a person removing it deliberately.
+    Read once, when that event is reported, never per poll.
+    The event's own free-form text is not requested;
+  - the PR's check results — each check's `name`, its `bucket` (pass, fail, pending, skipping or cancel), and the `link` to its run, from `gh pr checks --json`;
+  - on a poll where every check is green, how many workflow runs on the PR's head commit have not finished (`actions/runs?head_sha=`), so a queued re-run with no check row yet cannot read as green.
+    The response also carries each run's name, commit message and actor; `gh`'s own query reduces it to one number on your machine, and **none** of the rest reaches the watcher;
+  - a failing check's workflow run — its conclusion, and its workflow id and that workflow's latest completed run on the **base branch**, to tell a failure the PR caused from one it inherited — only on a failure.
+    Of that base run the report names its id, head commit, workflow **file** (never a `run-name:` expression's rendered title, which can interpolate a commit message), conclusion, and how long ago it started.
+    The age is read as a difference computed inside the query, so no timestamp itself reaches the watcher;
+  - a *pending* check's workflow run — its workflow id, and how long that workflow's latest **successful** run on the base branch took, so a poll never sleeps past the expected end of the run.
+    Only the two timestamps' difference is read, never the timestamps themselves, and the measurement is taken once per run of pending checks rather than per poll.
+    Set `PR_SENTINEL_POLL_CLAMP=0` to switch this read off;
+  - whether this PR's head commit has the base's green run behind it, when a failing check turns out to be green on the base after all — a `compare` between those two commits, whose **`status`** word (`ahead`, `behind`, `identical`, `diverged`) and merge-base commit SHA are all that is read.
+    It distinguishes a failure this PR caused from the base's own breakage that this branch has not picked up the fix for yet, so the report can say "rebase" instead of "diagnose".
+    Read only on a poll where the base is green while this PR is still failing, and once per head commit and green base run — a watch that keeps polling past it reuses the answer.
+    The same holds for every read below that serves this question.
+    Then — to learn whether the base was red where this head forked — the base branch's run of that workflow at that commit (`actions/workflows/{id}/runs?head_sha=`), and when there is none, the workflow's 20 most recent completed base runs followed by up to five more `compare` reads to find the nearest one this head contains.
+    Of each run, its conclusion, id, head commit and workflow file are read.
+    One more read of this PR's own failing run takes its `event` and how long ago it was created, as a difference computed inside the query, to recognise a `pull_request` run that tested a merge already carrying the base's fix.
+    Those run responses also carry each run's name, commit message and actor; `gh`'s own query reduces them to the fields named here on your machine, and **none** of the rest reaches the watcher.
 
-    GitHub has no narrower endpoint for that question, and its answer is not
-    narrow: the response also carries the intervening commits — their messages
-    and author names — and the patches of the files they changed (106 KB for a
-    seven-commit comparison, measured 2026-09-18). The `status` word and the
-    merge-base SHA are extracted from it by `gh`'s own query, on your machine, before anything
-    reaches the watcher. **None** of the rest is parsed, stored, or printed, and
-    no part of it can reach your session: `base_fixed` names the base run, the
-    head commit and the failing checks, and nothing drawn from this response but
-    that one word and the merge-base SHA, whose first seven characters
-    `base_fixed` and `check_failure` may name. Setting
-    `PR_SENTINEL_BASE_CHECK=0` switches these reads off along with the rest of the base comparison;
+    GitHub has no narrower endpoint for that question, and its answer is not narrow: the response also carries the intervening commits — their messages and author names — and the patches of the files they changed (106 KB for a seven-commit comparison, measured 2026-09-18).
+    The `status` word and the merge-base SHA are extracted from it by `gh`'s own query, on your machine, before anything reaches the watcher.
+    **None** of the rest is parsed, stored, or printed, and no part of it can reach your session: `base_fixed` names the base run, the head commit and the failing checks, and nothing drawn from this response but that one word and the merge-base SHA, whose first seven characters `base_fixed` and `check_failure` may name.
+    Setting `PR_SENTINEL_BASE_CHECK=0` switches these reads off along with the rest of the base comparison;
   - a failing run's step log (`gh run view --log-failed`), only on a failure.
-- The workflow-run reads above go to GitHub's Actions REST API under your own
-  repository, and nowhere else: `actions/runs/{id}` for a single run, and
-  `actions/workflows/{id}/runs` for that workflow's latest run on the base
-  branch. The ancestry read goes to the same repository's `compare/{base}...{head}`
-  endpoint.
-- It **never** requests or parses the PR body, PR review comments, or issue
-  comments. It reads GitHub-controlled check metadata and merge state only.
-- All network traffic is between your machine and GitHub, via `gh`, under your
-  own credentials. The plugin adds no other endpoint, no telemetry, and no
-  third party.
-- The failing-run log excerpt is sanitized (ANSI-stripped, size-capped) and
-  printed to the background task's standard output, which the Claude Code
-  harness delivers to your session.
-- It **writes one small file to disk**, and reads it back on the next launch:
-  the last `check_failure` it reported for a pull request, so a relaunch over a
-  failure you have already been told about notices instead of waking you again.
-  The file holds four fields — a timestamp, the event name, the head commit,
-  and the failing checks' own names as `gh pr checks` reported them — and its
-  **name** is the pull request's canonical URL with the punctuation replaced,
-  which is what keeps two repositories sharing a PR number apart. Nothing else
-  is recorded, and nothing recorded leaves your machine.
-- That file lives under `${TMPDIR}/pr-sentinel` by default —
-  `PR_SENTINEL_STATE_DIR` moves it, and `PR_SENTINEL_DAMPEN=0` stops it being
-  written or read at all. The directory is created mode `700`, because the
-  default parent is world-readable and the file names carry PR URLs. Losing it
-  costs only the dampening: the next launch reports the failure again.
+- The workflow-run reads above go to GitHub's Actions REST API under your own repository, and nowhere else: `actions/runs/{id}` for a single run, and `actions/workflows/{id}/runs` for that workflow's latest run on the base branch.
+  The ancestry read goes to the same repository's `compare/{base}...{head}` endpoint.
+- It **never** requests or parses the PR body, PR review comments, or issue comments.
+  It reads GitHub-controlled check metadata and merge state only.
+- All network traffic is between your machine and GitHub, via `gh`, under your own credentials.
+  The plugin adds no other endpoint, no telemetry, and no third party.
+- The failing-run log excerpt is sanitized (ANSI-stripped, size-capped) and printed to the background task's standard output, which the Claude Code harness delivers to your session.
+- It **writes one small file to disk**, and reads it back on the next launch: the last `check_failure` it reported for a pull request, so a relaunch over a failure you have already been told about notices instead of waking you again.
+  The file holds four fields — a timestamp, the event name, the head commit, and the failing checks' own names as `gh pr checks` reported them — and its **name** is the pull request's canonical URL with the punctuation replaced, which is what keeps two repositories sharing a PR number apart.
+  Nothing else is recorded, and nothing recorded leaves your machine.
+- That file lives under `${TMPDIR}/pr-sentinel` by default — `PR_SENTINEL_STATE_DIR` moves it, and `PR_SENTINEL_DAMPEN=0` stops it being written or read at all.
+  The directory is created mode `700`, because the default parent is world-readable and the file names carry PR URLs.
+  Losing it costs only the dampening: the next launch reports the failure again.
 
 ## The Stop handler (`scripts/pr_sentinel_stop_hook.py`)
 
-- Runs **entirely locally with no network access.** It blocks the end of a turn
-  once when the session has an open PR that nothing is watching.
-- Reads four local files, all of them paths the session itself produced: your
-  Claude Code **session transcript** (the harness supplies the path), each
-  **watcher's own output file** (the path is in the background task's completion
-  notification), and, when a `gh pr create` sent its output to a log rather than
-  to the transcript, **that log** — the path is parsed out of the create's own
-  command string, the read is capped at 8 KiB, and a file older than the create
-  is ignored so a reused log path cannot donate a stale PR URL. The fourth is
-  the same shape one step later: when a watcher *launch* redirected the
-  watcher's output to a log, **that log** — the path comes from the launch's own
-  command string, the read is capped at 64 KiB (as the watcher output file's
-  is), and a file older than the launch is ignored for the same reason. Either
-  path may be written through a shell variable, which resolves only against a
-  literal that same command assigned — never against the hook's own environment.
-- A watcher's output file is a temp file this plugin does not own, and it can
-  be reaped while the session is still running. When one is gone, the report is
-  recovered **from that same transcript**: the Read tool's result for that path,
-  or the **`Bash` command** that read it (`cat`/`tail`) together with that
-  command's own result. No new file and no new path — a result counts only when
-  its command names an output-file path the hook already learned from the
-  harness's completion notification or the launch's own command string, so a
-  command reading anything else contributes nothing.
-- Also reads, from that same transcript, the harness's own record of an
-  **earlier block by this hook**, so it asks about a PR once rather than on
-  every turn end. From the same background-launch records it already reads, it
-  additionally notes a watch the session armed with a script that is **not**
-  this plugin's, so the block can name it. That is the same local source and no
-  new one: it inspects no process table, and such a watch never suppresses the
-  block. Only the harness-written copies of its own message count —
-  it extracts nothing from your prompts or the model's replies. It also notes
-  whether the session called one of the **Claude desktop app's PR tools**
-  (`mcp__ccd_pr__*`), from the tool *name* alone, so the block can address the
-  app's case; the tools' results, which carry the PR title, are never read.
-- Extracts nothing from a redirected log but a `github.com` PR URL (the
-  create's) or the watcher's own report header (the launch's). It does **not**
-  read PR bodies or comments, and it inspects no process table.
-- Writes nothing to disk, and emits only its block decision and an optional
-  non-blocking notice to standard output.
+- Runs **entirely locally with no network access.** It blocks the end of a turn once when the session has an open PR that nothing is watching.
+- Reads four local files, all of them paths the session itself produced: your Claude Code **session transcript** (the harness supplies the path), each **watcher's own output file** (the path is in the background task's completion notification), and, when a `gh pr create` sent its output to a log rather than to the transcript, **that log** — the path is parsed out of the create's own command string, the read is capped at 8 KiB, and a file older than the create is ignored so a reused log path cannot donate a stale PR URL.
+  The fourth is the same shape one step later: when a watcher *launch* redirected the watcher's output to a log, **that log** — the path comes from the launch's own command string, the read is capped at 64 KiB (as the watcher output file's is), and a file older than the launch is ignored for the same reason.
+  Either path may be written through a shell variable, which resolves only against a literal that same command assigned — never against the hook's own environment.
+- A watcher's output file is a temp file this plugin does not own, and it can be reaped while the session is still running.
+  When one is gone, the report is recovered **from that same transcript**: the Read tool's result for that path, or the **`Bash` command** that read it (`cat`/`tail`) together with that command's own result.
+  No new file and no new path — a result counts only when its command names an output-file path the hook already learned from the harness's completion notification or the launch's own command string, so a command reading anything else contributes nothing.
+- Also reads, from that same transcript, the harness's own record of an **earlier block by this hook**, so it asks about a PR once rather than on every turn end.
+  From the same background-launch records it already reads, it additionally notes a watch the session armed with a script that is **not** this plugin's, so the block can name it.
+  That is the same local source and no new one: it inspects no process table, and such a watch never suppresses the block.
+  Only the harness-written copies of its own message count — it extracts nothing from your prompts or the model's replies.
+  It also notes whether the session called one of the **Claude desktop app's PR tools** (`mcp__ccd_pr__*`), from the tool *name* alone, so the block can address the app's case; the tools' results, which carry the PR title, are never read.
+- Extracts nothing from a redirected log but a `github.com` PR URL (the create's) or the watcher's own report header (the launch's).
+  It does **not** read PR bodies or comments, and it inspects no process table.
+- Writes nothing to disk, and emits only its block decision and an optional non-blocking notice to standard output.
 
 ## The migration helper (`scripts/pr-sentinel-migrate-autofix.py`)
 
-- Runs **entirely locally with no network access.** You invoke it manually (or
-  via the `/pr-sentinel-migrate-autofix` command) — it is not a hook and does
-  not run on its own.
-- Reads the Claude **desktop app's** own session files — every `local_*.json`
-  at any depth under its `claude-code-sessions` store, skipping the
-  `.autofix-backup-*` directories this tool wrote itself — to find the
-  `autoFixEnabled` toggle, along with the sibling `prState` / `prRepository` /
-  `prNumber` / `title` fields it uses to filter and to print a report. A file
-  that does not parse as an object carrying that toggle is left untouched. It
-  does **not** read PR bodies or comments.
-- With `--apply` it **writes to disk** — the only component that edits files
-  you already had: it backs up each targeted file under
-  `.autofix-backup-<timestamp>/` before setting `autoFixEnabled` to `false`.
+- Runs **entirely locally with no network access.** You invoke it manually (or via the `/pr-sentinel-migrate-autofix` command) — it is not a hook and does not run on its own.
+- Reads the Claude **desktop app's** own session files — every `local_*.json` at any depth under its `claude-code-sessions` store, skipping the `.autofix-backup-*` directories this tool wrote itself — to find the `autoFixEnabled` toggle, along with the sibling `prState` / `prRepository` / `prNumber` / `title` fields it uses to filter and to print a report.
+  A file that does not parse as an object carrying that toggle is left untouched.
+  It does **not** read PR bodies or comments.
+- With `--apply` it **writes to disk** — the only component that edits files you already had: it backs up each targeted file under `.autofix-backup-<timestamp>/` before setting `autoFixEnabled` to `false`.
   (The watcher also writes, but only its own small record, described above.)
-  This is local file editing under your own account; nothing leaves the
-  machine.
+  This is local file editing under your own account; nothing leaves the machine.
 
 ## The activity report (`scripts/friction-report.py`)
 
-- Runs **entirely locally with no network access.** You invoke it manually (or
-  via the `/pr-sentinel-friction-report` command) — it is not a hook and does
-  not run on its own.
-- Reads your Claude Code **session transcripts** — every `*.jsonl` at any
-  depth under `~/.claude/projects`, or under whatever `--transcripts` names —
-  the records Claude Code already writes for every session. From them it
-  extracts only: the plugin's own nudges, the watcher launch commands, the
-  watcher's own event reports, the Stop hook's block message, the PreToolUse
-  guard's own decisions, each record's timestamp, and the working directory,
-  which it reduces to a directory name for the per-repository ranking.
-- To count uses of the `PR_SENTINEL_OVERRIDE` escape hatch it also reads the
-  **`Bash` commands** in the transcript, because a downgraded decision leaves no
-  other trace. Only a command carrying that prefix is printed back, ranked and
-  clipped, and the value of every other leading `NAME=VALUE` assignment on it is
-  masked first — so a credential a session inlined is not echoed into the
-  report.
-- It then **classifies** each of those commands by which deny branch it was
-  headed for, by importing the PreToolUse guard's own predicates from
-  `scripts/pr_sentinel_guard.py` and re-running them locally. They read nothing
-  but the command string and the call's `run_in_background` flag — both already
-  in the transcript — so this adds no network call, no new file read, and
-  nothing new to the output beyond a per-branch count.
-- It does **not** read PR bodies, PR review comments, or issue comments, and it
-  parses nothing else out of your transcripts — not your prompts, not the
-  model's replies, not other tools' output.
-- **Writes nothing to disk** and sends nothing anywhere. It prints a summary to
-  standard output, which stays in your terminal or your session.
-- It adds **no telemetry**. It collects nothing new; it re-reads what Claude
-  Code already recorded locally.
+- Runs **entirely locally with no network access.** You invoke it manually (or via the `/pr-sentinel-friction-report` command) — it is not a hook and does not run on its own.
+- Reads your Claude Code **session transcripts** — every `*.jsonl` at any depth under `~/.claude/projects`, or under whatever `--transcripts` names — the records Claude Code already writes for every session.
+  From them it extracts only: the plugin's own nudges, the watcher launch commands, the watcher's own event reports, the Stop hook's block message, the PreToolUse guard's own decisions, each record's timestamp, and the working directory, which it reduces to a directory name for the per-repository ranking.
+- To count uses of the `PR_SENTINEL_OVERRIDE` escape hatch it also reads the **`Bash` commands** in the transcript, because a downgraded decision leaves no other trace.
+  Only a command carrying that prefix is printed back, ranked and clipped, and the value of every other leading `NAME=VALUE` assignment on it is masked first — so a credential a session inlined is not echoed into the report.
+- It then **classifies** each of those commands by which deny branch it was headed for, by importing the PreToolUse guard's own predicates from `scripts/pr_sentinel_guard.py` and re-running them locally.
+  They read nothing but the command string and the call's `run_in_background` flag — both already in the transcript — so this adds no network call, no new file read, and nothing new to the output beyond a per-branch count.
+- It does **not** read PR bodies, PR review comments, or issue comments, and it parses nothing else out of your transcripts — not your prompts, not the model's replies, not other tools' output.
+- **Writes nothing to disk** and sends nothing anywhere.
+  It prints a summary to standard output, which stays in your terminal or your session.
+- It adds **no telemetry**.
+  It collects nothing new; it re-reads what Claude Code already recorded locally.
 
 ## Third parties
 
-The plugin shares no data with any third party. Its only network peer is
-GitHub, reached through the `gh` CLI you have already authenticated — the
-watcher on every poll, and the PreToolUse hook's overlap check when you open a
-pull request.
+The plugin shares no data with any third party.
+Its only network peer is GitHub, reached through the `gh` CLI you have already authenticated — the watcher on every poll, and the PreToolUse hook's overlap check when you open a pull request.
 
 ## Changes to this policy
 
-Updates will be published in this file in the project repository, with the date
-above revised accordingly.
+Updates will be published in this file in the project repository, with the date above revised accordingly.
 
 ## Contact
 
-Questions or concerns:
-<https://github.com/karlkfi/claude-pr-sentinel/issues>
+Questions or concerns: <https://github.com/karlkfi/claude-pr-sentinel/issues>
