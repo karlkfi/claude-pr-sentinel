@@ -1,0 +1,20 @@
+# One sentence per source line in tracked Markdown, so a changed sentence is one
+# changed line and two branches editing a paragraph stop colliding on its wrap.
+# `make md-reflow` applies it; `make md-reflow-check` is the gate.
+#
+# The formatter joins a sentence to the one before it when that one ends inside
+# bold, a link or code (`**Bold.** Next`), or when it opens with a bare lowercase
+# word. A hand-placed break there is joined back, and `make md-reflow-explain`
+# does not report it (jbeda/mdreflow#2 is the link case).
+mode: sentence
+# Unbounded. A width turns on clause-level breaks inside a sentence, which puts
+# the hand-wrap churn back.
+max-width: 0
+dialect: gfm
+
+exclude:
+  # GitHub renders every newline in these as <br>. A release file is also its
+  # published Release body byte for byte; the README beside them is an ordinary
+  # page and is formatted.
+  - "docs/releases/v*.md"
+  - ".github/pull_request_template.md"

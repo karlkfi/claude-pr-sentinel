@@ -42,7 +42,7 @@ See [A watcher that is not ours does not answer the question](../DESIGN.md#a-wat
 ## Names drift, and nothing here goes red
 
 Upstream can rename or retire a skill without breaking any gate in this repo.
-Nothing reads the installed skill set, and `make check` runs shellcheck and the test suite only.
+Nothing reads the installed skill set, and no gate in `make check` looks at it.
 
 The failure is silent.
 A missing skill raises no error when something invokes it, so a session carries on without the rules it was told to follow, and the first symptom is a malformed file rather than a stack trace.

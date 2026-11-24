@@ -923,6 +923,7 @@ See [`PRIVACY.md`](PRIVACY.md) for the full policy.
 
 Bugs, ideas, and questions go in [GitHub Issues](https://github.com/karlkfi/claude-pr-sentinel/issues).
 For the development backlog, see [`docs/queue/`](docs/queue/README.md).
+Markdown here is one sentence per source line; run `make md-reflow` (needs Go) after editing any.
 
 ## License
 

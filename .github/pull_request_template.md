@@ -21,7 +21,7 @@ is updated.
 
 ## Checks
 
-- [ ] `make check` is green (shellcheck + `python3 -m unittest discover tests`)
+- [ ] `make check` is green
 - [ ] No PR/issue **comment or body** ingestion added — the injection channel this plugin excludes by design
 - [ ] No auto-merge, and no path that could learn to merge
 - [ ] New watcher event or env-var knob is documented in `README.md` (decision tables / Configuration)

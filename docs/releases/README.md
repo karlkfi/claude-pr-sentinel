@@ -16,6 +16,7 @@ In-repo makes each fix a diff and each published body reproducible from a commit
 - **No title heading.** The Releases page renders the tag as the page `<h1>`, so a leading `# v0.8.0` duplicates it one line down.
 - **No hard wrapping.** A release body is rendered with GitHub's *comment-flavour* GFM, where a single newline becomes `<br>`.
   Keep every paragraph, blockquote, and list continuation on one line.
+  `.mdreflow.yaml` excludes these files from the one-sentence-per-line gate for that reason.
 - **No in-page anchors.** Headings in a release body carry no `id`, so `[Upgrading](#upgrading)` is dead.
   Refer to a section by name in bold.
 - **Link the tag, not `main`.** A reader of v0.7.0's notes should land on v0.7.0's README: `.../blob/v0.7.0/README.md#section`.

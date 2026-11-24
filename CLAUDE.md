@@ -90,7 +90,7 @@ Tests live in `tests/` (stdlib `unittest`, no third-party deps).
 Run with:
 
 ```
-make check          # shellcheck + unittest
+make check          # shellcheck, unittest, backlog lint, md-reflow-check
 python3 -m unittest discover tests
 ```
 
@@ -131,6 +131,10 @@ Spell out acronyms on first use, e.g. "continuous integration (CI)".
 Human-facing docs (`README.md`, `docs/` outside `docs/development/`) must never link to `CLAUDE.md` / `AGENTS.md`.
 This file is the entrypoint for agents only; humans start at `README.md`.
 The dependency is one-way.
+
+Markdown is one sentence per source line, gated by `make md-reflow-check` (needs Go).
+Never place the breaks by hand: run `make md-reflow`, then `make backlog`, because a reflow moves lines that queue items cite.
+`.mdreflow.yaml` holds the exclusions and why two sentences sometimes stay on one line.
 
 To reference a globally-installed skill, link `docs/development/skills.md#<name>`, never the skill's source.
 
