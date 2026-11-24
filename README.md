@@ -4,21 +4,17 @@
 
 [![release](https://img.shields.io/github/v/release/karlkfi/claude-pr-sentinel)](https://github.com/karlkfi/claude-pr-sentinel/releases) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-pr-sentinel/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-pr-sentinel/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-pr-sentinel.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
 
-> Stop babysitting `gh pr checks --watch`. Let the PR wake you when it needs you.
+> Stop babysitting `gh pr checks --watch`.
+> Let the PR wake you when it needs you.
 
-You ask Claude to open a pull request (PR). Then the session sits in a
-`gh pr checks --watch` loop — burning tokens and wall-clock, blind to merge
-conflicts — until CI finishes. Or you reach for Claude Desktop's "Autofix
-pull requests," which wakes an agent on the PR comment stream
-([why that's a problem](#why-not-just-auto-fix-ci)).
+You ask Claude to open a pull request (PR).
+Then the session sits in a `gh pr checks --watch` loop — burning tokens and wall-clock, blind to merge conflicts — until CI finishes.
+Or you reach for Claude Desktop's "Autofix pull requests," which wakes an agent on the PR comment stream ([why that's a problem](#why-not-just-auto-fix-ci)).
 
-pr-sentinel replaces both. It's a **hook-nudged background watcher**: after you
-open or push a PR, a hook nudges the session to launch a tiny `bash` watcher as
-a background task. The watcher sleeps (zero idle tokens), polls GitHub for
-check results and mergeable state, and **exits the moment the session needs to
-act** — a background task's exit is the clean way to wake a session. It reads
-**only** GitHub-controlled check metadata and merge state; it never reads PR
-comments, issue comments, or the PR body.
+pr-sentinel replaces both.
+It's a **hook-nudged background watcher**: after you open or push a PR, a hook nudges the session to launch a tiny `bash` watcher as a background task.
+The watcher sleeps (zero idle tokens), polls GitHub for check results and mergeable state, and **exits the moment the session needs to act** — a background task's exit is the clean way to wake a session.
+It reads **only** GitHub-controlled check metadata and merge state; it never reads PR comments, issue comments, or the PR body.
 
 ## Contents
 
@@ -42,8 +38,7 @@ comments, issue comments, or the PR body.
 
 ## What it does
 
-**The PostToolUse hook** watches your Bash commands and injects an advisory
-nudge to (re)launch the watcher after a PR-opening or branch-push command:
+**The PostToolUse hook** watches your Bash commands and injects an advisory nudge to (re)launch the watcher after a PR-opening or branch-push command:
 
 | Command (PostToolUse) | Hook action |
 | --- | --- |
@@ -69,14 +64,11 @@ nudge to (re)launch the watcher after a PR-opening or branch-push command:
 | `gh pr view 12` · `gh pr list` · `git status` | silent (not a push/create) |
 | any command with `PR_SENTINEL_DISABLE=1` set | silent |
 
-The nudge is **advisory** — a hook can inject context but can't force the model
-to call a tool. It names the exact background-task command to run.
+The nudge is **advisory** — a hook can inject context but can't force the model to call a tool.
+It names the exact background-task command to run.
 
-**The PreToolUse hook** goes the other way: it **denies** a Bash command that
-would foreground-poll CI (the anti-pattern this plugin replaces) and points the
-fix-it at the background watcher, and it denies a `gh pr create` that would open
-a second pull request over lines an open one already changes. Unlike the
-advisory nudge, a deny is *enforced* — the command never runs.
+**The PreToolUse hook** goes the other way: it **denies** a Bash command that would foreground-poll CI (the anti-pattern this plugin replaces) and points the fix-it at the background watcher, and it denies a `gh pr create` that would open a second pull request over lines an open one already changes.
+Unlike the advisory nudge, a deny is *enforced* — the command never runs.
 
 | Command (PreToolUse) | Hook action |
 | --- | --- |
@@ -103,179 +95,100 @@ advisory nudge, a deny is *enforced* — the command never runs.
 | a poll loop around a non-`gh` subject (`until curl …; do sleep …; done`) | allow (not CI polling — not this plugin's business) |
 | a bare `sleep N` (no loop) · unrecognised shape | allow (fail-open — never deny when unsure) |
 
-The deny is a hard **deny**, not an `ask` — even in `bypassPermissions` mode —
-so a headless run self-corrects instead of stalling on an unanswerable prompt.
-Prefix the command with `PR_SENTINEL_OVERRIDE=<reason>` to allow one legitimate
-poll (see [Configuration](#configuration)).
+The deny is a hard **deny**, not an `ask` — even in `bypassPermissions` mode — so a headless run self-corrects instead of stalling on an unanswerable prompt.
+Prefix the command with `PR_SENTINEL_OVERRIDE=<reason>` to allow one legitimate poll (see [Configuration](#configuration)).
 
-It reaches only as far as the harm it names — blocking the session and burning
-idle tokens. A call submitted with `run_in_background` does neither, so it is
-never denied; **for a workflow run with no PR to watch** — a tag-triggered
-release build, say — backgrounding the command is the answer, and the deny
-message points there. A poll loop is denied only when it polls GitHub through
-`gh`, the plugin's only view of CI; a loop around `curl` against an unrelated
-host is somebody else's problem.
+It reaches only as far as the harm it names — blocking the session and burning idle tokens.
+A call submitted with `run_in_background` does neither, so it is never denied; **for a workflow run with no PR to watch** — a tag-triggered release build, say — backgrounding the command is the answer, and the deny message points there.
+A poll loop is denied only when it polls GitHub through `gh`, the plugin's only view of CI; a loop around `curl` against an unrelated host is somebody else's problem.
 
-The watcher-launch **allow** is an explicit decision, not a mere defer: it
-short-circuits the base Bash permission prompt for the first-party, read-only
-watcher launch you opted into by installing the plugin. The match is airtight —
-only a single simple `bash <this-plugin's-watch.sh> <PR-number>` (no operators,
-redirects, substitutions, or globs; the script path is compared by resolved
-realpath) is approved; anything else falls through to normal permissions. Set
-`PR_SENTINEL_AUTOALLOW=0` to keep the prompt (see [Configuration](#configuration)).
+The watcher-launch **allow** is an explicit decision, not a mere defer: it short-circuits the base Bash permission prompt for the first-party, read-only watcher launch you opted into by installing the plugin.
+The match is airtight — only a single simple `bash <this-plugin's-watch.sh> <PR-number>` (no operators, redirects, substitutions, or globs; the script path is compared by resolved realpath) is approved; anything else falls through to normal permissions.
+Set `PR_SENTINEL_AUTOALLOW=0` to keep the prompt (see [Configuration](#configuration)).
 
 That allow stops short of a **second** watcher on a PR one is already watching.
-Stacked watchers wake the session once each for the same event and poll GitHub
-once each, and they compound: every wake asks for a fix and a push, and each
-push used to ask for another watcher. A running watcher re-reads the PR's head
-commit on every poll, so it already covers whatever was just pushed — there is
-nothing a relaunch adds. The deny names the background task id, so restarting
-the watch (to reset its watch budget, say) is one `TaskStop` call and then the
-launch again, rather than a dead end. `PR_SENTINEL_OVERRIDE=<reason>` allows the
-duplicate for the rare case that wants one.
+Stacked watchers wake the session once each for the same event and poll GitHub once each, and they compound: every wake asks for a fix and a push, and each push used to ask for another watcher.
+A running watcher re-reads the PR's head commit on every poll, so it already covers whatever was just pushed — there is nothing a relaunch adds.
+The deny names the background task id, so restarting the watch (to reset its watch budget, say) is one `TaskStop` call and then the launch again, rather than a dead end.
+`PR_SENTINEL_OVERRIDE=<reason>` allows the duplicate for the rare case that wants one.
 
-An incumbent counts only once the harness has answered its launch with a
-background task id. The harness writes the in-flight Bash call to the session
-transcript *before* running this hook, so without that rule the guard could
-read a session's **first** launch as an incumbent and refuse it as a duplicate
-of itself — leaving the pull request with no watcher at all, and the entry
-poisoned for every later launch in that session. The hook also excludes the
-`tool_use` id of the call it is deciding, which closes the same case
-independently.
+An incumbent counts only once the harness has answered its launch with a background task id.
+The harness writes the in-flight Bash call to the session transcript *before* running this hook, so without that rule the guard could read a session's **first** launch as an incumbent and refuse it as a duplicate of itself — leaving the pull request with no watcher at all, and the entry poisoned for every later launch in that session.
+The hook also excludes the `tool_use` id of the call it is deciding, which closes the same case independently.
 
 ### Overlapping pull requests
 
-The last thing the PreToolUse hook does is check, at `gh pr create`, whether
-this branch collides with an already-open PR. Two branches rewriting
-one function is duplicated or mutually invalidating work, and review is an
-expensive place to discover it — one of the two is going to be rewritten or
-thrown away, and both have already been written by then.
+The last thing the PreToolUse hook does is check, at `gh pr create`, whether this branch collides with an already-open PR.
+Two branches rewriting one function is duplicated or mutually invalidating work, and review is an expensive place to discover it — one of the two is going to be rewritten or thrown away, and both have already been written by then.
 
-**It compares line ranges, not filenames.** Two branches touching one file is
-ordinary; sharing a *function* is the finding. Both sides are read from the
-diff's pre-image side, so two diffs taken from a shared ancestor are numbered in
-that ancestor and their ranges are comparable, and each range reaches the three
-lines of context a hunk carries. Edits within six lines meet; edits seven apart
-do not. The false-positive direction is the one that matters — an overlap
-reported where there is none sends you to fold a branch that was fine — so a
-shared path with no shared range is silent.
+**It compares line ranges, not filenames.** Two branches touching one file is ordinary; sharing a *function* is the finding.
+Both sides are read from the diff's pre-image side, so two diffs taken from a shared ancestor are numbered in that ancestor and their ranges are comparable, and each range reaches the three lines of context a hunk carries.
+Edits within six lines meet; edits seven apart do not.
+The false-positive direction is the one that matters — an overlap reported where there is none sends you to fold a branch that was fine — so a shared path with no shared range is silent.
 
-**A trial merge decides what the ranges suspect.** Six lines is a guess, and two
-branches adding separate blocks beside each other merge cleanly. So where the
-PR's head commit is in this clone, `git merge-tree` (git 2.38 or later) merges it
-with your branch, and the deny stands only on a path where that conflicts and
-merging your fork point does not, or where both sides made one identical edit.
-The fork-point comparison keeps a PR that is already stale from being charged to
-you, and the identical edit is there because git merges it clean although it is
-the duplicate this check exists for. A merge can only narrow a deny: a path the
-ranges did not suspect never becomes a finding from it.
+**A trial merge decides what the ranges suspect.** Six lines is a guess, and two branches adding separate blocks beside each other merge cleanly.
+So where the PR's head commit is in this clone, `git merge-tree` (git 2.38 or later) merges it with your branch, and the deny stands only on a path where that conflicts and merging your fork point does not, or where both sides made one identical edit.
+The fork-point comparison keeps a PR that is already stale from being charged to you, and the identical edit is there because git merges it clean although it is the duplicate this check exists for.
+A merge can only narrow a deny: a path the ranges did not suspect never becomes a finding from it.
 
-Clean means silent, so two branches that rewrite one function in hunks that do
-not touch are no longer caught here. That is the trade for not refusing work git
-would merge. Nothing is fetched for this. If the head is not in this clone, or
-git is too old, the ranges predict the merge instead: the create is denied only
-where the two sides' changed lines touch with no unchanged line between them,
-which is where git conflicts. Measured against `git merge-tree`: changes to lines
-38 and 39 conflict, 37 and 39 do not, and a row inserted after line 39 conflicts
-only with a change to line 39 or 40. The denial says it was not trial-merged and
-names the `git fetch origin pull/<N>/head` after which a re-run decides it. The
-open PR's lines are numbered from its own merge base, so a long-lived PR can
-drift and slip past this, which is a missed catch and not a refused create.
+Clean means silent, so two branches that rewrite one function in hunks that do not touch are no longer caught here.
+That is the trade for not refusing work git would merge.
+Nothing is fetched for this.
+If the head is not in this clone, or git is too old, the ranges predict the merge instead: the create is denied only where the two sides' changed lines touch with no unchanged line between them, which is where git conflicts.
+Measured against `git merge-tree`: changes to lines 38 and 39 conflict, 37 and 39 do not, and a row inserted after line 39 conflicts only with a change to line 39 or 40.
+The denial says it was not trial-merged and names the `git fetch origin pull/<N>/head` after which a re-run decides it.
+The open PR's lines are numbered from its own merge base, so a long-lived PR can drift and slip past this, which is a missed catch and not a refused create.
 
-**A renumbered citation is not an edit.** A doc that quotes `file.py:1063:…`
-goes stale whenever a branch moves that line, so two unrelated branches each
-rewrite the same citation to their own number. Git conflicts on it, but whoever
-merges second just re-points it; that is not duplicated work. A hunk whose
-removed and added lines differ only in the numbers after `file.ext:` is left
-out on both sides. Change the path or the quoted text and it counts again.
+**A renumbered citation is not an edit.** A doc that quotes `file.py:1063:…` goes stale whenever a branch moves that line, so two unrelated branches each rewrite the same citation to their own number.
+Git conflicts on it, but whoever merges second just re-points it; that is not duplicated work.
+A hunk whose removed and added lines differ only in the numbers after `file.ext:` is left out on both sides.
+Change the path or the quoted text and it counts again.
 
-**A stacked branch is read from its own base.** A branch built on another open
-PR carries that PR's hunks by construction, so numbering it from the default
-branch would collide it with its own parent on lines it never touched — every
-stacked create denied, on the one case that is not the duplicate-PR mistake.
-Two things settle it. A `--base` on your `gh pr create` naming the parent's
-branch is one. The other is the parent's head commit already being in your
-branch, which covers the stack opened against the default branch with a "merge
-after" note. Either way the branch is numbered from the parent, the parent is
-skipped as inherited work rather than duplicated, and every other open PR is
-still checked. A branch that carries the parent's *change* without its commit —
-the same work written again — is still compared, because that is the duplicate
-the check exists for. So is a branch cut before the parent's latest push, whose
-inherited hunks read as repeats of the parent's until you restack onto its
-current head. If a declared parent has since been
-rebased and you have not restacked onto it, the two sides are numbered in
-different pre-images and no comparison between them means anything, so the
-check declines outright rather than guess.
+**A stacked branch is read from its own base.** A branch built on another open PR carries that PR's hunks by construction, so numbering it from the default branch would collide it with its own parent on lines it never touched — every stacked create denied, on the one case that is not the duplicate-PR mistake.
+Two things settle it.
+A `--base` on your `gh pr create` naming the parent's branch is one.
+The other is the parent's head commit already being in your branch, which covers the stack opened against the default branch with a "merge after" note.
+Either way the branch is numbered from the parent, the parent is skipped as inherited work rather than duplicated, and every other open PR is still checked.
+A branch that carries the parent's *change* without its commit — the same work written again — is still compared, because that is the duplicate the check exists for.
+So is a branch cut before the parent's latest push, whose inherited hunks read as repeats of the parent's until you restack onto its current head.
+If a declared parent has since been rebased and you have not restacked onto it, the two sides are numbered in different pre-images and no comparison between them means anything, so the check declines outright rather than guess.
 
-**The branch checked is the one the create opens.** The hook runs before any of
-the command does, so in `git checkout topic && gh pr create` the checked-out
-branch is still the previous one. A `--head` on the create names the branch,
-and failing that, the last `git checkout <branch>` or `git switch <branch>`
-earlier in the same command does; otherwise it is the checked-out branch. A
-named head that is no branch here, locally or on `origin`, leaves nothing to
-compare and the check declines. A create that names `--repo` is compared
-against that repository's open PRs rather than the checkout's. A `cd` earlier
-in the same command moves the check to the checkout it lands in, so `cd
-../fork && gh pr create` is judged there; a `cd` whose target the command
-alone cannot name (`cd -`, `cd "$DIR"`) leaves the check declining.
+**The branch checked is the one the create opens.** The hook runs before any of the command does, so in `git checkout topic && gh pr create` the checked-out branch is still the previous one.
+A `--head` on the create names the branch, and failing that, the last `git checkout <branch>` or `git switch <branch>` earlier in the same command does; otherwise it is the checked-out branch.
+A named head that is no branch here, locally or on `origin`, leaves nothing to compare and the check declines.
+A create that names `--repo` is compared against that repository's open PRs rather than the checkout's.
+A `cd` earlier in the same command moves the check to the checkout it lands in, so `cd ../fork && gh pr create` is judged there; a `cd` whose target the command alone cannot name (`cd -`, `cd "$DIR"`) leaves the check declining.
 
-This is the one part of the hooks that **talks to GitHub**: `gh pr list` for the
-open PRs and their paths, then `gh pr diff` for at most three of them, and only
-ones already sharing a path — or listing 100, the most `gh` returns, past which
-a shared path shows only in the diff. It reads code, never prose — no PR body, no
-comments, and not even the PR title, which its author writes and which the
-denial would drop straight into the session's context. A denial names the PR
-number and the shared paths, and points at `gh pr diff <N>` so you read the
-overlap yourself. The trial merge reads nothing from GitHub, though it leaves
-unreferenced objects in your repository's store until `git gc` takes them.
+This is the one part of the hooks that **talks to GitHub**: `gh pr list` for the open PRs and their paths, then `gh pr diff` for at most three of them, and only ones already sharing a path — or listing 100, the most `gh` returns, past which a shared path shows only in the diff.
+It reads code, never prose — no PR body, no comments, and not even the PR title, which its author writes and which the denial would drop straight into the session's context.
+A denial names the PR number and the shared paths, and points at `gh pr diff <N>` so you read the overlap yourself.
+The trial merge reads nothing from GitHub, though it leaves unreferenced objects in your repository's store until `git gc` takes them.
 `PRIVACY.md` has the full account.
 
-Every probe fails silent. No `gh`, no credentials, a base ref that won't
-resolve, a rate-limited token, a slow call: each costs a missed catch, never a
-blocked create. A PR whose diff was not fetched — the fetch failed, or the
-three-diff cap was reached — rests on a shared path alone unless a trial merge
-decides it, and a shared path alone never denies: such an entry is listed in a
-denial another PR already justifies, marked as not counted, and is otherwise
-silent. The denial says which each entry rests on rather than passing a guess
-off as a finding.
+Every probe fails silent.
+No `gh`, no credentials, a base ref that won't resolve, a rate-limited token, a slow call: each costs a missed catch, never a blocked create.
+A PR whose diff was not fetched — the fetch failed, or the three-diff cap was reached — rests on a shared path alone unless a trial merge decides it, and a shared path alone never denies: such an entry is listed in a denial another PR already justifies, marked as not counted, and is otherwise silent.
+The denial says which each entry rests on rather than passing a guess off as a finding.
 
-A command the shell lexer cannot balance — an apostrophe in a heredoc PR body is
-enough — is never denied, because a denial on a parse that could not be made is
-the wrong direction. It is not silent either: where a line-by-line parse still
-finds a `gh pr create`, the check runs and the hook **reports** what it found,
-without a decision. A silent defer there read as a denial the session's
-`PR_SENTINEL_OVERRIDE` had stopped, and sessions spent one on a denial that could
-not have fired.
+A command the shell lexer cannot balance — an apostrophe in a heredoc PR body is enough — is never denied, because a denial on a parse that could not be made is the wrong direction.
+It is not silent either: where a line-by-line parse still finds a `gh pr create`, the check runs and the hook **reports** what it found, without a decision.
+A silent defer there read as a denial the session's `PR_SENTINEL_OVERRIDE` had stopped, and sessions spent one on a denial that could not have fired.
 
-Turn it off with `PR_SENTINEL_OVERLAP_ENABLED=false` — which also stops the two
-queries being made at all. For the file every branch edits by construction (a
-changelog, a backlog table), name it in `PR_SENTINEL_OVERLAP_IGNORE` instead of
-switching the whole check off — comma-separated globs, the same spelling
-branch-guard's `BRANCH_GUARD_OVERLAP_IGNORE` takes, so a list worked out for one
-copies to the other unchanged.
+Turn it off with `PR_SENTINEL_OVERLAP_ENABLED=false` — which also stops the two queries being made at all.
+For the file every branch edits by construction (a changelog, a backlog table), name it in `PR_SENTINEL_OVERLAP_IGNORE` instead of switching the whole check off — comma-separated globs, the same spelling branch-guard's `BRANCH_GUARD_OVERLAP_IGNORE` takes, so a list worked out for one copies to the other unchanged.
 
-**A PR that says it replaces another is not denied over it.** Folding three
-Dependabot PRs into one, or re-cutting a stale PR, overlaps the originals by
-construction. When the create's own `--title` or `--body` says `Replaces #N`,
-`Supersedes #N` or `Closes #N` (or `replacing`/`superseding`), PR #N is left out
-of the comparison, and every open PR it does not name is still checked. One
-clause can name several — `Replaces #12, #13 and #14` — and it ends at a full
-stop or semicolon, so `Closes #4. See #5` names only #4. `owner/repo#N` is
-another repository's and does not count. Only the command's own text is read: a
-`--body-file` is not opened, and nothing is read from GitHub for this. The
-statement lands in the PR body, where the reviewer reads it and closes #N on it,
-which is why it suffices where a hidden prefix should not. Bot-authored PRs get
-no other treatment: a session redoing an open Dependabot bump by accident is
-exactly the duplicate the check exists for.
+**A PR that says it replaces another is not denied over it.** Folding three Dependabot PRs into one, or re-cutting a stale PR, overlaps the originals by construction.
+When the create's own `--title` or `--body` says `Replaces #N`, `Supersedes #N` or `Closes #N` (or `replacing`/`superseding`), PR #N is left out of the comparison, and every open PR it does not name is still checked.
+One clause can name several — `Replaces #12, #13 and #14` — and it ends at a full stop or semicolon, so `Closes #4. See #5` names only #4.
+`owner/repo#N` is another repository's and does not count.
+Only the command's own text is read: a `--body-file` is not opened, and nothing is read from GitHub for this.
+The statement lands in the PR body, where the reviewer reads it and closes #N on it, which is why it suffices where a hidden prefix should not.
+Bot-authored PRs get no other treatment: a session redoing an open Dependabot bump by accident is exactly the duplicate the check exists for.
 
-`PR_SENTINEL_OVERRIDE=<reason>` allows one create whose overlap you already know
-about and that replaces nothing — a fix that an open PR will later be rebased
-over, say.
+`PR_SENTINEL_OVERRIDE=<reason>` allows one create whose overlap you already know about and that replaces nothing — a fix that an open PR will later be rebased over, say.
 
-**The Stop hook** is the backstop that makes the advisory nudge reliable. When
-the session tries to end its turn with an unwatched open PR, it **blocks the
-stop once per pull request** — and never twice inside one stop-chain — nudging
-the session to launch the watcher before stopping:
+**The Stop hook** is the backstop that makes the advisory nudge reliable.
+When the session tries to end its turn with an unwatched open PR, it **blocks the stop once per pull request** — and never twice inside one stop-chain — nudging the session to launch the watcher before stopping:
 
 | Session state at end of turn (Stop) | Hook action |
 | --- | --- |
@@ -294,88 +207,46 @@ the session to launch the watcher before stopping:
 | unreadable transcript / any uncertainty | silent (fail-open) |
 | `PR_SENTINEL_DISABLE=1` set | silent (disabled) |
 
-The two dampening rows are what stop a livelock when nothing is moving. The
-first covers a watcher that keeps reporting the same thing: every event it
-covers asks the session to change the PR and push, so a second report at the
-*same head commit* proves nothing was pushed in between. The failed checks are
-compared as a set — GitHub's ordering is not stable between polls, so two reports
-of one unchanged state can list the same checks in different orders. The second covers the
-case with no watcher report at all — the hook asked for a watcher, none was
-launched, and the turn is ending again. Either way the session gets one block to
-act; after that the hook allows the stop with a warning rather than re-blocking
-forever. It never *silently* walks away.
+The two dampening rows are what stop a livelock when nothing is moving.
+The first covers a watcher that keeps reporting the same thing: every event it covers asks the session to change the PR and push, so a second report at the *same head commit* proves nothing was pushed in between.
+The failed checks are compared as a set — GitHub's ordering is not stable between polls, so two reports of one unchanged state can list the same checks in different orders.
+The second covers the case with no watcher report at all — the hook asked for a watcher, none was launched, and the turn is ending again.
+Either way the session gets one block to act; after that the hook allows the stop with a warning rather than re-blocking forever.
+It never *silently* walks away.
 
-The second of those matters most where the merge signal is unavailable by
-design. A
-session working under a dispatch protocol never merges its own PR — another
-session does — so `gh pr merge` cannot appear in its transcript, leaving the
-watcher's terminal report as its only route to a quiet turn end. When the
-watcher never arms, that route is gone too, and without dampening the hook would
-block every turn end for the rest of the session. The *first* block still fires
-there, because launching the watcher is still the right ask: on a PR that has
-already merged it answers `closed` on the first poll.
+The second of those matters most where the merge signal is unavailable by design.
+A session working under a dispatch protocol never merges its own PR — another session does — so `gh pr merge` cannot appear in its transcript, leaving the watcher's terminal report as its only route to a quiet turn end.
+When the watcher never arms, that route is gone too, and without dampening the hook would block every turn end for the rest of the session.
+The *first* block still fires there, because launching the watcher is still the right ask: on a PR that has already merged it answers `closed` on the first poll.
 
 The shapes that reach it differ, and the notice says which one it is:
 
-- **`check_failure`** — a check this session *cannot* fix: inherited from the
-  base branch, out-of-scope, external, or misconfigured.
-- **`conflict` / `behind` / `dequeued`** — usually the opposite. The session has
-  already healed the branch and committed it, and is waiting on the project's
-  local gate before pushing, so the remote head *cannot* have moved yet. A
-  relaunch here has no move available at all.
-- **`base_failure` then `timeout`** — the failure is inherited from the base
-  branch and stayed red there for the whole watch budget, twice. Nothing here is
-  the session's to fix; a relaunch would wait out another identical budget.
-- **no watcher launched since the ask** — either the PR is still open and yours
-  and the watcher is the move, or another session has already concluded it and
-  there is nothing to do.
+- **`check_failure`** — a check this session *cannot* fix: inherited from the base branch, out-of-scope, external, or misconfigured.
+- **`conflict` / `behind` / `dequeued`** — usually the opposite.
+  The session has already healed the branch and committed it, and is waiting on the project's local gate before pushing, so the remote head *cannot* have moved yet.
+  A relaunch here has no move available at all.
+- **`base_failure` then `timeout`** — the failure is inherited from the base branch and stayed red there for the whole watch budget, twice.
+  Nothing here is the session's to fix; a relaunch would wait out another identical budget.
+- **no watcher launched since the ask** — either the PR is still open and yours and the watcher is the move, or another session has already concluded it and there is nothing to do.
 
-Everything it decides comes from local files — the session's own transcript,
-each watcher's own output file (its path is in the completion notification), the
-file a `gh pr create` redirected its output to, and the file a watcher launch
-redirected the *watcher's* output to (both paths come from the command's own
-string). It identifies the session's own PRs from the transcript — the
-session's `gh pr create` correlated with the PR URL that
-command printed, plus any PR the session launched a watcher for. When that URL
-never reached the transcript — the create sent its output to a log, or it was
-truncated — one more route resolves the number, so the backstop does not go
-quiet for the same reason the nudge did: the harness's own `pr-link` record,
-but only one emitted inside that create's own tool call *and* naming a PR the
-transcript has not mentioned before. (Both conditions carry weight. The harness
-emits a `pr-link` for *any* PR URL the session surfaces, and re-emits an
-already-linked one after unrelated commands, so a bare record would read a `gh
-pr view` on someone else's PR as "opened this session".)
+Everything it decides comes from local files — the session's own transcript, each watcher's own output file (its path is in the completion notification), the file a `gh pr create` redirected its output to, and the file a watcher launch redirected the *watcher's* output to (both paths come from the command's own string).
+It identifies the session's own PRs from the transcript — the session's `gh pr create` correlated with the PR URL that command printed, plus any PR the session launched a watcher for.
+When that URL never reached the transcript — the create sent its output to a log, or it was truncated — one more route resolves the number, so the backstop does not go quiet for the same reason the nudge did: the harness's own `pr-link` record, but only one emitted inside that create's own tool call *and* naming a PR the transcript has not mentioned before.
+(Both conditions carry weight.
+The harness emits a `pr-link` for *any* PR URL the session surfaces, and re-emits an already-linked one after unrelated commands, so a bare record would read a `gh pr view` on someone else's PR as "opened this session".)
 
-Failing that, it reads the file the create redirected its own output to —
-`gh pr create … > out.log` printed the URL, just not where the transcript could
-see it. The path comes from the create's own command string, the read is
-byte-capped, and a file older than the create is ignored, since log paths get
-reused and a failed create must not inherit the previous run's URL. It is the
-last route that resolves a PR in a *different* repository from the one the
-session is sitting in, and every route keeps the **whole URL** where it has one
-— the create's output, the `pr-link`, the redirected file, and the argument an
-earlier watcher was launched with. The relaunch command then names that URL
-rather than a bare number, which is what sends the watcher to the right repo; a
-bare number is what a launch falls back to when no route resolved one. It
-treats a watcher as live when its background-task launch has no completion
-notification yet and was not stopped with `TaskStop`, and reads the watcher's output file directly to see whether the
-PR was handed off — so that signal holds whether the session surfaced the output
-with the `Read` tool or a Bash `cat`/`tail`. A launch that redirected the
-watcher's output away from that file — `… pr-sentinel-watch.sh 42 > w42.log
-2>&1`, so a backgrounded call can carry its exit status out — leaves it holding
-only the echoed code, so the report is read from the redirect target instead.
-Truncating redirects only: `>>` keeps the first run's header at the top of the
-file for ever. The path may be a literal, or a variable the same command
-assigned a literal to (`S=/tmp/…` then `… > "$S/w.log"` — the shape a long
-scratchpad path invites); anything else, an inherited environment variable or a
-command substitution, the hook cannot resolve, and it declines rather than
-guess. Throughout: **no network call, no process table, and never the PR body
-or comments** (see
-[Security invariants](#security-invariants)). It respects `stop_hook_active` so it
-blocks once and then lets the stop proceed.
+Failing that, it reads the file the create redirected its own output to — `gh pr create … > out.log` printed the URL, just not where the transcript could see it.
+The path comes from the create's own command string, the read is byte-capped, and a file older than the create is ignored, since log paths get reused and a failed create must not inherit the previous run's URL.
+It is the last route that resolves a PR in a *different* repository from the one the session is sitting in, and every route keeps the **whole URL** where it has one — the create's output, the `pr-link`, the redirected file, and the argument an earlier watcher was launched with.
+The relaunch command then names that URL rather than a bare number, which is what sends the watcher to the right repo; a bare number is what a launch falls back to when no route resolved one.
+It treats a watcher as live when its background-task launch has no completion notification yet and was not stopped with `TaskStop`, and reads the watcher's output file directly to see whether the PR was handed off — so that signal holds whether the session surfaced the output with the `Read` tool or a Bash `cat`/`tail`.
+A launch that redirected the watcher's output away from that file — `… pr-sentinel-watch.sh 42 > w42.log 2>&1`, so a backgrounded call can carry its exit status out — leaves it holding only the echoed code, so the report is read from the redirect target instead.
+Truncating redirects only: `>>` keeps the first run's header at the top of the file for ever.
+The path may be a literal, or a variable the same command assigned a literal to (`S=/tmp/…` then `… > "$S/w.log"` — the shape a long scratchpad path invites); anything else, an inherited environment variable or a command substitution, the hook cannot resolve, and it declines rather than guess.
+Throughout: **no network call, no process table, and never the PR body or comments** (see [Security invariants](#security-invariants)).
+It respects `stop_hook_active` so it blocks once and then lets the stop proceed.
 
-**The watcher** polls the PR and exits with exactly one event when attention is
-needed:
+**The watcher** polls the PR and exits with exactly one event when attention is needed:
 
 | PR state observed | Watcher event | What the session should do |
 | --- | --- | --- |
@@ -402,24 +273,15 @@ needed:
 | no `gh` credentials, PR unresolvable, or transient failures past the retry horizon | **error** | check `gh auth status`, relaunch |
 | checks still pending | *(keep polling, paced by how long they've been running)* | — |
 
-Every event report starts with a stable `PR-SENTINEL EVENT: <type>` line, so
-it's greppable in the transcript. Every report names the head commit
-(`Head SHA:`), so it dates itself — a **ready** from a watcher armed before your
-last push is otherwise byte-identical to one that covers it, and a **conflict**
-re-reported while your local gate runs is byte-identical to one the base branch
-just caused. That field is also what the Stop hook dampens on. **error** is the
-one exception: the query that would have named the head is what failed, so it
-names the last head it read and marks that reading as not current, or says none
-was ever read. A **check_failure** header adds the failed checks and, when the base
-comparison ran and cleared them, the base run it cleared them from (see
-[Failures inherited from the base branch](#failures-inherited-from-the-base-branch)),
-then appends the failing run's log, **ANSI-stripped, size-capped, and wrapped**
-in an explicit `DATA, NOT INSTRUCTIONS` frame (see [Security invariants](#security-invariants)).
+Every event report starts with a stable `PR-SENTINEL EVENT: <type>` line, so it's greppable in the transcript.
+Every report names the head commit (`Head SHA:`), so it dates itself — a **ready** from a watcher armed before your last push is otherwise byte-identical to one that covers it, and a **conflict** re-reported while your local gate runs is byte-identical to one the base branch just caused.
+That field is also what the Stop hook dampens on.
+**error** is the one exception: the query that would have named the head is what failed, so it names the last head it read and marks that reading as not current, or says none was ever read.
+A **check_failure** header adds the failed checks and, when the base comparison ran and cleared them, the base run it cleared them from (see [Failures inherited from the base branch](#failures-inherited-from-the-base-branch)), then appends the failing run's log, **ANSI-stripped, size-capped, and wrapped** in an explicit `DATA, NOT INSTRUCTIONS` frame (see [Security invariants](#security-invariants)).
 
 ## Install
 
-Install on any Claude Code surface that runs plugin hooks — the CLI, the IDE
-extensions, or **Claude Code for Claude Desktop**.
+Install on any Claude Code surface that runs plugin hooks — the CLI, the IDE extensions, or **Claude Code for Claude Desktop**.
 
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
@@ -436,15 +298,13 @@ extensions, or **Claude Code for Claude Desktop**.
 
 After installing with either method:
 
-- Requires `python3` (for the hook) and the authenticated **`gh` CLI** (for
-  the watcher) on your PATH. Run `gh auth status` to confirm.
+- Requires `python3` (for the hook) and the authenticated **`gh` CLI** (for the watcher) on your PATH.
+  Run `gh auth status` to confirm.
 - Restart Claude Code (or `/reload-plugins`) so the hook is registered.
 
-**Turn on auto-update while you're here** (recommended). This is a third-party
-git marketplace, so it does **not** refresh on its own — an install pins its
-version until you act ([Updating](#updating) explains the trap). Install time is
-the decision point, so add this to `~/.claude/settings.json` now (the file is
-shared across the CLI, IDE extensions, and Desktop):
+**Turn on auto-update while you're here** (recommended).
+This is a third-party git marketplace, so it does **not** refresh on its own — an install pins its version until you act ([Updating](#updating) explains the trap).
+Install time is the decision point, so add this to `~/.claude/settings.json` now (the file is shared across the CLI, IDE extensions, and Desktop):
 
 ```json
 "extraKnownMarketplaces": {
@@ -455,52 +315,36 @@ shared across the CLI, IDE extensions, and Desktop):
 }
 ```
 
-To verify, ask Claude to open a PR (or push a PR branch); after the command you
-should see an injected pr-sentinel nudge describing the watcher command to run.
+To verify, ask Claude to open a PR (or push a PR branch); after the command you should see an injected pr-sentinel nudge describing the watcher command to run.
 
 ## Updating
 
-Claude Code auto-updates the **official Anthropic marketplaces only**.
-pr-sentinel installs from a **third-party git marketplace**, which never
-refreshes unless you act — so your install stays pinned to the version you first
-got, and behaviour fixes shipped here reach you only after you update. Pick one
-of the two remedies:
+Claude Code auto-updates the **official Anthropic marketplaces only**. pr-sentinel installs from a **third-party git marketplace**, which never refreshes unless you act — so your install stays pinned to the version you first got, and behaviour fixes shipped here reach you only after you update.
+Pick one of the two remedies:
 
-- **Recommended — set-and-forget auto-update.** Add the `autoUpdate` snippet
-  from [Install](#install) to `~/.claude/settings.json`. Once it's there, Claude
-  Code keeps the marketplace current on its own, on every surface (the file is
-  shared, Desktop included).
+- **Recommended — set-and-forget auto-update.** Add the `autoUpdate` snippet from [Install](#install) to `~/.claude/settings.json`.
+  Once it's there, Claude Code keeps the marketplace current on its own, on every surface (the file is shared, Desktop included).
 - **Manual, when you want it.**
-  - **Claude Code (CLI or IDE extension):** `/plugin marketplace update pr-sentinel`
-    then `/reload-plugins`.
-  - **Claude Desktop** — `/plugin` isn't available there. Use the CLI, which runs
-    headlessly and shares Desktop's plugin state: `claude plugin marketplace update`
-    then `claude plugin update pr-sentinel@pr-sentinel`, and restart the app to
-    apply.
+  - **Claude Code (CLI or IDE extension):** `/plugin marketplace update pr-sentinel` then `/reload-plugins`.
+  - **Claude Desktop** — `/plugin` isn't available there.
+    Use the CLI, which runs headlessly and shares Desktop's plugin state: `claude plugin marketplace update` then `claude plugin update pr-sentinel@pr-sentinel`, and restart the app to apply.
 
 ## Migrating from Desktop auto-fix
 
-Installing pr-sentinel does **not** turn off Claude Desktop's "Auto-fix CI &
-address comments" toggle on your existing sessions. That toggle wakes a
-credentialed local agent on the PR **comment stream** — the injection channel
-this plugin exists to avoid ([Why not just auto-fix CI?](#why-not-just-auto-fix-ci))
-— so every pre-existing session stays armed on it. On a public repo, anyone who
-can comment on an old or merged PR has an injection path into a local agent that
-holds `git push` and your tokens. Merged-PR sessions are the worst case: no
-reason to stay armed, maximal exposure.
+Installing pr-sentinel does **not** turn off Claude Desktop's "Auto-fix CI & address comments" toggle on your existing sessions.
+That toggle wakes a credentialed local agent on the PR **comment stream** — the injection channel this plugin exists to avoid ([Why not just auto-fix CI?](#why-not-just-auto-fix-ci)) — so every pre-existing session stays armed on it.
+On a public repo, anyone who can comment on an old or merged PR has an injection path into a local agent that holds `git push` and your tokens.
+Merged-PR sessions are the worst case: no reason to stay armed, maximal exposure.
 
-The bundled **migration helper** disarms them in one pass. It's a slash command
-that guides you and a script that does the edit:
+The bundled **migration helper** disarms them in one pass.
+It's a slash command that guides you and a script that does the edit:
 
 ```
 /pr-sentinel-migrate-autofix
 ```
 
-The command runs a **read-only dry run** and reports how many sessions have
-auto-fix enabled, grouped by PR state and repository. To apply, you run the
-script yourself from a separate terminal **after quitting the desktop app** (the
-running app rewrites these files and would silently clobber a live edit; a
-command inside the app can't quit it):
+The command runs a **read-only dry run** and reports how many sessions have auto-fix enabled, grouped by PR state and repository.
+To apply, you run the script yourself from a separate terminal **after quitting the desktop app** (the running app rewrites these files and would silently clobber a live edit; a command inside the app can't quit it):
 
 ```
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pr-sentinel-migrate-autofix.py"          # dry run
@@ -509,102 +353,58 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pr-sentinel-migrate-autofix.py" --apply  
 
 It is safe by construction:
 
-- **Dry-run by default**; `--apply` is required to change anything, and it backs
-  up every edited file first (under `.autofix-backup-<timestamp>/`).
+- **Dry-run by default**; `--apply` is required to change anything, and it backs up every edited file first (under `.autofix-backup-<timestamp>/`).
 - **Refuses to run while the app is up** — it detects the running app and stops.
-- **MERGED-PR sessions only by default.** OPEN / in-progress sessions are left
-  alone unless you pass `--all` (an explicit opt-in that also disarms OPEN PRs).
-- **Schema-verified.** It only touches files that carry the expected
-  `autoFixEnabled` boolean; if the desktop format has changed it no-ops with a
-  clear message rather than risk corrupting anything.
+- **MERGED-PR sessions only by default.** OPEN / in-progress sessions are left alone unless you pass `--all` (an explicit opt-in that also disarms OPEN PRs).
+- **Schema-verified.** It only touches files that carry the expected `autoFixEnabled` boolean; if the desktop format has changed it no-ops with a clear message rather than risk corrupting anything.
 
-Relaunch the app afterward and spot-check a couple of the listed sessions — the
-toggle should be off, and pr-sentinel handles wake-on-CI going forward with no
-comment-channel exposure.
+Relaunch the app afterward and spot-check a couple of the listed sessions — the toggle should be off, and pr-sentinel handles wake-on-CI going forward with no comment-channel exposure.
 
 ## How it works
 
-1. **Hook nudge.** A `PostToolUse` hook on `Bash`
-   ([`scripts/pr-sentinel.py`](scripts/pr-sentinel.py), dispatching to
-   [`pr_sentinel_hook.py`](scripts/pr_sentinel_hook.py)) parses the
-   just-run command. On a `gh pr create` that printed a PR URL, or a branch
-   `git push` that didn't obviously fail, it emits `additionalContext` telling
-   the session to launch the watcher as a background task. It is **purely
-   local** — it never makes a network call and never reads PR text (it only
-   echoes back a PR URL the command itself printed).
-2. **Background watch.** The session runs
-   [`scripts/pr-sentinel-watch.sh <PR>`](scripts/pr-sentinel-watch.sh) as a
-   background task (`run_in_background`). The watcher polls `gh` for check
-   buckets, `mergeStateStatus`, and merge-queue membership, sleeping between
-   polls (no token cost while idle). While checks are running the interval
-   tracks how long they have been running; once they settle it backs off. See
-   [How often it polls](#how-often-it-polls).
-3. **Wake on exit.** When an attention-worthy condition is met, the watcher
-   prints its one-event report and exits. The harness delivers that report to
-   the session as the wake payload.
-4. **Fix and relaunch.** The session fixes the CI failure or heals the conflict
-   **in the visible local session**, pushes, and relaunches the watcher. Merge
-   conflicts are healed by **rebasing onto the base** by default (clean linear
-   history, force-push with lease); set `PR_SENTINEL_HEAL=merge` to merge the
-   base *in* instead (fast-forward push, no force). See
-   [Configuration](#configuration) for when to use each.
+1. **Hook nudge.** A `PostToolUse` hook on `Bash` ([`scripts/pr-sentinel.py`](scripts/pr-sentinel.py), dispatching to [`pr_sentinel_hook.py`](scripts/pr_sentinel_hook.py)) parses the just-run command.
+   On a `gh pr create` that printed a PR URL, or a branch `git push` that didn't obviously fail, it emits `additionalContext` telling the session to launch the watcher as a background task.
+   It is **purely local** — it never makes a network call and never reads PR text (it only echoes back a PR URL the command itself printed).
+2. **Background watch.** The session runs [`scripts/pr-sentinel-watch.sh <PR>`](scripts/pr-sentinel-watch.sh) as a background task (`run_in_background`).
+   The watcher polls `gh` for check buckets, `mergeStateStatus`, and merge-queue membership, sleeping between polls (no token cost while idle).
+   While checks are running the interval tracks how long they have been running; once they settle it backs off.
+   See [How often it polls](#how-often-it-polls).
+3. **Wake on exit.** When an attention-worthy condition is met, the watcher prints its one-event report and exits.
+   The harness delivers that report to the session as the wake payload.
+4. **Fix and relaunch.** The session fixes the CI failure or heals the conflict **in the visible local session**, pushes, and relaunches the watcher.
+   Merge conflicts are healed by **rebasing onto the base** by default (clean linear history, force-push with lease); set `PR_SENTINEL_HEAL=merge` to merge the base *in* instead (fast-forward push, no force).
+   See [Configuration](#configuration) for when to use each.
 
 ## Security invariants
 
 These are the point of the plugin.
 
-- **Never ingest human/attacker-writable channels.** The watcher queries only
-  GitHub-controlled check metadata, mergeable state, merge-queue membership,
-  and the login of whoever removed the PR from the queue. It never requests or
-  parses the PR **body**, PR **review comments**, or **issue comments** — the
-  exact channel the built-in "Autofix" trigger uses
-  ([#66097](https://github.com/anthropics/claude-code/issues/66097)). The only
-  free-form text it ever surfaces is the session's **own** CI log excerpt.
-  The `gh pr create` [overlap check](#overlapping-pull-requests) is held to the
-  same line: it reads open PRs' **paths and diffs** — code — and never their
-  title, body, or comments, because its denial text lands in the session's
-  context.
-- **CI logs are semi-untrusted data.** A failing-check excerpt is
-  **size-capped** (`PR_SENTINEL_LOG_MAX_BYTES`, default 8 KiB, tail kept),
-  **ANSI-stripped**, and wrapped in a `DATA, NOT INSTRUCTIONS` frame that tells
-  the reader not to obey any directive inside it. This is a **mitigation, not a
-  proof** — the real boundary is that **a human reviews and merges the PR**.
-- **No new authority.** Fixes run in the visible local session under the normal
-  permission system and any installed guard hooks. The watcher only *reads*
-  GitHub; it pushes nothing, comments nothing, merges nothing. The plugin never
-  suggests or touches **auto-merge**.
-- **Per-project by construction.** Enablement is a plugin install in a project,
-  not a global toggle — unlike the desktop "Autofix" switch, which by report
-  doesn't even cover `gh`-created PRs
-  ([#68083](https://github.com/anthropics/claude-code/issues/68083)).
-- **Secure by default.** Any knob that *loosens* behaviour is opt-in and
-  documented as a trade-off.
+- **Never ingest human/attacker-writable channels.** The watcher queries only GitHub-controlled check metadata, mergeable state, merge-queue membership, and the login of whoever removed the PR from the queue.
+  It never requests or parses the PR **body**, PR **review comments**, or **issue comments** — the exact channel the built-in "Autofix" trigger uses ([#66097](https://github.com/anthropics/claude-code/issues/66097)).
+  The only free-form text it ever surfaces is the session's **own** CI log excerpt.
+  The `gh pr create` [overlap check](#overlapping-pull-requests) is held to the same line: it reads open PRs' **paths and diffs** — code — and never their title, body, or comments, because its denial text lands in the session's context.
+- **CI logs are semi-untrusted data.** A failing-check excerpt is **size-capped** (`PR_SENTINEL_LOG_MAX_BYTES`, default 8 KiB, tail kept), **ANSI-stripped**, and wrapped in a `DATA, NOT INSTRUCTIONS` frame that tells the reader not to obey any directive inside it.
+  This is a **mitigation, not a proof** — the real boundary is that **a human reviews and merges the PR**.
+- **No new authority.** Fixes run in the visible local session under the normal permission system and any installed guard hooks.
+  The watcher only *reads* GitHub; it pushes nothing, comments nothing, merges nothing.
+  The plugin never suggests or touches **auto-merge**.
+- **Per-project by construction.** Enablement is a plugin install in a project, not a global toggle — unlike the desktop "Autofix" switch, which by report doesn't even cover `gh`-created PRs ([#68083](https://github.com/anthropics/claude-code/issues/68083)).
+- **Secure by default.** Any knob that *loosens* behaviour is opt-in and documented as a trade-off.
 
 ## Why not just auto-fix CI?
 
-pr-sentinel *does* fix CI — it wakes your session to do it. What it deliberately
-does **not** do is fix CI the way Claude Desktop's "Autofix pull requests" does.
+pr-sentinel *does* fix CI — it wakes your session to do it.
+What it deliberately does **not** do is fix CI the way Claude Desktop's "Autofix pull requests" does.
 Three differences, and they are the whole point:
 
-- **Trigger: check metadata, not comments.** Autofix wakes on the PR
-  review-comment stream — an indirect prompt-injection channel, since anyone who
-  can comment can plant text the agent then treats as instructions
-  ([#66097](https://github.com/anthropics/claude-code/issues/66097)).
-  pr-sentinel triggers on your own `gh pr create` / `git push` and reads only
-  GitHub-controlled check results and merge state — never comments or the PR
-  body.
-- **Fixes run in the visible local session, not a hidden agent.** Every fix
-  executes in the session you're watching, under the normal permission system
-  and any installed guard hooks. The plugin grants no authority you didn't
-  already give the session.
-- **It never merges.** A green PR is handed back to you for review. The human
-  merge gate stays the trust boundary — there is no auto-merge, by design, and
-  the CI log excerpt that drives a fix is treated as untrusted data, not
-  instructions.
+- **Trigger: check metadata, not comments.** Autofix wakes on the PR review-comment stream — an indirect prompt-injection channel, since anyone who can comment can plant text the agent then treats as instructions ([#66097](https://github.com/anthropics/claude-code/issues/66097)). pr-sentinel triggers on your own `gh pr create` / `git push` and reads only GitHub-controlled check results and merge state — never comments or the PR body.
+- **Fixes run in the visible local session, not a hidden agent.** Every fix executes in the session you're watching, under the normal permission system and any installed guard hooks.
+  The plugin grants no authority you didn't already give the session.
+- **It never merges.** A green PR is handed back to you for review.
+  The human merge gate stays the trust boundary — there is no auto-merge, by design, and the CI log excerpt that drives a fix is treated as untrusted data, not instructions.
 
-If you want a fully hands-off "fix it and merge it" loop, this isn't that — that
-is the trade pr-sentinel refuses to make. See [`docs/DESIGN.md`](docs/DESIGN.md)
-for the full rationale.
+If you want a fully hands-off "fix it and merge it" loop, this isn't that — that is the trade pr-sentinel refuses to make.
+See [`docs/DESIGN.md`](docs/DESIGN.md) for the full rationale.
 
 ## Configuration
 
@@ -640,202 +440,125 @@ All watcher knobs are environment variables read at launch; defaults are safe.
 | `PR_SENTINEL_OVERRIDE` | (unset) | a non-empty `<reason>`, inline on the command or in the session env, allows one otherwise-denied foreground poll (see the [PreToolUse table](#what-it-does)) |
 | `PR_SENTINEL_DEBUG` | (unset) | `1` re-raises hook errors instead of failing open |
 
-`PR_SENTINEL_OVERRIDE` mirrors prod-guard's `PROD_GUARD_OVERRIDE`: it's the
-documented escape hatch for the foreground-poll deny. Set it to a short reason
-for a single legitimate poll; an empty value does **not** downgrade the deny.
+`PR_SENTINEL_OVERRIDE` mirrors prod-guard's `PROD_GUARD_OVERRIDE`: it's the documented escape hatch for the foreground-poll deny.
+Set it to a short reason for a single legitimate poll; an empty value does **not** downgrade the deny.
 It is read from two places:
 
-- **inline on the command** —
-  `PR_SENTINEL_OVERRIDE="watcher can't reach this run" gh run watch 123`. The
-  prefix may sit on any link of a chain (`mkdir -p out &&
-  PR_SENTINEL_OVERRIDE=… gh run watch 123 > out/log`), and redirects, pipes,
-  and other env assignments around it don't hide it. Only a real leading
-  assignment counts — the name inside an argument (`echo
-  PR_SENTINEL_OVERRIDE=x && gh run watch 123`) does not.
-- **in the session environment** — a `settings.json` `env` entry or your shell
-  profile, for a whole session rather than one command.
+- **inline on the command** — `PR_SENTINEL_OVERRIDE="watcher can't reach this run" gh run watch 123`.
+  The prefix may sit on any link of a chain (`mkdir -p out && PR_SENTINEL_OVERRIDE=… gh run watch 123 > out/log`), and redirects, pipes, and other env assignments around it don't hide it.
+  Only a real leading assignment counts — the name inside an argument (`echo PR_SENTINEL_OVERRIDE=x && gh run watch 123`) does not.
+- **in the session environment** — a `settings.json` `env` entry or your shell profile, for a whole session rather than one command.
 
-The inline form is the one the deny message names, because it's the only one a
-session can reach from inside a Bash call: a hook reads the environment
-Claude Code launched it with, which an `export` in some earlier Bash call never
-touched.
+The inline form is the one the deny message names, because it's the only one a session can reach from inside a Bash call: a hook reads the environment Claude Code launched it with, which an `export` in some earlier Bash call never touched.
 
-Reach for it rarely. The deny already passes anything submitted with
-`run_in_background`, so "I need to wait on a run the watcher can't reach" is
-answered by backgrounding the command — no override, no session-wide env entry.
+Reach for it rarely.
+The deny already passes anything submitted with `run_in_background`, so "I need to wait on a run the watcher can't reach" is answered by backgrounding the command — no override, no session-wide env entry.
 
-`PR_SENTINEL_AUTOALLOW` is **on by default** and removes the base Bash approval
-prompt for the one first-party, read-only command the plugin asks you to run —
-`bash …/pr-sentinel-watch.sh <PR>` — on every (re)launch. Only that exact shape
-is approved (single simple command, the script matched by resolved realpath, and
-a bare PR number or a `https://github.com/<owner>/<repo>/pull/<n>` URL — the two
-forms the watcher accepts); anything else defers to normal permissions.
+`PR_SENTINEL_AUTOALLOW` is **on by default** and removes the base Bash approval prompt for the one first-party, read-only command the plugin asks you to run — `bash …/pr-sentinel-watch.sh <PR>` — on every (re)launch.
+Only that exact shape is approved (single simple command, the script matched by resolved realpath, and a bare PR number or a `https://github.com/<owner>/<repo>/pull/<n>` URL — the two forms the watcher accepts); anything else defers to normal permissions.
 
-The launch may carry leading `PR_SENTINEL_*=…` assignments, which is how a
-single machine gives one session `PR_SENTINEL_WATCH_UNTIL=closed` while another
-keeps the default — no settings file can, since `settings.json` is per-machine
-and a project `.claude/settings.json` is per-repo. Only this plugin's own
-namespace is allowed past, and every name in it is a tuning knob the watcher
-reads. Any other assignment falls through to the base Bash prompt, because a
-leading `BASH_ENV=…` would run arbitrary code before the script body and leave
-the realpath match above intact but meaningless.
+The launch may carry leading `PR_SENTINEL_*=…` assignments, which is how a single machine gives one session `PR_SENTINEL_WATCH_UNTIL=closed` while another keeps the default — no settings file can, since `settings.json` is per-machine and a project `.claude/settings.json` is per-repo.
+Only this plugin's own namespace is allowed past, and every name in it is a tuning knob the watcher reads.
+Any other assignment falls through to the base Bash prompt, because a leading `BASH_ENV=…` would run arbitrary code before the script body and leave the realpath match above intact but meaningless.
 
-Set it to `0` to keep the prompt if you'd rather see each launch. Disabling it does **not** widen
-what the plugin reads or does — it only reinstates the prompt. Users who disable
-it but still want no prompt can instead add a Bash allowlist entry
-`Bash(bash */.claude/plugins/cache/pr-sentinel/pr-sentinel/*/scripts/pr-sentinel-watch.sh:*)`
-— mid-path and trailing globs are supported and shell-operator-aware, so it
-won't allow chained commands.
+Set it to `0` to keep the prompt if you'd rather see each launch.
+Disabling it does **not** widen what the plugin reads or does — it only reinstates the prompt.
+Users who disable it but still want no prompt can instead add a Bash allowlist entry `Bash(bash */.claude/plugins/cache/pr-sentinel/pr-sentinel/*/scripts/pr-sentinel-watch.sh:*)` — mid-path and trailing globs are supported and shell-operator-aware, so it won't allow chained commands.
 
-`PR_SENTINEL_HEAL` picks how the `conflict` and `behind` reports tell the
-session to heal a diverged branch. The watcher itself never runs git — this
-only changes the recommended commands in the wake report.
+`PR_SENTINEL_HEAL` picks how the `conflict` and `behind` reports tell the session to heal a diverged branch.
+The watcher itself never runs git — this only changes the recommended commands in the wake report.
 
-- **`rebase` (default)** — rebase the branch onto the base and
-  `git push --force-with-lease`. Best for **single-owner branches**, which is
-  the norm for AI agents (a separate branch and worktree per task). Gives clean
-  linear history and deliberate, per-commit conflict resolution. Cost: rewrites
-  commit SHAs, so the push must be a force-push (with lease). On a
-  [stacked PR](#a-stacked-pull-request-needs-the---onto-form) the plain rebase is
-  wrong, and the report says so.
-- **`merge`** — merge the base *into* the branch and push (no force). Best for
-  **shared/collaborative or already-reviewed PRs**: the push is a
-  non-destructive fast-forward, and it preserves CI results and review comments
-  anchored to the existing commit SHAs. Cost: sync-merge commits clutter the
-  branch history.
+- **`rebase` (default)** — rebase the branch onto the base and `git push --force-with-lease`.
+  Best for **single-owner branches**, which is the norm for AI agents (a separate branch and worktree per task).
+  Gives clean linear history and deliberate, per-commit conflict resolution.
+  Cost: rewrites commit SHAs, so the push must be a force-push (with lease).
+  On a [stacked PR](#a-stacked-pull-request-needs-the---onto-form) the plain rebase is wrong, and the report says so.
+- **`merge`** — merge the base *into* the branch and push (no force).
+  Best for **shared/collaborative or already-reviewed PRs**: the push is a non-destructive fast-forward, and it preserves CI results and review comments anchored to the existing commit SHAs.
+  Cost: sync-merge commits clutter the branch history.
 
-`PR_SENTINEL_WATCH_UNTIL` decides when the watch is over. It exists for
-**concurrent PRs**: with several open at once, a green PR sitting in human merge
-review is exactly what a *sibling* PR merging turns `CONFLICTING`.
+`PR_SENTINEL_WATCH_UNTIL` decides when the watch is over.
+It exists for **concurrent PRs**: with several open at once, a green PR sitting in human merge review is exactly what a *sibling* PR merging turns `CONFLICTING`.
 
-- **`ready` (default)** — the watch ends when the PR goes green. Right for a
-  single PR at a time: green means handed off, and nothing else is in flight to
-  invalidate it.
-- **`closed`** — on green the watcher prints a **`ready_watching` notice** and
-  **keeps polling**. It does not exit, so it does not wake the session; it wakes
-  it later only if the PR needs attention again (a conflict, a `BEHIND` branch,
-  a newly failing check) or is merged/closed. Green is reported **once** — a
-  mode that exited on a still-green PR would re-exit instantly on every
-  relaunch, which is a spin loop, not a watch.
+- **`ready` (default)** — the watch ends when the PR goes green.
+  Right for a single PR at a time: green means handed off, and nothing else is in flight to invalidate it.
+- **`closed`** — on green the watcher prints a **`ready_watching` notice** and **keeps polling**.
+  It does not exit, so it does not wake the session; it wakes it later only if the PR needs attention again (a conflict, a `BEHIND` branch, a newly failing check) or is merged/closed.
+  Green is reported **once** — a mode that exited on a still-green PR would re-exit instantly on every relaunch, which is a spin loop, not a watch.
 
-Two trade-offs come with `closed`. The session is **not woken when the PR turns
-green**, so it can't announce "ready for review" the moment it happens — the
-notice lands in the watcher's task output instead. And a watch that now spans
-human review time usually wants a larger `PR_SENTINEL_TIMEOUT` than the 1-hour
-default, or it will wake with a `timeout` event and need a relaunch.
+Two trade-offs come with `closed`.
+The session is **not woken when the PR turns green**, so it can't announce "ready for review" the moment it happens — the notice lands in the watcher's task output instead.
+And a watch that now spans human review time usually wants a larger `PR_SENTINEL_TIMEOUT` than the 1-hour default, or it will wake with a `timeout` event and need a relaunch.
 
 ### How often it polls
 
-While checks are still running, the poll interval tracks **how long they have
-been running**: `age ÷ PR_SENTINEL_POLL_AGE_DIVISOR`, floored at
-`PR_SENTINEL_INTERVAL` and capped at `PR_SENTINEL_MAX_INTERVAL`. At the
-defaults, anything under five minutes old is polled every 30 seconds, a suite
-twenty minutes in every two minutes, and one past fifty minutes every five: a
-run that has been going forty minutes is unlikely to finish in the next four,
-and one that started seconds ago might finish now.
+While checks are still running, the poll interval tracks **how long they have been running**: `age ÷ PR_SENTINEL_POLL_AGE_DIVISOR`, floored at `PR_SENTINEL_INTERVAL` and capped at `PR_SENTINEL_MAX_INTERVAL`.
+At the defaults, anything under five minutes old is polled every 30 seconds, a suite twenty minutes in every two minutes, and one past fifty minutes every five: a run that has been going forty minutes is unlikely to finish in the next four, and one that started seconds ago might finish now.
 
-A backoff on the *poll count* can't do that, because it widens on the number of
-polls already made: ten minutes into any watch, every poll would sit at
-`MAX_INTERVAL` — five minutes for a failed check to reach the session — whether
-CI had been running ten minutes or thirty seconds.
+A backoff on the *poll count* can't do that, because it widens on the number of polls already made: ten minutes into any watch, every poll would sit at `MAX_INTERVAL` — five minutes for a failed check to reach the session — whether CI had been running ten minutes or thirty seconds.
 
-Age alone is loosest exactly when a long build is about to end: twenty-eight
-minutes into a thirty-minute run it would sleep another three. So a pending poll
-is also held inside the run's expected finish. `PR_SENTINEL_POLL_CLAMP` measures
-how long the base branch's last **green** run of the same workflow took, and no
-poll sleeps past that mark. Where several workflows are pending, the longest of
-them wins — the PR isn't done until its slowest one is.
+Age alone is loosest exactly when a long build is about to end: twenty-eight minutes into a thirty-minute run it would sleep another three.
+So a pending poll is also held inside the run's expected finish.
+`PR_SENTINEL_POLL_CLAMP` measures how long the base branch's last **green** run of the same workflow took, and no poll sleeps past that mark.
+Where several workflows are pending, the longest of them wins — the PR isn't done until its slowest one is.
 
-That estimate is weak evidence and is treated as such. A workflow the base has
-never run green — a new one, or one whose paths the base has never touched —
-yields nothing, and the age rule carries on alone. So does a run that has already
-outlasted the estimate: the workflow got slower, the prediction is spent, and
-pinning the whole overrun to the 30-second floor would cost more than the clamp
-ever saves.
+That estimate is weak evidence and is treated as such.
+A workflow the base has never run green — a new one, or one whose paths the base has never touched — yields nothing, and the age rule carries on alone.
+So does a run that has already outlasted the estimate: the workflow got slower, the prediction is spent, and pinning the whole overrun to the 30-second floor would cost more than the clamp ever saves.
 
-It costs two `gh api` reads per pending workflow, taken once and cached against
-the run they were measured for. `PR_SENTINEL_POLL_CLAMP=0` turns the clamp off
-along with those two reads.
+It costs two `gh api` reads per pending workflow, taken once and cached against the run they were measured for.
+`PR_SENTINEL_POLL_CLAMP=0` turns the clamp off along with those two reads.
 
-Once nothing is pending, the multiplicative backoff takes over
-(`PR_SENTINEL_BACKOFF_NUM` / `_DEN` per poll, up to `MAX_INTERVAL`). That is the
-right shape there: past green under `PR_SENTINEL_WATCH_UNTIL=closed`, what the
-watch is waiting for is a conflict from someone else's merge, or a close — on
-nobody's schedule, and no age predicts them.
+Once nothing is pending, the multiplicative backoff takes over (`PR_SENTINEL_BACKOFF_NUM` / `_DEN` per poll, up to `MAX_INTERVAL`).
+That is the right shape there: past green under `PR_SENTINEL_WATCH_UNTIL=closed`, what the watch is waiting for is a conflict from someone else's merge, or a close — on nobody's schedule, and no age predicts them.
 
-Any poll that sees checks pending again starts the clock over, so a push that
-restarts CI restores the tight loop and re-measures. Nothing is stored between
-watches: the elapsed time is already in the watch, and the expected duration is
-read fresh from GitHub each time.
+Any poll that sees checks pending again starts the clock over, so a push that restarts CI restores the tight loop and re-measures.
+Nothing is stored between watches: the elapsed time is already in the watch, and the expected duration is read fresh from GitHub each time.
 
 ### Green is not the same as ready
 
-`gh pr checks` returns one row per check that **exists**. A required check whose
-workflow never registered — the classic case being a path-filtered heavy gate on
-a pull request that started out docs-only — has no row at all, so it cannot show
-up as pending, and the checks that *did* run all read green. Counting buckets
-can't see the hole.
+`gh pr checks` returns one row per check that **exists**.
+A required check whose workflow never registered — the classic case being a path-filtered heavy gate on a pull request that started out docs-only — has no row at all, so it cannot show up as pending, and the checks that *did* run all read green.
+Counting buckets can't see the hole.
 
-`mergeStateStatus` can. `BLOCKED` with nothing failing and nothing pending means
-GitHub still has an unsatisfied merge requirement, so the watcher will not call
-that PR ready. What it can't tell you is *which* requirement: an outstanding
-approval looks identical from here, and reading the branch's required-check list
-would need a second API call and a token that can read branch protection.
+`mergeStateStatus` can.
+`BLOCKED` with nothing failing and nothing pending means GitHub still has an unsatisfied merge requirement, so the watcher will not call that PR ready.
+What it can't tell you is *which* requirement: an outstanding approval looks identical from here, and reading the branch's required-check list would need a second API call and a token that can read branch protection.
 
-So the watcher separates the two by persistence instead. A check that is merely
-slow to register turns up as `pending` within a poll or two; a requirement that
-is genuinely stuck doesn't move. After `PR_SENTINEL_BLOCKED_POLLS` consecutive
-green-but-`BLOCKED` polls (default 3 — roughly two and a half minutes at the
-default interval, with backoff), the watcher reports **`blocked`** and hands the
-ambiguity to you. Any poll that isn't green-and-blocked resets the streak.
+So the watcher separates the two by persistence instead.
+A check that is merely slow to register turns up as `pending` within a poll or two; a requirement that is genuinely stuck doesn't move.
+After `PR_SENTINEL_BLOCKED_POLLS` consecutive green-but-`BLOCKED` polls (default 3 — roughly two and a half minutes at the default interval, with backoff), the watcher reports **`blocked`** and hands the ambiguity to you.
+Any poll that isn't green-and-blocked resets the streak.
 
-`blocked` is terminal and counts as a handoff to the Stop hook, because both
-causes need a human and neither can be waited out.
+`blocked` is terminal and counts as a handoff to the Stop hook, because both causes need a human and neither can be waited out.
 
-The seconds right after a **re-push** are the same problem without the branch
-protection. GitHub keeps serving the previous run's check rows for a moment, so
-they still count as passing while the new head's run has not started — and on a
-repo with no required checks, `mergeStateStatus` is `CLEAN` throughout, so
-`BLOCKED` never engages. That poll reads green on evidence from the *previous*
-run.
+The seconds right after a **re-push** are the same problem without the branch protection.
+GitHub keeps serving the previous run's check rows for a moment, so they still count as passing while the new head's run has not started — and on a repo with no required checks, `mergeStateStatus` is `CLEAN` throughout, so `BLOCKED` never engages.
+That poll reads green on evidence from the *previous* run.
 
-Persistence answers this one: the new run registers within seconds and the next
-poll reports it pending. `ready` (and its `ready_watching` notice) therefore
-needs `PR_SENTINEL_GREEN_POLLS` consecutive green polls, default 2. It costs one
-poll interval on a genuine ready — the confirming poll is scheduled at
-`PR_SENTINEL_INTERVAL` rather than the backed-off interval, so a long CI run
-doesn't turn that into a five-minute wait. Set it to `1` to decide on a single
-poll.
+Persistence answers this one: the new run registers within seconds and the next poll reports it pending.
+`ready` (and its `ready_watching` notice) therefore needs `PR_SENTINEL_GREEN_POLLS` consecutive green polls, default 2.
+It costs one poll interval on a genuine ready — the confirming poll is scheduled at `PR_SENTINEL_INTERVAL` rather than the backed-off interval, so a long CI run doesn't turn that into a five-minute wait.
+Set it to `1` to decide on a single poll.
 
-A **re-run** can be the same problem at an unchanged head, and persistence does
-not reach it. While a re-run waits in the queue, its workflow can have no check
-rows on the head, so the remaining workflows' rows are all passing and the merge
-state stays `CLEAN`. This was seen once, with `--failed` during a GitHub Actions
-incident; a full re-run on a healthy queue kept its rows, as pending. So a green
-poll also asks GitHub whether any workflow run on the head is unfinished, and
-`ready` waits for that to reach zero. A run stuck in the queue
-ends the watch in `timeout`, whose report says why `ready` was withheld. If the
-run list cannot be read, for example because the token has no Actions access,
-`ready` still fires and adds a line saying a run with no check row is not ruled
-out.
+A **re-run** can be the same problem at an unchanged head, and persistence does not reach it.
+While a re-run waits in the queue, its workflow can have no check rows on the head, so the remaining workflows' rows are all passing and the merge state stays `CLEAN`.
+This was seen once, with `--failed` during a GitHub Actions incident; a full re-run on a healthy queue kept its rows, as pending.
+So a green poll also asks GitHub whether any workflow run on the head is unfinished, and `ready` waits for that to reach zero.
+A run stuck in the queue ends the watch in `timeout`, whose report says why `ready` was withheld.
+If the run list cannot be read, for example because the token has no Actions access, `ready` still fires and adds a line saying a run with no check row is not ruled out.
 
 ### A head no check reported on
 
-A head with **no check row at all** is the case persistence cannot reach, and
-it is not a race. The counts are zero because nothing ran, `mergeStateStatus` is
-`CLEAN` because nothing is required, and both stay that way for as long as the
-run takes to register — measured at 8 to 21.5 minutes during a GitHub Actions
-incident, against a confirmation window of two polls. No number of polls tells
-that apart from a repository that runs no CI on this PR at all.
+A head with **no check row at all** is the case persistence cannot reach, and it is not a race.
+The counts are zero because nothing ran, `mergeStateStatus` is `CLEAN` because nothing is required, and both stay that way for as long as the run takes to register — measured at 8 to 21.5 minutes during a GitHub Actions incident, against a confirmation window of two polls.
+No number of polls tells that apart from a repository that runs no CI on this PR at all.
 
-So an empty check set is never green. `ready` needs at least one row that
-reported, whatever the merge state says. It also has to be a set gh actually
-returned: for a head with no checks, gh exits non-zero and prints `no checks
-reported`, and any other failure with no rows (a dropped connection, an API
-error) is a read that failed. A failed read moves no streak or clock, so a
-flaky network delays `ready` rather than turning a green PR into `unchecked`. When the head keeps carrying none for
-`PR_SENTINEL_UNCHECKED_GRACE` seconds (default 600), the watcher reports
-**`unchecked`** instead, naming the head commit and both causes:
+So an empty check set is never green.
+`ready` needs at least one row that reported, whatever the merge state says.
+It also has to be a set gh actually returned: for a head with no checks, gh exits non-zero and prints `no checks reported`, and any other failure with no rows (a dropped connection, an API error) is a read that failed.
+A failed read moves no streak or clock, so a flaky network delays `ready` rather than turning a green PR into `unchecked`.
+When the head keeps carrying none for `PR_SENTINEL_UNCHECKED_GRACE` seconds (default 600), the watcher reports **`unchecked`** instead, naming the head commit and both causes:
 
 ```
 PR-SENTINEL EVENT: unchecked
@@ -848,41 +571,25 @@ NO check has reported on this head in 10m — not passing, not pending, no row
 at all. Nothing here says the code was tested.
 ```
 
-The grace paces the report, never the verdict: firing it early states
-something true — no check has reported on this head — where an early `ready`
-states something false. Ten minutes is roughly eight times the slowest healthy
-registration measured across a one-workflow repo and a thirty-nine-workflow one
-(median 2–4s, worst 76s, from push to the first run), and well inside the
-incident band, so a run that never starts is reported in ten minutes rather
-than waiting out the hour-long watch budget.
+The grace paces the report, never the verdict: firing it early states something true — no check has reported on this head — where an early `ready` states something false.
+Ten minutes is roughly eight times the slowest healthy registration measured across a one-workflow repo and a thirty-nine-workflow one (median 2–4s, worst 76s, from push to the first run), and well inside the incident band, so a run that never starts is reported in ten minutes rather than waiting out the hour-long watch budget.
 
-`unchecked` is terminal and counts as a handoff to the Stop hook, for the
-reason `blocked` does: telling its two causes apart means looking at the
-repository's workflows, which the watcher cannot do and no further polling
-answers. `gh run list --commit <head>` is the one command that separates them —
-runs queued means relaunch the watcher, no runs means this PR is as mergeable
-as it will get and nothing tested it.
+`unchecked` is terminal and counts as a handoff to the Stop hook, for the reason `blocked` does: telling its two causes apart means looking at the repository's workflows, which the watcher cannot do and no further polling answers.
+`gh run list --commit <head>` is the one command that separates them — runs queued means relaunch the watcher, no runs means this PR is as mergeable as it will get and nothing tested it.
 
-`UNKNOWN` gets the same treatment for the same reason. It is not a merge state
-but GitHub saying it hasn't computed one yet — the window a sibling PR's merge
-opens, during which a PR that is about to read `DIRTY` still reads `UNKNOWN`.
-The watcher withholds `ready` until the state is computed, polling at the base
-interval while it waits (the query itself triggers the recomputation, so it
-resolves within a poll or two). If it somehow never resolves, the watch ends in
-a `timeout` whose report names the withheld ready.
+`UNKNOWN` gets the same treatment for the same reason.
+It is not a merge state but GitHub saying it hasn't computed one yet — the window a sibling PR's merge opens, during which a PR that is about to read `DIRTY` still reads `UNKNOWN`.
+The watcher withholds `ready` until the state is computed, polling at the base interval while it waits (the query itself triggers the recomputation, so it resolves within a poll or two).
+If it somehow never resolves, the watch ends in a `timeout` whose report names the withheld ready.
 
 ### Failures inherited from the base branch
 
-A `check_failure` report used to assume the PR caused the failure — "diagnose
-and fix the failing check(s) below in this local session". When the base branch
-is what's broken, that instruction is wrong, and it gets expensive in exact
-proportion to how many sessions you have in flight. Every session touching a
-file the gate covers gets the same report, and each one writes its own fix; the
-second one to land pays for a rebase conflict on top.
+A `check_failure` report used to assume the PR caused the failure — "diagnose and fix the failing check(s) below in this local session".
+When the base branch is what's broken, that instruction is wrong, and it gets expensive in exact proportion to how many sessions you have in flight.
+Every session touching a file the gate covers gets the same report, and each one writes its own fix; the second one to land pays for a rebase conflict on top.
 
-So before waking you, the watcher asks whether the base is already red on the
-same workflows. If **every** surviving failure is, it reports **`base_failure`**
-instead — a notice, not a wake-up — and **keeps polling**:
+So before waking you, the watcher asks whether the base is already red on the same workflows.
+If **every** surviving failure is, it reports **`base_failure`** instead — a notice, not a wake-up — and **keeps polling**:
 
 ```
 PR-SENTINEL EVENT: base_failure
@@ -890,41 +597,25 @@ Failed checks: doc-links (fail)
 Also failing on main: doc-links.yml (run 31274922338, 47815b6, failure, 15m ago)
 ```
 
-The unblock signal is "green on the base again", not "somebody closed the
-tracking issue", so it holds whether the fix arrives as a standalone PR or a
-revert. When the base clears while the check is still red here, the next poll
-wakes you — with `check_failure` if this head already has the base's fix behind
-it, and with `base_fixed` if it doesn't (below).
+The unblock signal is "green on the base again", not "somebody closed the tracking issue", so it holds whether the fix arrives as a standalone PR or a revert.
+When the base clears while the check is still red here, the next poll wakes you — with `check_failure` if this head already has the base's fix behind it, and with `base_fixed` if it doesn't (below).
 
 Five details do the work:
 
-- **The lookup is scoped to the workflow, never to the base branch's newest
-  run.** A path-gated workflow only runs when its paths change, so the tip of
-  `main` and that workflow's last run can be many commits apart — reading the tip
-  gives you a stale green from before the breakage or a stale red long after the
-  fix. `…/actions/workflows/<id>/runs?branch=<base>` self-corrects, because a run
-  exists only where the paths matched.
-- **All-or-nothing, like the `continue-on-error` absorption above.** One failure
-  the base doesn't share is yours, and that mixed case still wakes you with the
-  full failed list — plus the members of it the comparison had already found red
-  on the base, so you aren't left to work out which are yours:
+- **The lookup is scoped to the workflow, never to the base branch's newest run.** A path-gated workflow only runs when its paths change, so the tip of `main` and that workflow's last run can be many commits apart — reading the tip gives you a stale green from before the breakage or a stale red long after the fix.
+  `…/actions/workflows/<id>/runs?branch=<base>` self-corrects, because a run exists only where the paths matched.
+- **All-or-nothing, like the `continue-on-error` absorption above.** One failure the base doesn't share is yours, and that mixed case still wakes you with the full failed list — plus the members of it the comparison had already found red on the base, so you aren't left to work out which are yours:
 
   ```
   Failed checks: doc-links (fail), unit-test (fail)
   Also failing on main: doc-links.yml (run 31274922338, 47815b6, failure, 15m ago)
   ```
 
-  Read that as a **partial** list. The comparison stops at the first check that
-  *isn't* red on the base, so it names what it had reached and there may be more.
-  Taking it for the whole inherited set is how you end up diagnosing someone
-  else's failure, which is the thing this whole section exists to prevent.
-- **Every uncertainty falls through to `check_failure`, and the report says
-  which one.** A check with no Actions run behind it, an unreadable workflow id,
-  and a base with *no* run of that workflow at all (a new workflow, or one whose
-  paths the base has never touched) are all treated as "not inherited" — and
-  each names itself, because one silence covering three causes is a verdict you
-  can't weigh. The wake carries **one** such line, in whichever form applies —
-  when the comparison ran and didn't settle:
+  Read that as a **partial** list.
+  The comparison stops at the first check that *isn't* red on the base, so it names what it had reached and there may be more.
+  Taking it for the whole inherited set is how you end up diagnosing someone else's failure, which is the thing this whole section exists to prevent.
+- **Every uncertainty falls through to `check_failure`, and the report says which one.** A check with no Actions run behind it, an unreadable workflow id, and a base with *no* run of that workflow at all (a new workflow, or one whose paths the base has never touched) are all treated as "not inherited" — and each names itself, because one silence covering three causes is a verdict you can't weigh.
+  The wake carries **one** such line, in whichever form applies — when the comparison ran and didn't settle:
 
   ```
   Base comparison: did not settle — main has no completed run of that workflow
@@ -936,20 +627,11 @@ Five details do the work:
   Base comparison: off (PR_SENTINEL_BASE_CHECK=0)
   ```
 
-  A `cancelled` base run is the fourth uncertainty and behaves differently: it
-  ends the comparison like any non-red run, so the wake names it the way a green
-  one is named (`Last main run: … cancelled …`) rather than saying the
-  comparison didn't settle. Weaker evidence, named rather than absent.
-- **When the answer is "not inherited", the wake names the run that decided
-  it.** That green base run is the entire evidence for "this failure is yours",
-  and it can be arbitrarily stale. A check that reads state from *outside* the
-  repository — a vulnerability database, a remote allowlist, an upstream API, an
-  expiring credential — turns red with no commit on either side, so the base's
-  last recorded run is green as a matter of record while the base tree is red as
-  a matter of fact. Nothing the watcher can query dates that flip, and how old is
-  *too* old depends on how often the workflow runs on your base, so it reports
-  instead of guessing: `check_failure` carries the run and its age, and tells you
-  to reproduce against the base tree before writing a fix.
+  A `cancelled` base run is the fourth uncertainty and behaves differently: it ends the comparison like any non-red run, so the wake names it the way a green one is named (`Last main run: … cancelled …`) rather than saying the comparison didn't settle.
+  Weaker evidence, named rather than absent.
+- **When the answer is "not inherited", the wake names the run that decided it.** That green base run is the entire evidence for "this failure is yours", and it can be arbitrarily stale.
+  A check that reads state from *outside* the repository — a vulnerability database, a remote allowlist, an upstream API, an expiring credential — turns red with no commit on either side, so the base's last recorded run is green as a matter of record while the base tree is red as a matter of fact.
+  Nothing the watcher can query dates that flip, and how old is *too* old depends on how often the workflow runs on your base, so it reports instead of guessing: `check_failure` carries the run and its age, and tells you to reproduce against the base tree before writing a fix.
 
   ```
   PR-SENTINEL EVENT: check_failure
@@ -957,41 +639,27 @@ Five details do the work:
   Last main run: vuln-scan.yml (run 31274999999, e60000d, success, 18h 23m ago)
   ```
 
-  Minutes old, dismiss it and fix your PR. A day old on a scanner, check the base
-  tree first — that one costs a wake per relaunch until somebody does.
+  Minutes old, dismiss it and fix your PR.
+  A day old on a scanner, check the base tree first — that one costs a wake per relaunch until somebody does.
 
-- **"Not inherited" also needs your head to have the base's fix behind it.**
-  Otherwise the run that cleared the base exercised code your branch doesn't
-  carry, and the failure still red here is the breakage that run fixed. That's
-  `base_fixed`, below.
+- **"Not inherited" also needs your head to have the base's fix behind it.** Otherwise the run that cleared the base exercised code your branch doesn't carry, and the failure still red here is the breakage that run fixed.
+  That's `base_fixed`, below.
 
-`PR_SENTINEL_BASE_CHECK=0` turns the comparison off. It's on by default but has
-an off switch that the absorption rule doesn't, because the evidence is weaker:
-absorption reads GitHub's own verdict on the exact run in question, while this
-infers across two runs. Its false negative is a PR that independently breaks the
-same workflow, which stays masked until the base goes green — a delay rather
-than a loss, since the still-red check wakes you the moment it clears there.
+`PR_SENTINEL_BASE_CHECK=0` turns the comparison off.
+It's on by default but has an off switch that the absorption rule doesn't, because the evidence is weaker: absorption reads GitHub's own verdict on the exact run in question, while this infers across two runs.
+Its false negative is a PR that independently breaks the same workflow, which stays masked until the base goes green — a delay rather than a loss, since the still-red check wakes you the moment it clears there.
 
 ### A head that predates the base's fix
 
-The rule above has two states and the world has three. The base goes green, your
-PR is still red — and whether that failure is yours turns on two more facts:
-whether your head has the commit that green run ran at behind it, and whether
-the base was broken where your branch forked from it.
+The rule above has two states and the world has three.
+The base goes green, your PR is still red — and whether that failure is yours turns on two more facts: whether your head has the commit that green run ran at behind it, and whether the base was broken where your branch forked from it.
 
-Being behind a green base is not enough on its own. On a busy repository almost
-every failing PR is a commit or two behind, and most of them broke their own
-check. What makes a failure plausibly the base's is a base that was **red where
-your branch started**, then fixed in a commit you don't have. In that state the
-run that cleared the base tested code you don't have, what's red on your PR may
-be the breakage you haven't picked up the fix for, and "diagnose and fix the
-failing check" sends you to write a second copy of a fix that has already
-landed — onto a branch that only needed updating, and into a conflict with the
-original.
+Being behind a green base is not enough on its own.
+On a busy repository almost every failing PR is a commit or two behind, and most of them broke their own check.
+What makes a failure plausibly the base's is a base that was **red where your branch started**, then fixed in a commit you don't have.
+In that state the run that cleared the base tested code you don't have, what's red on your PR may be the breakage you haven't picked up the fix for, and "diagnose and fix the failing check" sends you to write a second copy of a fix that has already landed — onto a branch that only needed updating, and into a conflict with the original.
 
-So the watcher asks GitHub whether the two commits are related, then reads the
-base's run of the same workflow at your branch's fork point, and reports
-**`base_fixed`** only when that run was red:
+So the watcher asks GitHub whether the two commits are related, then reads the base's run of the same workflow at your branch's fork point, and reports **`base_fixed`** only when that run was red:
 
 ```
 PR-SENTINEL EVENT: base_fixed
@@ -1001,70 +669,42 @@ main at this head's fork point: doc-links.yml (run 31274900000, f0f0f0f, failure
 Base branch: main (this head does not have that run's commit behind it)
 ```
 
-A green run at the fork point means the base worked where your branch started,
-so the failure is yours and the report is `check_failure`, naming that run. A
-path-filtered workflow usually did not run at the fork point itself; the
-watcher then walks back through the base's recent runs of it, newest first, and
-takes the first red or green one your head has behind it. The walk spends at
-most five `compare` reads, and a fork point it cannot settle stays
-`check_failure`, with a line saying so. One more case is `check_failure` by
-construction: a `pull_request` run started after the green base run tested your
-head merged into a base that already had the fix.
+A green run at the fork point means the base worked where your branch started, so the failure is yours and the report is `check_failure`, naming that run.
+A path-filtered workflow usually did not run at the fork point itself; the watcher then walks back through the base's recent runs of it, newest first, and takes the first red or green one your head has behind it.
+The walk spends at most five `compare` reads, and a fork point it cannot settle stays `check_failure`, with a line saying so.
+One more case is `check_failure` by construction: a `pull_request` run started after the green base run tested your head merged into a base that already had the fix.
 
-It's a wake-up, not a notice — you have something to do — and the action is to
-update the branch, not to fix anything:
+It's a wake-up, not a notice — you have something to do — and the action is to update the branch, not to fix anything:
 
-- **Rebase and force-push with lease** by default, or merge the base in under
-  `PR_SENTINEL_HEAL=merge`, exactly as `behind` does. The stacked-PR caveat
-  rides along too.
-- **Then relaunch.** If the same check is still red at the new head, it *is*
-  yours, and the next report says so as `check_failure` with the log excerpt.
-- **No log excerpt here.** Diagnosis is premature until the rebase has re-run
-  the checks, and the excerpt is semi-untrusted text with no job to do yet.
-- **Any already-inherited members are named**, the same partial list the mixed
-  case gets above. `base_fixed` reaches a mixed set by the same route.
+- **Rebase and force-push with lease** by default, or merge the base in under `PR_SENTINEL_HEAL=merge`, exactly as `behind` does.
+  The stacked-PR caveat rides along too.
+- **Then relaunch.** If the same check is still red at the new head, it *is* yours, and the next report says so as `check_failure` with the log excerpt.
+- **No log excerpt here.** Diagnosis is premature until the rebase has re-run the checks, and the excerpt is semi-untrusted text with no job to do yet.
+- **Any already-inherited members are named**, the same partial list the mixed case gets above.
+  `base_fixed` reaches a mixed set by the same route.
 
-Two things it deliberately does *not* claim. It doesn't say *the failure* is
-inherited — naming the members already found red on the base is a claim about
-those, not about the set, and the comparison stops at the first workflow that
-isn't red, so a green one doesn't prove every failing check is green there. And
-it doesn't rebase for you: the branch belongs to your session, and a rebase can
-conflict.
+Two things it deliberately does *not* claim.
+It doesn't say *the failure* is inherited — naming the members already found red on the base is a claim about those, not about the set, and the comparison stops at the first workflow that isn't red, so a green one doesn't prove every failing check is green there.
+And it doesn't rebase for you: the branch belongs to your session, and a rebase can conflict.
 
-The ancestry question is one read of GitHub's `compare` endpoint, taken only on
-a poll where the base is green while the PR is still failing, and once per head
-and green base run: a watch that keeps polling past it, such as a relaunch that
-reports `repeat_failure`, reuses the verdict instead of reading again. Only the `status` word (`ahead`, `behind`, `identical`,
-`diverged`) and the merge base's commit SHA are read. The fork point then costs
-one Actions read, plus a list of recent base runs and up to five more `compare`
-reads when the workflow did not run there, plus one read of your failing run's
-event and age. The watcher shells out to `git` nowhere — every `git` string
-in its reports is text for you to run, never something it runs itself — so a
-local `merge-base` was the wrong instrument however much cheaper it looks.
+The ancestry question is one read of GitHub's `compare` endpoint, taken only on a poll where the base is green while the PR is still failing, and once per head and green base run: a watch that keeps polling past it, such as a relaunch that reports `repeat_failure`, reuses the verdict instead of reading again.
+Only the `status` word (`ahead`, `behind`, `identical`, `diverged`) and the merge base's commit SHA are read.
+The fork point then costs one Actions read, plus a list of recent base runs and up to five more `compare` reads when the workflow did not run there, plus one read of your failing run's event and age.
+The watcher shells out to `git` nowhere — every `git` string in its reports is text for you to run, never something it runs itself — so a local `merge-base` was the wrong instrument however much cheaper it looks.
 
-Every uncertainty falls through to the old behaviour: no readable `compare`, no
-merge base in it, no base run that settles the fork point, no green base run, a
-`gh` too old for the endpoint, or `PR_SENTINEL_BASE_CHECK=0` all leave you with
-`check_failure` exactly as before.
+Every uncertainty falls through to the old behaviour: no readable `compare`, no merge base in it, no base run that settles the fork point, no green base run, a `gh` too old for the endpoint, or `PR_SENTINEL_BASE_CHECK=0` all leave you with `check_failure` exactly as before.
 
 ### A relaunch over a failure you already declined
 
-The watcher has two answers for a failing check and needs a third. It wakes you
-(`check_failure`), or it waits (`base_failure`, when the base is red too). There
-was no answer for a failure you had already seen, judged not yours, and decided
-to leave alone.
+The watcher has two answers for a failing check and needs a third.
+It wakes you (`check_failure`), or it waits (`base_failure`, when the base is red too).
+There was no answer for a failure you had already seen, judged not yours, and decided to leave alone.
 
-A watcher process holds no memory across runs, so every relaunch re-polled,
-found the same red, and exited re-reporting it within seconds. The only route to
-a quiet turn end was to push a fix — which is exactly what you had decided not
-to write. Measured 2026-09-09 on a batch of four pull requests: two were red on
-a vulnerability scan neither branch could have caused, the maintainer said to
-ignore it, and seven watcher launches across the two produced five reports of a
-state that by definition could not move, each exiting in five or six seconds.
+A watcher process holds no memory across runs, so every relaunch re-polled, found the same red, and exited re-reporting it within seconds.
+The only route to a quiet turn end was to push a fix — which is exactly what you had decided not to write.
+Measured 2026-09-09 on a batch of four pull requests: two were red on a vulnerability scan neither branch could have caused, the maintainer said to ignore it, and seven watcher launches across the two produced five reports of a state that by definition could not move, each exiting in five or six seconds.
 
-So a `check_failure` the watcher reports is now recorded, and a **later launch**
-that finds the identical `(event, head commit, failed set)` says so and keeps
-polling instead of exiting:
+So a `check_failure` the watcher reports is now recorded, and a **later launch** that finds the identical `(event, head commit, failed set)` says so and keeps polling instead of exiting:
 
 ```
 PR-SENTINEL EVENT: repeat_failure
@@ -1072,126 +712,81 @@ Failed checks: vuln-scan (api) (fail), vuln-scan (worker) (fail)
 Already reported: check_failure, same head, same failed set, 143s ago
 ```
 
-Three things bound it, because this is the one mechanism here that can decide
-you do *not* hear about a red check:
+Three things bound it, because this is the one mechanism here that can decide you do *not* hear about a red check:
 
 - **The first report always wakes you.** Only an exact repeat is dampened.
-- **The acknowledgement expires by itself.** A push moves the head and a check
-  flipping either way moves the set, so anything that really changed reports as
-  `check_failure` again with no state to clear by hand.
-- **It expires on a clock too** — `PR_SENTINEL_DAMPEN`, default `3600`, matching
-  the watch budget so the dampening can never outlive the single watch it stands
-  in for. Tomorrow's session has never seen that report and must not be answered
-  with silence about it.
+- **The acknowledgement expires by itself.** A push moves the head and a check flipping either way moves the set, so anything that really changed reports as `check_failure` again with no state to clear by hand.
+- **It expires on a clock too** — `PR_SENTINEL_DAMPEN`, default `3600`, matching the watch budget so the dampening can never outlive the single watch it stands in for.
+  Tomorrow's session has never seen that report and must not be answered with silence about it.
 
-Every uncertainty falls through to the wake: no record, an unreadable one, a
-state directory that cannot be written, a clock that moved backwards. Losing the
-record costs the dampening, never the report. `PR_SENTINEL_DAMPEN=0` turns it off
-and restores the re-report on every relaunch.
+Every uncertainty falls through to the wake: no record, an unreadable one, a state directory that cannot be written, a clock that moved backwards.
+Losing the record costs the dampening, never the report.
+`PR_SENTINEL_DAMPEN=0` turns it off and restores the re-report on every relaunch.
 
-This is the watcher-side counterpart of the Stop hook's own dampening, which was
-already doing the same arithmetic on the same signature
-([What it does](#what-it-does)). That one bounds the *block*; this one bounds
-the *wake-up*, which is the thing that was re-firing.
+This is the watcher-side counterpart of the Stop hook's own dampening, which was already doing the same arithmetic on the same signature ([What it does](#what-it-does)).
+That one bounds the *block*; this one bounds the *wake-up*, which is the thing that was re-firing.
 
 ### A stacked pull request needs the `--onto` form
 
-A **stacked** PR is one whose branch carries a parent PR's commits as well as
-its own. The default `rebase` heal is wrong on one, and the `conflict`,
-`behind`, and `dequeued` reports say so in place.
+A **stacked** PR is one whose branch carries a parent PR's commits as well as its own.
+The default `rebase` heal is wrong on one, and the `conflict`, `behind`, and `dequeued` reports say so in place.
 
-When the parent squash-merges, its content lands on the base as a single new
-commit, so the parent's individual commits are not ancestors of the base and
-never will be. `git rebase origin/<base>` therefore replays commits whose
-content is already there, and the session ends up resolving conflicts inside
-code it never wrote — where picking the wrong side reverts what already landed.
+When the parent squash-merges, its content lands on the base as a single new commit, so the parent's individual commits are not ancestors of the base and never will be.
+`git rebase origin/<base>` therefore replays commits whose content is already there, and the session ends up resolving conflicts inside code it never wrote — where picking the wrong side reverts what already landed.
 
-The failure is intermittent, which is the trap. Git silently drops a replayed
-commit whose patch applies as a no-op (`patch contents already upstream`), so a
-stack whose parent commits each touch a distinct file rebases cleanly, while one
-whose parent edited a single file across several commits conflicts.
+The failure is intermittent, which is the trap.
+Git silently drops a replayed commit whose patch applies as a no-op (`patch contents already upstream`), so a stack whose parent commits each touch a distinct file rebases cleanly, while one whose parent edited a single file across several commits conflicts.
 
-The watcher can't tell the two apart: it reads one PR's GitHub state, and
-neither the commit list — a human-writable field the
-[metadata query excludes by design](#security-invariants) — nor local git. So
-the report names the check and leaves it to the session, which is sitting in the
-repo:
+The watcher can't tell the two apart: it reads one PR's GitHub state, and neither the commit list — a human-writable field the [metadata query excludes by design](#security-invariants) — nor local git.
+So the report names the check and leaves it to the session, which is sitting in the repo:
 
 ```
 git log --oneline origin/<base>..HEAD
 ```
 
-If that lists commits you did not write, whose PR has already merged, drop them
-instead of replaying them:
+If that lists commits you did not write, whose PR has already merged, drop them instead of replaying them:
 
 ```
 git rebase --onto origin/<base> <last commit that is not yours> HEAD
 ```
 
-`PR_SENTINEL_HEAL=merge` carries no such caveat and needs none: merging the base
-IN leaves the parent's commits in the branch's history but out of the PR's diff,
-which is already the correct result.
+`PR_SENTINEL_HEAL=merge` carries no such caveat and needs none: merging the base IN leaves the parent's commits in the branch's history but out of the PR's diff, which is already the correct result.
 
 ### Merge queues
 
-Every other event describes PR *health*; queue *membership* is a different fact
-with a different remedy. A merge queue can evict a still-open PR — typically a
-sibling merge ahead of it made it conflicting, sometimes the queue reset its
-group — and after that no merge is in progress any more, however green the PR
-looks. A session that only ever hears `conflict` heals the branch and stops,
-never learning that re-enqueueing is owed. **`dequeued`** is that missing fact:
-the PR held a merge-queue entry on an earlier poll of this watch and the entry
-is gone while the PR is still open.
+Every other event describes PR *health*; queue *membership* is a different fact with a different remedy.
+A merge queue can evict a still-open PR — typically a sibling merge ahead of it made it conflicting, sometimes the queue reset its group — and after that no merge is in progress any more, however green the PR looks.
+A session that only ever hears `conflict` heals the branch and stops, never learning that re-enqueueing is owed.
+**`dequeued`** is that missing fact: the PR held a merge-queue entry on an earlier poll of this watch and the entry is gone while the PR is still open.
 
-`gh pr view` exposes no queue field, so membership is one extra GraphQL read
-(`mergeQueueEntry`) per poll, and naming who removed the PR is one more, made
-only when `dequeued` is reported — the watcher's only queries beyond
-`gh pr view` / `gh pr checks`, still GitHub-controlled metadata. Four
-behaviors follow from tracking it:
+`gh pr view` exposes no queue field, so membership is one extra GraphQL read (`mergeQueueEntry`) per poll, and naming who removed the PR is one more, made only when `dequeued` is reported — the watcher's only queries beyond `gh pr view` / `gh pr checks`, still GitHub-controlled metadata.
+Four behaviors follow from tracking it:
 
-- **While the PR is queued, the watcher keeps its hands off.** The queue owns
-  the PR: every branch-state remedy (`conflict`, `behind`) prescribes a push,
-  and any push to a queued PR evicts it. A queued PR whose base has advanced
-  reads `BEHIND`, so without this suspension the watcher would wake the session
-  to rebase — causing the very eviction this event exists to report. Only
-  `closed`, `dequeued`, and `timeout` can end the watch while queued.
-- **An eviction is confirmed across `PR_SENTINEL_DEQUEUED_POLLS` polls**
-  (default 2, at the base interval). GitHub removes the queue entry a moment
-  *before* a successful queue merge lands, so a single open-and-unqueued poll
-  can be a merge in flight; the confirming poll sees the PR `MERGED` and
-  reports `closed`.
-- **The `dequeued` report folds the heal in.** It names the merge state, gives
-  the `PR_SENTINEL_HEAL`-appropriate heal commands when the branch is `DIRTY`
-  or `BEHIND`, and ends with the handback: re-enqueueing starts a merge, so it
-  stays a **human** action — the session must never re-enqueue or merge.
-- **It says who removed the PR, and only guesses a cause when that is the
-  queue.** One more GraphQL read — the actor on the most recent
-  `REMOVED_FROM_MERGE_QUEUE_EVENT`, made once at report time, not per poll —
-  separates two different situations. `github-merge-queue` is a `Bot`, so the
-  queue acted: the report keeps the eviction wording and its usual causes (a
-  sibling merge, a group reset). A person's login means somebody chose to
-  remove it, which is the documented way to update a queued branch, since
-  GitHub rejects a push to one (`GH006`). That report claims no cause, and its
-  next action is the waiting push rather than a re-read of the checks. If the
-  actor can't be read, the report names **both** possibilities and asserts
-  neither.
+- **While the PR is queued, the watcher keeps its hands off.** The queue owns the PR: every branch-state remedy (`conflict`, `behind`) prescribes a push, and any push to a queued PR evicts it.
+  A queued PR whose base has advanced reads `BEHIND`, so without this suspension the watcher would wake the session to rebase — causing the very eviction this event exists to report.
+  Only `closed`, `dequeued`, and `timeout` can end the watch while queued.
+- **An eviction is confirmed across `PR_SENTINEL_DEQUEUED_POLLS` polls** (default 2, at the base interval).
+  GitHub removes the queue entry a moment *before* a successful queue merge lands, so a single open-and-unqueued poll can be a merge in flight; the confirming poll sees the PR `MERGED` and reports `closed`.
+- **The `dequeued` report folds the heal in.** It names the merge state, gives the `PR_SENTINEL_HEAL`-appropriate heal commands when the branch is `DIRTY` or `BEHIND`, and ends with the handback: re-enqueueing starts a merge, so it stays a **human** action — the session must never re-enqueue or merge.
+- **It says who removed the PR, and only guesses a cause when that is the queue.** One more GraphQL read — the actor on the most recent `REMOVED_FROM_MERGE_QUEUE_EVENT`, made once at report time, not per poll — separates two different situations.
+  `github-merge-queue` is a `Bot`, so the queue acted: the report keeps the eviction wording and its usual causes (a sibling merge, a group reset).
+  A person's login means somebody chose to remove it, which is the documented way to update a queued branch, since GitHub rejects a push to one (`GH006`).
+  That report claims no cause, and its next action is the waiting push rather than a re-read of the checks.
+  If the actor can't be read, the report names **both** possibilities and asserts neither.
 
-`dequeued` is a wake, not a handoff: the Stop hook keeps holding the session
-responsible for the PR until it is healed, re-watched, and handed back.
+`dequeued` is a wake, not a handoff: the Stop hook keeps holding the session responsible for the PR until it is healed, re-watched, and handed back.
 
 ## Activity report
 
 Is the nudge actually being followed, and what is the watcher waking you for?
-The bundled report answers both by re-reading what Claude Code already recorded
-in your local session transcripts:
+The bundled report answers both by re-reading what Claude Code already recorded in your local session transcripts:
 
 ```
 /pr-sentinel-friction-report
 ```
 
-It adds no telemetry and makes no network call — it parses transcripts that are
-already on your disk (see [Privacy](#privacy)). The script takes the same
-arguments directly:
+It adds no telemetry and makes no network call — it parses transcripts that are already on your disk (see [Privacy](#privacy)).
+The script takes the same arguments directly:
 
 ```
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/friction-report.py"              # last 7 days
@@ -1209,52 +804,29 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/friction-report.py" --repo my-service --j
 
 Four things it reports, and how to read them:
 
-- **Follow-through** — nudged pull requests that got a watcher. The nudge is
-  advisory (a hook cannot make the model call a tool), so this is the number
-  that says whether the advice lands. Read it together with the **Stop-hook
-  backstop** count underneath: a high follow-through next to a non-zero backstop
-  count does not mean the nudge alone was enough — it means the
-  [backstop](#what-it-does) caught the turns that were about to end unwatched,
-  and the session launched a watcher after it fired.
-- **Events by kind** — `work` (`check_failure`, `conflict`, `behind`,
-  `dequeued`, `blocked`, `unchecked`) is the plugin earning its keep; `done` (`ready`,
-  `closed`) means the PR needed no babysitting; `degraded` (`timeout`, `error`)
-  means the watch ended with no verdict, which usually calls for a larger
-  `PR_SENTINEL_TIMEOUT`.
-- **Foreground launches** — a watcher that was not backgrounded pinned the main
-  thread. That is the anti-pattern the plugin exists to replace, so any non-zero
-  count is worth chasing back to the session that did it.
-- **Guard decisions** — what the [PreToolUse guard](#what-it-does) did, split by
-  the branch that fired: `auto-allow` for the plugin's own watcher launch, and
-  `poll`, `duplicate` or `overlap` for a deny. Underneath it is the count of
-  inline `PR_SENTINEL_OVERRIDE=` prefixes, which is the number the guard cannot
-  report on itself — an override makes it defer, and a defer is silence, so the
-  count is read off the commands sessions ran. Read it against the denies: an
-  override tally near the deny count means the escape hatch is doing the guard's
-  job. It falls for two different reasons, though, and they read alike: sessions
-reaching for the hatch less often, and the guard no longer firing where it
-should not have. Recognising a stacked create was the second kind — a three-PR
-stack used to spend one override per PR.
+- **Follow-through** — nudged pull requests that got a watcher.
+  The nudge is advisory (a hook cannot make the model call a tool), so this is the number that says whether the advice lands.
+  Read it together with the **Stop-hook backstop** count underneath: a high follow-through next to a non-zero backstop count does not mean the nudge alone was enough — it means the [backstop](#what-it-does) caught the turns that were about to end unwatched, and the session launched a watcher after it fired.
+- **Events by kind** — `work` (`check_failure`, `conflict`, `behind`, `dequeued`, `blocked`, `unchecked`) is the plugin earning its keep; `done` (`ready`, `closed`) means the PR needed no babysitting; `degraded` (`timeout`, `error`) means the watch ended with no verdict, which usually calls for a larger `PR_SENTINEL_TIMEOUT`.
+- **Foreground launches** — a watcher that was not backgrounded pinned the main thread.
+  That is the anti-pattern the plugin exists to replace, so any non-zero count is worth chasing back to the session that did it.
+- **Guard decisions** — what the [PreToolUse guard](#what-it-does) did, split by the branch that fired: `auto-allow` for the plugin's own watcher launch, and `poll`, `duplicate` or `overlap` for a deny.
+  Underneath it is the count of inline `PR_SENTINEL_OVERRIDE=` prefixes, which is the number the guard cannot report on itself — an override makes it defer, and a defer is silence, so the count is read off the commands sessions ran.
+  Read it against the denies: an override tally near the deny count means the escape hatch is doing the guard's job.
+  It falls for two different reasons, though, and they read alike: sessions reaching for the hatch less often, and the guard no longer firing where it should not have.
+  Recognising a stacked create was the second kind — a three-PR stack used to spend one override per PR.
 
-Nudges that name no PR number (a branch push where the hook could not resolve
-one) are counted separately and left out of the follow-through rate, rather than
-scored as unanswered.
+Nudges that name no PR number (a branch push where the hook could not resolve one) are counted separately and left out of the follow-through rate, rather than scored as unanswered.
 
-Both the follow-through and guard-decision readings rest on one convention:
-**every string this plugin hands back to a session opens with `pr-sentinel: `**
-— the three deny reasons, the auto-allow, both PostToolUse nudges, the Stop
-block and its non-blocking notice. A deny leaves no other trace, so that opener
-is the key this report recovers it by, and foreground-guard's cross-plugin
-report parses the same one. Adding a decision branch means opening its message
-the same way; `tests/test_friction_report.py` fails the build otherwise. The
-watcher's report is deliberately outside the set — it reaches the transcript
-whole and identifies itself with a `PR-SENTINEL EVENT:` header instead.
+Both the follow-through and guard-decision readings rest on one convention: **every string this plugin hands back to a session opens with `pr-sentinel: `** — the three deny reasons, the auto-allow, both PostToolUse nudges, the Stop block and its non-blocking notice.
+A deny leaves no other trace, so that opener is the key this report recovers it by, and foreground-guard's cross-plugin report parses the same one.
+Adding a decision branch means opening its message the same way; `tests/test_friction_report.py` fails the build otherwise.
+The watcher's report is deliberately outside the set — it reaches the transcript whole and identifies itself with a `PR-SENTINEL EVENT:` header instead.
 [Why the messages carry it](docs/DESIGN.md#why-every-message-names-the-plugin).
 
 ## Agent guidance
 
-Paste this into your project's `CLAUDE.md` (or `AGENTS.md`) so the agent uses
-the watcher instead of foreground-polling:
+Paste this into your project's `CLAUDE.md` (or `AGENTS.md`) so the agent uses the watcher instead of foreground-polling:
 
 ```markdown
 ## Post-PR babysitting (pr-sentinel)
@@ -1286,74 +858,33 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
 
 ## Limitations
 
-- **The nudge is advisory.** A `PostToolUse` hook can't force a tool call; if
-  the session ignores the nudge, no watcher starts. The **Stop-hook backstop**
-  closes this gap — it blocks the stop once if the turn ends with an unwatched
-  open PR — but it too is best-effort: it fails open on any uncertainty (no PR
-  resolvable, unreadable transcript) and never blocks twice.
-- **Success detection is heuristic on the push path.** The hook infers a failed
-  push from output text (`fatal:`, `! [rejected]`, `error:`, `Everything
-  up-to-date`). An unusual success string could be misread as failure (nudge
-  skipped) — never the reverse in a way that grants authority. A `gh pr create`
-  doesn't rest on it: it nudges only when the output names a PR URL, so no
-  unrecognised failure can produce a nudge for a PR that doesn't exist. The
-  cost is that a create printing a URL the hook can't parse — anything but
-  `https://github.com/<owner>/<repo>/pull/<n>` — goes unnudged, and a later
-  push to the branch is what brings the nudge back. The Stop backstop does not
-  rest on that parse alone: a correlated `pr-link`, and the create's own
-  redirected output file, resolve the PR the transcript never showed — so the
-  two don't fall silent together.
-- **`git push` without a PR URL** can't resolve the PR locally (the hook makes no
-  network call), so the nudge asks the session to resolve it — and to ignore the
-  nudge if the branch has no open PR at all. It asks for the **URL**, not the
-  number: resolved there it is resolved against the repo just pushed to, and it
-  pins the watcher to that repo for the whole watch. A PR created earlier and
-  pushed to later still gets a (branch-scoped) nudge.
-- **The watcher needs an authenticated `gh`.** It separates *permanent*
-  failures (no credentials at all, an unresolvable PR) — which exit with an
-  `error` event at once — from *transient* ones (a network blip, a 5xx, rate
-  limiting), which it retries with backoff for `PR_SENTINEL_GH_RETRY_HORIZON`
-  seconds (default 15 min) before giving up. A brief GitHub API hiccup no
-  longer wakes the session; the gap is noted on the task's stderr, not the wake
-  payload.
-- **An expired token takes the retry horizon to report, not an instant.** Only
-  a total absence of credentials is treated as immediately permanent, because
-  that is the one auth answer `gh` gives without a network round-trip — with the
-  network down it reports a valid token as invalid. So a revoked token is
-  retried like any other transient failure first; the give-up report names auth
-  when `gh auth status` was failing alongside the query.
-- **ANSI stripping is best-effort.** It removes the common CSI escape family;
-  exotic terminal sequences may survive. The size cap and the human merge gate
-  remain.
-- **Required-vs-optional checks** aren't distinguished — any failing/cancelled
-  check triggers `check_failure` unless its workflow run concluded `success`.
+- **The nudge is advisory.** A `PostToolUse` hook can't force a tool call; if the session ignores the nudge, no watcher starts.
+  The **Stop-hook backstop** closes this gap — it blocks the stop once if the turn ends with an unwatched open PR — but it too is best-effort: it fails open on any uncertainty (no PR resolvable, unreadable transcript) and never blocks twice.
+- **Success detection is heuristic on the push path.** The hook infers a failed push from output text (`fatal:`, `! [rejected]`, `error:`, `Everything up-to-date`).
+  An unusual success string could be misread as failure (nudge skipped) — never the reverse in a way that grants authority.
+  A `gh pr create` doesn't rest on it: it nudges only when the output names a PR URL, so no unrecognised failure can produce a nudge for a PR that doesn't exist.
+  The cost is that a create printing a URL the hook can't parse — anything but `https://github.com/<owner>/<repo>/pull/<n>` — goes unnudged, and a later push to the branch is what brings the nudge back.
+  The Stop backstop does not rest on that parse alone: a correlated `pr-link`, and the create's own redirected output file, resolve the PR the transcript never showed — so the two don't fall silent together.
+- **`git push` without a PR URL** can't resolve the PR locally (the hook makes no network call), so the nudge asks the session to resolve it — and to ignore the nudge if the branch has no open PR at all.
+  It asks for the **URL**, not the number: resolved there it is resolved against the repo just pushed to, and it pins the watcher to that repo for the whole watch.
+  A PR created earlier and pushed to later still gets a (branch-scoped) nudge.
+- **The watcher needs an authenticated `gh`.** It separates *permanent* failures (no credentials at all, an unresolvable PR) — which exit with an `error` event at once — from *transient* ones (a network blip, a 5xx, rate limiting), which it retries with backoff for `PR_SENTINEL_GH_RETRY_HORIZON` seconds (default 15 min) before giving up.
+  A brief GitHub API hiccup no longer wakes the session; the gap is noted on the task's stderr, not the wake payload.
+- **An expired token takes the retry horizon to report, not an instant.** Only a total absence of credentials is treated as immediately permanent, because that is the one auth answer `gh` gives without a network round-trip — with the network down it reports a valid token as invalid.
+  So a revoked token is retried like any other transient failure first; the give-up report names auth when `gh auth status` was failing alongside the query.
+- **ANSI stripping is best-effort.** It removes the common CSI escape family; exotic terminal sequences may survive.
+  The size cap and the human merge gate remain.
+- **Required-vs-optional checks** aren't distinguished — any failing/cancelled check triggers `check_failure` unless its workflow run concluded `success`.
   This errs toward waking you.
-- **An advisory job only stays quiet if it shares a run with passing jobs.**
-  The `continue-on-error` suppression reads the *run* conclusion, so a job
-  marked advisory inside a workflow that otherwise passes is absorbed. Put that
-  job in a workflow file of its own and the run really does conclude `failure`
-  — GitHub offers nothing to distinguish it, and it wakes you.
-- **Dequeue detection needs the same watcher run to have seen the PR queued.**
-  Queue membership has no before/after outside the run's own memory, so a
-  watcher launched after an eviction reports nothing about it (the
-  `PR_SENTINEL_WATCH_UNTIL=closed` conflict path still catches the common,
-  branch-dirtying eviction). And if the membership query fails — say a token
-  that cannot run GraphQL — queue tracking disables itself and the watcher
-  behaves exactly as it did before the feature (see
-  [Merge queues](#merge-queues)). The same token can't name who removed the PR
-  either, so a `dequeued` report from a partially-failing query names both
-  possible causes instead of one.
-- **An inherited failure is matched by workflow, not by check.** The base
-  comparison asks whether the *workflow* is red on the base, so a workflow whose
-  jobs fail for one reason on `main` and a different reason on the PR reads as
-  inherited. It errs toward not sending N sessions after the same fix; the knob
-  turns it off (see [Failures inherited from the base
-  branch](#failures-inherited-from-the-base-branch)).
-- **A `blocked` report can't name the requirement.** The watcher doesn't read
-  branch protection, so an unregistered required check and an outstanding
-  approval produce the same event (see [Green is not the same as
-  ready](#green-is-not-the-same-as-ready)). It errs toward telling you the PR
-  isn't ready rather than guessing why.
+- **An advisory job only stays quiet if it shares a run with passing jobs.** The `continue-on-error` suppression reads the *run* conclusion, so a job marked advisory inside a workflow that otherwise passes is absorbed.
+  Put that job in a workflow file of its own and the run really does conclude `failure` — GitHub offers nothing to distinguish it, and it wakes you.
+- **Dequeue detection needs the same watcher run to have seen the PR queued.** Queue membership has no before/after outside the run's own memory, so a watcher launched after an eviction reports nothing about it (the `PR_SENTINEL_WATCH_UNTIL=closed` conflict path still catches the common, branch-dirtying eviction).
+  And if the membership query fails — say a token that cannot run GraphQL — queue tracking disables itself and the watcher behaves exactly as it did before the feature (see [Merge queues](#merge-queues)).
+  The same token can't name who removed the PR either, so a `dequeued` report from a partially-failing query names both possible causes instead of one.
+- **An inherited failure is matched by workflow, not by check.** The base comparison asks whether the *workflow* is red on the base, so a workflow whose jobs fail for one reason on `main` and a different reason on the PR reads as inherited.
+  It errs toward not sending N sessions after the same fix; the knob turns it off (see [Failures inherited from the base branch](#failures-inherited-from-the-base-branch)).
+- **A `blocked` report can't name the requirement.** The watcher doesn't read branch protection, so an unregistered required check and an outstanding approval produce the same event (see [Green is not the same as ready](#green-is-not-the-same-as-ready)).
+  It errs toward telling you the PR isn't ready rather than guessing why.
 
 ## Roadmap
 
@@ -1361,62 +892,37 @@ Everything scaffolded in [`docs/ROADMAP.md`](docs/ROADMAP.md) has shipped.
 
 Shipped since the MVP:
 
-- **Friction/activity report** — `/pr-sentinel-friction-report` and a backing
-  read-only analyzer rank how often the nudge fired, whether a watcher followed,
-  which watcher events dominated, and how the PreToolUse guard decided (see
-  [Activity report](#activity-report)).
-- **PreToolUse foreground-poll deny** — denies foreground `gh pr checks
-  --watch`, `gh run watch`, and `while/until … sleep` loops around `gh`, with a
-  fix-it pointing at the watcher; backgrounded calls pass, and
-  `PR_SENTINEL_OVERRIDE=<reason>` allows a one-off (see the
-  [PreToolUse table](#what-it-does)).
-- **PreToolUse watcher-launch auto-allow** — auto-approves the plugin's own
-  `bash …/pr-sentinel-watch.sh <PR>` (airtight, realpath-matched) so it isn't
-  prompted by the base Bash permission on every launch; `PR_SENTINEL_AUTOALLOW=0`
-  keeps the prompt (see the [PreToolUse table](#what-it-does)).
-- **Stop-hook backstop** — blocks the stop **once** if the turn ends with an
-  open PR it opened, no live watcher, and the PR not handed off — nudging the
-  session to launch the watcher (see the [Stop table](#what-it-does)).
-- **Desktop auto-fix migration helper** — `/pr-sentinel-migrate-autofix` and a
-  backing script disable the desktop "Auto-fix CI & address comments" toggle on
-  existing sessions when you switch to pr-sentinel (see
-  [Migrating from Desktop auto-fix](#migrating-from-desktop-auto-fix)).
+- **Friction/activity report** — `/pr-sentinel-friction-report` and a backing read-only analyzer rank how often the nudge fired, whether a watcher followed, which watcher events dominated, and how the PreToolUse guard decided (see [Activity report](#activity-report)).
+- **PreToolUse foreground-poll deny** — denies foreground `gh pr checks --watch`, `gh run watch`, and `while/until … sleep` loops around `gh`, with a fix-it pointing at the watcher; backgrounded calls pass, and `PR_SENTINEL_OVERRIDE=<reason>` allows a one-off (see the [PreToolUse table](#what-it-does)).
+- **PreToolUse watcher-launch auto-allow** — auto-approves the plugin's own `bash …/pr-sentinel-watch.sh <PR>` (airtight, realpath-matched) so it isn't prompted by the base Bash permission on every launch; `PR_SENTINEL_AUTOALLOW=0` keeps the prompt (see the [PreToolUse table](#what-it-does)).
+- **Stop-hook backstop** — blocks the stop **once** if the turn ends with an open PR it opened, no live watcher, and the PR not handed off — nudging the session to launch the watcher (see the [Stop table](#what-it-does)).
+- **Desktop auto-fix migration helper** — `/pr-sentinel-migrate-autofix` and a backing script disable the desktop "Auto-fix CI & address comments" toggle on existing sessions when you switch to pr-sentinel (see [Migrating from Desktop auto-fix](#migrating-from-desktop-auto-fix)).
 
 ## Companion plugins
 
-pr-sentinel watches the **post-PR CI/merge** axis. Three sibling plugins guard
-different axes with the same secure-by-default design, and all run side by side:
+pr-sentinel watches the **post-PR CI/merge** axis.
+Three sibling plugins guard different axes with the same secure-by-default design, and all run side by side:
 
-- [**workspace-guard**](https://github.com/karlkfi/claude-bouncer/tree/main/plugins/workspace-guard) —
-  the **filesystem** boundary.
-- [**prod-guard**](https://github.com/karlkfi/claude-bouncer/tree/main/plugins/prod-guard) — the
-  **infrastructure blast-radius** boundary.
-- [**branch-guard**](https://github.com/karlkfi/claude-bouncer/tree/main/plugins/branch-guard) — the
-  **git history** boundary (pauses pushes to `main`, blocks force-push — the
-  guard that makes "merge, not rebase" matter).
+- [**workspace-guard**](https://github.com/karlkfi/claude-bouncer/tree/main/plugins/workspace-guard) — the **filesystem** boundary.
+- [**prod-guard**](https://github.com/karlkfi/claude-bouncer/tree/main/plugins/prod-guard) — the **infrastructure blast-radius** boundary.
+- [**branch-guard**](https://github.com/karlkfi/claude-bouncer/tree/main/plugins/branch-guard) — the **git history** boundary (pauses pushes to `main`, blocks force-push — the guard that makes "merge, not rebase" matter).
 
 ## Design
 
-For the rationale — why a background-task wake, why rebase heals conflicts by
-default (and when to switch to merge), why the comment channel is excluded, and
-what alternatives were rejected — see [`docs/DESIGN.md`](docs/DESIGN.md).
+For the rationale — why a background-task wake, why rebase heals conflicts by default (and when to switch to merge), why the comment channel is excluded, and what alternatives were rejected — see [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## Privacy
 
-The hooks run entirely on your machine with one exception: the PreToolUse
-[overlap check](#overlapping-pull-requests) asks GitHub which lines the open PRs
-change, and only when you run a `gh pr create`. The **watcher** queries GitHub
-through your already-authenticated `gh` CLI (check status and merge state only —
-never comments or the PR body). Neither reads the PR body, comments, or titles,
-and nothing writes to disk. The [activity report](#activity-report) is
-read-only and local: it re-reads transcripts already on your disk and makes
-no network call. See [`PRIVACY.md`](PRIVACY.md) for the full policy.
+The hooks run entirely on your machine with one exception: the PreToolUse [overlap check](#overlapping-pull-requests) asks GitHub which lines the open PRs change, and only when you run a `gh pr create`.
+The **watcher** queries GitHub through your already-authenticated `gh` CLI (check status and merge state only — never comments or the PR body).
+Neither reads the PR body, comments, or titles, and nothing writes to disk.
+The [activity report](#activity-report) is read-only and local: it re-reads transcripts already on your disk and makes no network call.
+See [`PRIVACY.md`](PRIVACY.md) for the full policy.
 
 ## Contributing
 
-Bugs, ideas, and questions go in
-[GitHub Issues](https://github.com/karlkfi/claude-pr-sentinel/issues). For the
-development backlog, see [`docs/queue/`](docs/queue/README.md).
+Bugs, ideas, and questions go in [GitHub Issues](https://github.com/karlkfi/claude-pr-sentinel/issues).
+For the development backlog, see [`docs/queue/`](docs/queue/README.md).
 
 ## License
 
