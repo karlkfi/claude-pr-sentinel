@@ -57,6 +57,18 @@ def bash_payload(command, background=False, transcript=None, tool_use_id=None):
     return payload
 
 
+def monitor_payload(command, transcript=None):
+    """A Monitor call as Claude Code hands it to a matcher that names Monitor.
+    Under a bare `Bash` matcher it arrives as `Bash` with only the command and
+    description (seen on 2.1.317 and later), so `hooks.json` has to name it."""
+    payload = {"hook_event_name": "PreToolUse", "tool_name": "Monitor",
+               "tool_input": {"command": command, "description": "d",
+                              "timeout_ms": 1800000}}
+    if transcript:
+        payload["transcript_path"] = transcript
+    return payload
+
+
 def transcript_with_live_watcher(pr, tmpdir, task_id="bk1", completed=False,
                                  tool_id="toolu_w", started=True):
     """A synthetic transcript in which this session launched a watcher on `pr`
@@ -410,6 +422,12 @@ class GuardEndToEnd(unittest.TestCase):
         reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
         self.assertIn("no PR to watch", reason)
         self.assertIn("run_in_background", reason)
+        # Bounded, and not "this same command": foreground-guard refuses an
+        # unbounded watch or a poll loop in the background too.
+        self.assertIn("timeout <seconds> gh run watch <run-id> --exit-status",
+                      reason)
+        self.assertIn("Monitor", reason)
+        self.assertNotIn("re-run this same command", reason)
 
     def test_deny_names_the_inline_prefix_form(self):
         out, _, _ = run_guard(bash_payload("gh run watch 5"))
@@ -493,6 +511,47 @@ class BackgroundedCallsEndToEnd(unittest.TestCase):
         out, _, _ = run_guard(payload)
         self.assertEqual(json.loads(out)["hookSpecificOutput"]
                          ["permissionDecision"], "deny")
+
+
+class MonitorCallsEndToEnd(unittest.TestCase):
+    """A Monitor runs off the main thread and reports on its own, so it is
+    detached like a backgrounded Bash call and loses only the poll deny."""
+
+    POLL = ('while true; do s=$(gh run list --repo owner/repo --commit abc123 '
+            '--json status --jq ".[].status" 2>/dev/null || true); '
+            'if ! printf "%s\\n" "$s" | grep -qv completed; then '
+            'printf "%s\\n" "$s"; break; fi; sleep 30; done')
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_monitor_poll_is_not_denied(self):
+        out, _, rc = run_guard(monitor_payload(self.POLL))
+        self.assertEqual(out.strip(), "")
+        self.assertEqual(rc, 0)
+
+    def test_the_same_loop_in_a_foreground_bash_call_still_denies(self):
+        out, _, _ = run_guard(bash_payload(self.POLL))
+        self.assertEqual(json.loads(out)["hookSpecificOutput"]
+                         ["permissionDecision"], "deny")
+
+    def test_duplicate_watcher_in_a_monitor_is_still_denied(self):
+        t = transcript_with_live_watcher("7", self.tmp.name)
+        out, _, _ = run_guard(
+            monitor_payload(f'bash "{WATCHER}" 7', transcript=t),
+            env={"CLAUDE_PLUGIN_ROOT": str(REPO)})
+        self.assertTrue(out.strip(), "expected a decision, got silence")
+        self.assertEqual(json.loads(out)["hookSpecificOutput"]
+                         ["permissionDecision"], "deny")
+
+    def test_websocket_monitor_has_no_command_and_defers(self):
+        out, _, rc = run_guard({
+            "hook_event_name": "PreToolUse", "tool_name": "Monitor",
+            "tool_input": {"ws": {"url": "wss://example.com/s"},
+                           "description": "d", "timeout_ms": 1000}})
+        self.assertEqual(out.strip(), "")
+        self.assertEqual(rc, 0)
 
 
 class AutoAllowEndToEnd(unittest.TestCase):

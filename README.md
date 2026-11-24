@@ -75,7 +75,7 @@ Unlike the advisory nudge, a deny is *enforced* — the command never runs.
 | `gh pr checks --watch` (or `-w`) | **deny** — launch the background watcher instead |
 | `gh run watch` | **deny** — launch the background watcher instead |
 | `while …; do … sleep …; done` / `until …; do … sleep …; done` **that runs `gh`** | **deny** — hand-rolled poll loop |
-| any of the above submitted with `run_in_background` | allow (deferred — a backgrounded call can't block the session) |
+| any of the above submitted with `run_in_background`, or as a `Monitor` script | allow (deferred — neither can block the session) |
 | any of the above with an inline `PR_SENTINEL_OVERRIDE=<reason>` prefix (or the variable set in the session env) | **allow** (deferred to normal permissions) |
 | `bash …/pr-sentinel-watch.sh N` (the plugin's own watcher), optionally with leading `PR_SENTINEL_*=…` assignments | **allow** — auto-approved (no base Bash prompt), gated by `PR_SENTINEL_AUTOALLOW` |
 | the same launch with any **other** leading assignment (`BASH_ENV=…`, `PATH=…`, `GH_TOKEN=…`) | allow (deferred — not a recognised shape, so it takes the base Bash prompt) |
@@ -88,7 +88,7 @@ Unlike the advisory nudge, a deny is *enforced* — the command never runs.
 | `gh pr create` sharing a *file* with an open PR, but edits 7+ lines apart | allow (a shared file is not a finding — the comparison is line ranges) |
 | `gh pr create` sharing a file with an open PR whose diff could not be fetched (the fetch failed, or three were already fetched) | allow — a shared path alone never denies; it is listed, marked not counted, only in a denial another PR justifies |
 | a command that shlex cannot lex — a heredoc body holding an apostrophe — with a `gh pr create` on a line of its own | allow, with a **report** — the overlap check runs on a line-by-line parse and says what it found, colliding PR or none, but never denies on a parse it could not make whole |
-| the same create submitted with `run_in_background` | **deny** — backgrounding still opens the PR, so it is not the fix here |
+| the same create submitted with `run_in_background`, or as a `Monitor` script | **deny** — backgrounding still opens the PR, so it is not the fix here |
 | `gh pr create --help` · `gh pr list` · `gh pr view` · `gh pr edit` | allow (opens no PR) |
 | any create, with `PR_SENTINEL_OVERLAP_ENABLED=false` | allow (check off — and no GitHub query is made) |
 | `gh pr checks` · `gh run view` | allow (not a blocking poll — deferred to normal permissions) |
@@ -844,8 +844,9 @@ This project uses pr-sentinel. After opening a PR or pushing a PR branch:
   It sleeps and wakes you only when a check fails, a conflict appears, the PR
   goes green, the merge stays blocked, or the PR closes.
 - **For a workflow run with no PR** — a release tag build — there's nothing for
-  the watcher to attach to. Run `gh run watch <run-id> --exit-status` as a
-  background task instead; backgrounded calls aren't refused.
+  the watcher to attach to. Run
+  `timeout <seconds> gh run watch <run-id> --exit-status` as a background task
+  instead, or give a polling loop to the Monitor tool; neither is refused.
 - **When it wakes you**, act on the single reported event, push, and relaunch
   the watcher. Heal conflicts the way the report says: by default, **rebase onto
   the base** (`git rebase origin/<base>`, then `git push --force-with-lease`);
@@ -893,7 +894,7 @@ Everything scaffolded in [`docs/ROADMAP.md`](docs/ROADMAP.md) has shipped.
 Shipped since the MVP:
 
 - **Friction/activity report** — `/pr-sentinel-friction-report` and a backing read-only analyzer rank how often the nudge fired, whether a watcher followed, which watcher events dominated, and how the PreToolUse guard decided (see [Activity report](#activity-report)).
-- **PreToolUse foreground-poll deny** — denies foreground `gh pr checks --watch`, `gh run watch`, and `while/until … sleep` loops around `gh`, with a fix-it pointing at the watcher; backgrounded calls pass, and `PR_SENTINEL_OVERRIDE=<reason>` allows a one-off (see the [PreToolUse table](#what-it-does)).
+- **PreToolUse foreground-poll deny** — denies foreground `gh pr checks --watch`, `gh run watch`, and `while/until … sleep` loops around `gh`, with a fix-it pointing at the watcher; backgrounded calls and `Monitor` scripts pass, and `PR_SENTINEL_OVERRIDE=<reason>` allows a one-off (see the [PreToolUse table](#what-it-does)).
 - **PreToolUse watcher-launch auto-allow** — auto-approves the plugin's own `bash …/pr-sentinel-watch.sh <PR>` (airtight, realpath-matched) so it isn't prompted by the base Bash permission on every launch; `PR_SENTINEL_AUTOALLOW=0` keeps the prompt (see the [PreToolUse table](#what-it-does)).
 - **Stop-hook backstop** — blocks the stop **once** if the turn ends with an open PR it opened, no live watcher, and the PR not handed off — nudging the session to launch the watcher (see the [Stop table](#what-it-does)).
 - **Desktop auto-fix migration helper** — `/pr-sentinel-migrate-autofix` and a backing script disable the desktop "Auto-fix CI & address comments" toggle on existing sessions when you switch to pr-sentinel (see [Migrating from Desktop auto-fix](#migrating-from-desktop-auto-fix)).

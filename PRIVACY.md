@@ -35,8 +35,9 @@ It ships as one bash watcher and a few stdlib-only Python scripts (the hook entr
 
 ## The PreToolUse handler (`scripts/pr_sentinel_guard.py`)
 
+- Runs before a Bash call and a Monitor call.
 - Denies a Bash command that would foreground-poll continuous integration (CI), auto-approves the plugin's own watcher launch, and denies a `gh pr create` that would open a second pull request over lines an open one already changes.
-- Receives, via standard input, the Bash command Claude Code is about to run and your working directory, plus `CLAUDE_PLUGIN_ROOT` and the optional `PR_SENTINEL_*` configuration values (via environment).
+- Receives, via standard input, the Bash or Monitor command Claude Code is about to run and your working directory, plus `CLAUDE_PLUGIN_ROOT` and the optional `PR_SENTINEL_*` configuration values (via environment).
   It inspects the command string only — never the command's output.
 - Reads your **session transcript** for the same narrow fact the PostToolUse hook reads it for — which watchers are still running — so it can refuse a duplicate watcher on a PR already covered.
 - **Runs locally for every decision except the overlap check.** The poll deny, the auto-allow and the duplicate deny make no network call at all.
