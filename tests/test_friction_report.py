@@ -140,6 +140,9 @@ def watcher_event_names():
     return set(re.findall(r"^\s*report_header\s+([a-z_]+)\s*$", text, re.M))
 
 
+PR_41_URL = "https://github.com/o/r/pull/41"
+
+
 def report_text(event, pr, extra="State: OPEN"):
     """A watcher report as it reaches the transcript."""
     return "PR-SENTINEL EVENT: %s\nPR: %s\n%s" % (event, pr, extra)
@@ -187,6 +190,17 @@ def rec_bash(command, ts=TS, cwd=CWD, tool_use_id="toolu_bash",
                       command=command, background=background)
 
 
+def rec_monitor(command, ts=TS, cwd=CWD, tool_use_id="toolu_monitor"):
+    """A Monitor tool_use, whose input has no `run_in_background`."""
+    rec = rec_launch(None, ts=ts, cwd=cwd, tool_use_id=tool_use_id,
+                     command=command)
+    block = rec["message"]["content"][0]
+    block["name"] = "Monitor"
+    block["input"] = {"command": command, "description": "synthetic",
+                      "timeout_ms": 600000, "persistent": False}
+    return rec
+
+
 def rec_result(text, ts=TS, cwd=CWD, tool_use_id="toolu_result"):
     return {"type": "user", "timestamp": ts, "cwd": cwd,
             "message": {"role": "user", "content": [
@@ -195,7 +209,7 @@ def rec_result(text, ts=TS, cwd=CWD, tool_use_id="toolu_result"):
 
 
 def rec_guard_allow(reason=None, ts=TS, cwd=CWD, tool_use_id="toolu_guard",
-                    atype="hook_success", stdout=None):
+                    atype="hook_success", stdout=None, tool="Bash"):
     """A PreToolUse attachment carrying the guard's verdict."""
     if stdout is None:
         stdout = json.dumps({"hookSpecificOutput": {
@@ -204,10 +218,15 @@ def rec_guard_allow(reason=None, ts=TS, cwd=CWD, tool_use_id="toolu_guard",
                 reason if reason is not None else guard.build_allow_reason()}})
     return {"type": "attachment", "timestamp": ts, "cwd": cwd,
             "attachment": {
-                "type": atype, "hookName": "PreToolUse:Bash",
+                "type": atype, "hookName": "PreToolUse:" + tool,
                 "command": 'python3 "/plugins/pr-sentinel/scripts/'
                            'pr-sentinel-guard.py"',
                 "toolUseID": tool_use_id, "stdout": stdout}}
+
+
+def hook_error(reason, tool="Bash"):
+    """A deny reason as Claude Code 2.1.281 and later hand it back."""
+    return "PreToolUse:%s hook error: %s" % (tool, reason)
 
 
 def rec_guard_deny(reason, ts=TS, cwd=CWD, tool_use_id="toolu_bash"):
@@ -215,6 +234,13 @@ def rec_guard_deny(reason, ts=TS, cwd=CWD, tool_use_id="toolu_bash"):
     rec = rec_result(reason, ts=ts, cwd=cwd, tool_use_id=tool_use_id)
     rec["message"]["content"][0]["is_error"] = True
     return rec
+
+
+def rec_blob(rec):
+    """`rec` as an `api-request-blob` repeats it: the same message, and no
+    `timestamp` or `cwd`."""
+    return {"type": "api-request-blob", "sessionId": "synthetic",
+            "hash": "synthetic", "message": rec["message"]}
 
 
 def rec_stop_block(reason, ts=TS, cwd=CWD):
@@ -328,6 +354,12 @@ class TestLaunches(TranscriptCase):
         self.assertEqual(1, r["launches"])
         self.assertEqual(0, r["launches_foreground"])
 
+    def test_a_monitor_launch_is_not_a_foreground_launch(self):
+        self.write([rec_monitor('bash "%s" 41' % WATCHER_PATH)])
+        r = self.report()
+        self.assertEqual(1, r["launches"])
+        self.assertEqual(0, r["launches_foreground"])
+
     def test_flags_a_foreground_launch(self):
         self.write([rec_launch("41", background=False)])
         r = self.report()
@@ -373,6 +405,44 @@ class TestEvents(TranscriptCase):
         self.assertEqual(1, r["events_total"])
         self.assertEqual(1, r["events"]["check_failure"])
         self.assertEqual(1, r["kinds"]["work"])
+
+    def test_counts_a_report_naming_the_pr_url(self):
+        """A watcher echoes its launch argument, and both nudges launch it with
+        the PR URL."""
+        text = report_text("check_failure", PR_41_URL)
+        for shape in (text, numbered(report_text("ready", PR_41_URL + "/"))):
+            self.write([rec_result(shape)])
+        r = self.report()
+        self.assertEqual({"check_failure": 1, "ready": 1}, dict(r["events"]))
+
+    def test_both_pr_forms_resolve_to_the_number(self):
+        for target in ("41", PR_41_URL):
+            with self.subTest(target=target):
+                (_, pr, _), = fr.find_reports(report_text("ready", target))
+                self.assertEqual("41", pr)
+
+    def test_a_url_that_is_not_a_pull_request_is_not_a_report(self):
+        for target in ("https://github.com/o/r/issues/41",
+                       "https://github.com/o/r/pull/<n>",
+                       "https://example.com/o/r/pull/41"):
+            with self.subTest(target=target):
+                self.assertEqual(
+                    [], list(fr.find_reports(report_text("ready", target))))
+
+    def test_one_pr_named_both_ways_is_two_runs(self):
+        """One watcher prints one form, so the two forms are two launches."""
+        self.write([rec_result(report_text("ready", "41"), tool_use_id="a"),
+                    rec_result(report_text("ready", PR_41_URL),
+                               tool_use_id="b")])
+        self.assertEqual(2, self.report()["events_total"])
+
+    def test_one_number_in_two_repositories_is_two_prs(self):
+        self.write([rec_result(report_text("ready", PR_41_URL),
+                               tool_use_id="a"),
+                    rec_result(report_text(
+                        "ready", "https://github.com/o/other/pull/41"),
+                        tool_use_id="b")])
+        self.assertEqual(2, self.report()["events_total"])
 
     def test_counts_a_line_numbered_report(self):
         """A backgrounded watcher's report reaches the session as a task-output
@@ -422,6 +492,20 @@ class TestEvents(TranscriptCase):
                   'State: OPEN"""\n')
         self.write([rec_result(numbered(source))])
         self.assertEqual(0, self.report()["events_total"])
+
+    def test_reading_a_url_report_twice_counts_once(self):
+        text = report_text("ready", PR_41_URL)
+        self.write([rec_result(text, tool_use_id="a"),
+                    rec_result(numbered(text), tool_use_id="b")])
+        self.assertEqual(1, self.report()["events_total"])
+
+    def test_an_api_request_blob_is_not_read(self):
+        """It repeats a tool result with no timestamp, so counting one also
+        lets it past `--since`."""
+        self.write([rec_blob(rec_result(report_text("ready", "41")))])
+        for since in ("all", "2026-06-01"):
+            with self.subTest(since=since):
+                self.assertEqual(0, self.report(since=since)["events_total"])
 
     def test_reading_the_same_output_twice_counts_once(self):
         """352 of 2054 raw matches in the local corpus, 17%, are the same file
@@ -535,8 +619,7 @@ class TestGuardContract(unittest.TestCase):
 
 class TestOpenerConvention(unittest.TestCase):
     """`pr-sentinel: ` opens every string this plugin hands back, not just the
-    guard's reasons — the rule `docs/DESIGN.md` states and this report's
-    `DENY_TEXT` reads. A deny leaves no other trace, so a branch that reworded
+    guard's reasons — the rule `docs/DESIGN.md` states as the report's `OPENER`. A deny leaves no other trace, so a branch that reworded
     past the opener would go uncounted rather than miscounted, here and in
     foreground-guard's cross-plugin report."""
 
@@ -547,7 +630,7 @@ class TestOpenerConvention(unittest.TestCase):
             for n, text in enumerate(texts):
                 with self.subTest(builder=name, variant=n):
                     self.assertRegex(
-                        text, fr.DENY_TEXT,
+                        text, fr.OPENER,
                         "%s no longer opens with the plugin name" % name)
 
     def test_every_hook_message_is_exercised(self):
@@ -568,8 +651,25 @@ class TestOpenerConvention(unittest.TestCase):
         from a green test, so prove it rejects a message without the opener.
         The second case pins the `\\A` anchor: a per-line one would accept an
         opener buried under a preamble, which is not what the report recovers."""
-        self.assertNotRegex("refusing to foreground-poll CI", fr.DENY_TEXT)
-        self.assertNotRegex("preamble\npr-sentinel: buried", fr.DENY_TEXT)
+        for text in ("refusing to foreground-poll CI",
+                     "preamble\npr-sentinel: buried"):
+            with self.subTest(text=text):
+                self.assertNotRegex(text, fr.OPENER)
+                self.assertNotRegex(text, fr.DENY_TEXT)
+
+    def test_a_harness_prefix_is_not_the_opener(self):
+        """Claude Code writes these prefixes. A message carrying one itself has
+        lost its opener, even though a deny behind one still has to match."""
+        for text in ("Error: pr-sentinel: x", hook_error("pr-sentinel: x")):
+            with self.subTest(text=text):
+                self.assertRegex(text, fr.DENY_TEXT)
+                self.assertNotRegex(text, fr.OPENER)
+
+    def test_the_report_reads_the_tools_the_guard_is_wired_to(self):
+        hooks = json.loads((REPO / "hooks" / "hooks.json").read_text(
+            encoding="utf-8"))["hooks"]["PreToolUse"]
+        wired = {t for h in hooks for t in h["matcher"].split("|")}
+        self.assertEqual(wired, set(fr.GUARD_TOOLS))
 
 
 class TestGuardDecisions(TranscriptCase):
@@ -600,8 +700,64 @@ class TestGuardDecisions(TranscriptCase):
                                    + GUARD_BUILDERS["build_reason"]())])
         self.assertEqual(1, self.report()["denies"])
 
-    def test_deny_with_no_bash_call_behind_it_is_ignored(self):
-        """Nothing joins it to a Bash command, so it is not this guard's."""
+    def test_counts_a_deny_behind_the_hook_error_prefix(self):
+        for name, build in sorted(GUARD_BUILDERS.items()):
+            if name == "build_allow_reason":
+                continue
+            with self.subTest(builder=name):
+                self.write([rec_bash("synthetic"),
+                            rec_guard_deny(hook_error(build()))])
+        r = self.report()
+        self.assertEqual({"deny": 3}, dict(r["guard_verdicts"]))
+        self.assertEqual({"poll": 1, "duplicate": 1, "overlap": 1},
+                         dict(r["guard_categories"]))
+
+    def test_counts_a_monitor_deny(self):
+        self.write([rec_monitor("gh run watch 9"),
+                    rec_guard_deny(hook_error(GUARD_BUILDERS["build_reason"](),
+                                              tool="Monitor"),
+                                   tool_use_id="toolu_monitor")])
+        r = self.report()
+        self.assertEqual({"deny": 1}, dict(r["guard_verdicts"]))
+        self.assertEqual({"poll": 1}, dict(r["guard_categories"]))
+
+    def test_counts_a_monitor_auto_allow(self):
+        self.write([rec_guard_allow(tool="Monitor")])
+        self.assertEqual({"auto-allow": 1},
+                         dict(self.report()["guard_categories"]))
+
+    def test_another_guards_hook_error_is_ignored(self):
+        self.write([rec_bash("cat f"),
+                    rec_guard_deny(hook_error("other-guard: pr-sentinel: x"))])
+        self.assertEqual(0, self.report()["guard_total"])
+
+    def test_a_deny_on_a_tool_the_guard_is_not_wired_to_is_ignored(self):
+        call = rec_bash("gh run watch 9")
+        call["message"]["content"][0]["name"] = "Read"
+        self.write([call, rec_guard_deny(GUARD_BUILDERS["build_reason"]())])
+        self.assertEqual(0, self.report()["guard_total"])
+
+    def test_one_deny_recorded_twice_counts_once(self):
+        """Both records repeat, so the second result still has a call ahead of
+        it to join to."""
+        call = rec_bash("gh run watch 9")
+        deny = rec_guard_deny(hook_error(GUARD_BUILDERS["build_reason"]()))
+        self.write([call, deny, call, deny])
+        self.assertEqual(1, self.report()["denies"])
+
+    def test_an_api_request_blob_repeating_a_deny_is_not_read(self):
+        """The call precedes the blob, so the join would succeed: the record's
+        type is all that keeps the repeat out."""
+        old = "2026-01-01T00:00:00.000Z"
+        call = rec_bash("gh run watch 9", ts=old)
+        self.write([call, rec_blob(rec_guard_deny(
+            hook_error(GUARD_BUILDERS["build_reason"]())))])
+        for since in ("all", "2026-06-01"):
+            with self.subTest(since=since):
+                self.assertEqual(0, self.report(since=since)["guard_total"])
+
+    def test_deny_with_no_call_behind_it_is_ignored(self):
+        """Nothing joins it to a command, so it is not this guard's."""
         self.write([rec_guard_deny(GUARD_BUILDERS["build_reason"](),
                                    tool_use_id="toolu_nothing")])
         self.assertEqual(0, self.report()["guard_total"])
@@ -703,6 +859,10 @@ class TestOverrideBranches(TranscriptCase):
         self.assertEqual({"none": 1}, self.split(
             rec_bash("PR_SENTINEL_OVERRIDE=why gh run watch 9",
                      background=True)))
+
+    def test_a_monitor_poll_reached_no_deny(self):
+        self.assertEqual({"none": 1}, self.split(
+            rec_monitor("PR_SENTINEL_OVERRIDE=why gh run watch 9")))
 
     def test_a_create_is_the_overlap_branch(self):
         self.assertEqual({"overlap": 1}, self.split(
@@ -811,6 +971,20 @@ class TestFilters(TranscriptCase):
                                tool_use_id="c")])
         r = self.report()
         self.assertEqual([("alpha", 2), ("beta", 1)], r["repos"].most_common())
+
+    def test_a_worktree_is_ranked_under_its_repository(self):
+        root = "/synthetic/workspace/alpha"
+        self.write([rec_result(report_text("ready", str(n)), cwd=cwd,
+                               tool_use_id=str(n))
+                    for n, cwd in enumerate((
+                        root,
+                        root + "/.claude/worktrees/brave-name-1a2b3c",
+                        root + "/.claude/worktrees/calm-name-4d5e6f/sub"), 1)])
+        self.assertEqual([("alpha", 3)], self.report()["repos"].most_common())
+
+    def test_a_record_with_no_cwd_has_no_repository(self):
+        self.write([rec_result(report_text("ready", "41"), cwd="")])
+        self.assertEqual({"(unknown)": 1}, dict(self.report()["repos"]))
 
     def test_parse_since_rejects_garbage(self):
         with self.assertRaises(SystemExit):

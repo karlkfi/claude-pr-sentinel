@@ -589,6 +589,8 @@ This repo states only its own side of it. foreground-guard owns the cross-plugin
 
 The matcher is anchored at the start of the string (`\A`), not the start of a line.
 Nothing this plugin emits carries a preamble, so today the two agree; a per-line anchor would start accepting an opener buried under one, which is not what the report is recovering.
+Claude Code can put its own prefix ahead of the opener on a denied call: `Error: `, or `PreToolUse:<tool> hook error: ` in 2.1.281 and later.
+The report accepts both on a deny, and neither counts as the opener when the messages themselves are tested.
 
 The watcher's report sits outside the convention on purpose.
 It is a background task's stdout, which reaches the transcript whole, so it identifies itself with a `PR-SENTINEL EVENT:` header and needs no recovery key.
