@@ -1,6 +1,6 @@
 # Privacy Policy — pr-sentinel
 
-_Last updated: 2026-11-09_
+_Last updated: 2026-11-25_
 
 pr-sentinel is a Claude Code plugin that runs on your local machine.
 Its components have different data profiles, described honestly below: two hooks, a migration helper and an activity report that never leave your machine, one watcher that talks to GitHub, and one hook that asks GitHub a single narrow question before you open a pull request.
@@ -137,11 +137,11 @@ It ships as one bash watcher and a few stdlib-only Python scripts (the hook entr
 
 - Runs **entirely locally with no network access.** You invoke it manually (or via the `/pr-sentinel-friction-report` command) — it is not a hook and does not run on its own.
 - Reads your Claude Code **session transcripts** — every `*.jsonl` at any depth under `~/.claude/projects`, or under whatever `--transcripts` names — the records Claude Code already writes for every session.
-  From them it extracts only: the plugin's own nudges, the watcher launch commands, the watcher's own event reports, the Stop hook's block message, the PreToolUse guard's own decisions, each record's timestamp, and the working directory, which it reduces to a directory name for the per-repository ranking.
-- To count uses of the `PR_SENTINEL_OVERRIDE` escape hatch it also reads the **`Bash` commands** in the transcript, because a downgraded decision leaves no other trace.
+  From them it extracts only: the plugin's own nudges, the watcher launch commands, the watcher's own event reports, the Stop hook's block message, the PreToolUse guard's own decisions, each record's timestamp, and the working directory, which it reduces to the repository's directory name for the per-repository ranking.
+- To count uses of the `PR_SENTINEL_OVERRIDE` escape hatch it also reads the **`Bash` and `Monitor` commands** in the transcript, because a downgraded decision leaves no other trace.
   Only a command carrying that prefix is printed back, ranked and clipped, and the value of every other leading `NAME=VALUE` assignment on it is masked first — so a credential a session inlined is not echoed into the report.
 - It then **classifies** each of those commands by which deny branch it was headed for, by importing the PreToolUse guard's own predicates from `scripts/pr_sentinel_guard.py` and re-running them locally.
-  They read nothing but the command string and the call's `run_in_background` flag — both already in the transcript — so this adds no network call, no new file read, and nothing new to the output beyond a per-branch count.
+  They read nothing but the command string and the call's tool name and `run_in_background` flag — all already in the transcript — so this adds no network call, no new file read, and nothing new to the output beyond a per-branch count.
 - It does **not** read PR bodies, PR review comments, or issue comments, and it parses nothing else out of your transcripts — not your prompts, not the model's replies, not other tools' output.
 - **Writes nothing to disk** and sends nothing anywhere.
   It prints a summary to standard output, which stays in your terminal or your session.

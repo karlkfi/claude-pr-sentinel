@@ -28,14 +28,15 @@ noise as activity:
   nudge    an ``attachment`` of type ``hook_success`` whose ``hookName`` is
            ``PostToolUse:Bash`` and whose ``stdout`` parses to an
            ``additionalContext`` beginning with ``pr-sentinel:``.
-  launch   an ``assistant`` Bash ``tool_use`` whose command *invokes* the
-           watcher (``bash "<path>/pr-sentinel-watch.sh" <target>``). Matching
-           the bare filename instead counts every ``grep``, ``cat`` and
-           ``git diff`` that merely names the script: measured over the local
-           corpus, that reads 2558 launches where 2372 happened, and inflates
-           the foreground-launch count from 22 to 207.
+  launch   an ``assistant`` Bash or Monitor ``tool_use`` whose command
+           *invokes* the watcher (``bash "<path>/pr-sentinel-watch.sh"
+           <target>``). Matching the bare filename instead counts every
+           ``grep``, ``cat`` and ``git diff`` that merely names the script:
+           measured over the local corpus, that reads 2558 launches where 2372
+           happened, and inflates the foreground-launch count from 22 to 207.
   event    a watcher report inside a ``user`` ``tool_result`` — a line reading
-           ``PR-SENTINEL EVENT: <name>`` followed by its ``PR: <number>`` line.
+           ``PR-SENTINEL EVENT: <name>`` followed by its ``PR: <target>`` line,
+           which echoes the launch's own argument: a number or a PR URL.
   decision the PreToolUse guard's own verdict, which the transcript splits
            across two places — see ``GUARD_CATEGORY``.
 
@@ -46,7 +47,13 @@ over as a task-output file the session then reads (``Read``, ``cat``, or
 launch and 2047 do not. Reports are therefore matched wherever they surface and
 deduplicated per session on (event, PR, report body), which collapses the same
 file being read twice — 352 of those 2054, 17% — without merging two genuinely
-distinct runs.
+distinct runs. The body includes the ``PR:`` line, so one PR reported both as a
+number and as a URL counts twice: a watcher echoes one form for its whole life,
+so two forms are two launches.
+
+Records are read by ``type``. The ``api-request-blob`` records that newer
+transcripts hold repeat tool results without a ``timestamp``, so reading them
+would count each repeat and get it past ``--since``; nothing here does.
 
 The guard's decisions carry no rate, only counts. foreground-guard's report
 divides its prompts by Bash calls because its decision stream holds nothing but
@@ -136,9 +143,9 @@ LAUNCH = re.compile(
 
 
 def target_pr(target):
-    """The PR number a nudge or launch target names, or None for the push-path
-    placeholder. Both identifier forms normalise to the number, so a nudge
-    naming a URL and a launch typed as a bare number join as one PR."""
+    """The PR number a nudge, launch or report target names, or None for the
+    push-path placeholder. Both identifier forms normalise to the number, so a
+    nudge naming a URL and a launch typed as a bare number join as one PR."""
     target = target.strip('"\'')
     if target.isdigit():
         return target
@@ -150,7 +157,7 @@ def target_pr(target):
 # does not. Strip either shape before matching a report line.
 LINE_NO = re.compile(r'^\s*\d+\t')
 EVENT_HEADER = re.compile(r'^PR-SENTINEL EVENT:\s*([a-z_]+)\s*$')
-EVENT_PR = re.compile(r'^PR:\s*(\d+)\s*$')
+EVENT_PR = re.compile(r'^PR:\s*(\d+|https://\S+)\s*$')
 # How far past a header the body hash reaches. Reports are far shorter; this
 # only bounds the work done on a pathological line.
 REPORT_LINES = 40
@@ -161,12 +168,13 @@ REPORT_LINES = 40
 # reports the guard as never blocking anything — the mistake foreground-guard
 # hit as its issue #25.
 #
-#   allow   an ``attachment`` of ``hookName`` ``PreToolUse:Bash`` whose hook
+#   allow   an ``attachment`` whose ``hookName`` is in ``GUARD_HOOKS`` and whose
 #           ``command`` names this plugin's guard script. Claude Code persists
 #           hook stdout for a call it goes on to run, so the auto-allow lands
 #           here and the denies do not.
-#   deny    the error the blocked call handed back, whose text is verbatim the
-#           reason the guard printed, joined to its command by ``tool_use_id``.
+#   deny    the error the blocked call handed back, whose text is the reason the
+#           guard printed, joined to its command by ``tool_use_id``. Claude Code
+#           2.1.281 and later put ``PreToolUse:<tool> hook error: `` ahead of it.
 #
 # A defer leaves neither, and three unlike things produce one: the guard had no
 # opinion; an escape-hatch downgrade removed the opinion it had (see
@@ -187,17 +195,22 @@ REPORT_LINES = 40
 # PreToolUse verdict from a sibling guard's. Both spellings, because the report
 # reads transcripts older than the change. Releases through 0.9.0 wired a script
 # per event (`pr-sentinel-guard.py`); the single entry point wires one script to
-# all three, and the `PreToolUse:Bash` hookName above is what separates them.
+# all three, and the hookName is what separates them.
 GUARD_SCRIPT = re.compile(r'pr-sentinel(?:-guard)?\.py')
+# The tools the guard speaks on, as `hooks.json` matches them.
+GUARD_TOOLS = ('Bash', 'Monitor')
+GUARD_HOOKS = tuple('PreToolUse:' + t for t in GUARD_TOOLS)
 # Only this attachment type carries a verdict. Any other means the hook crashed
 # or was cancelled, so the call ran unguarded — counted as `error`, never folded
 # into the allows.
 HOOK_OK = 'hook_success'
-# Every reason the guard denies with opens `pr-sentinel: `; the harness may
-# prefix the tool result with `Error: `. So does every other message this plugin
-# emits (docs/DESIGN.md), which is what lets this double as the convention's
-# matcher in tests/test_friction_report.py.
-DENY_TEXT = re.compile(r'\A(?:Error:\s*)?pr-sentinel:\s')
+# Every message this plugin emits opens with this (docs/DESIGN.md), the guard's
+# reasons among them. tests/test_friction_report.py holds each message to it.
+OPENER = re.compile(r'\Apr-sentinel:\s')
+# A deny as the transcript holds it: the opener, behind whichever prefix the
+# harness put on the tool result.
+DENY_TEXT = re.compile(
+    r'\A(?:Error:\s*|PreToolUse:\w+ hook error:\s*)?pr-sentinel:\s')
 
 # One category per decision branch in pr_sentinel_guard.py, keyed on a stable
 # substring of that branch's own reason builder. The mapping is this report's
@@ -290,7 +303,7 @@ def find_reports(text):
     """Yield (event, pr, body_hash) for each watcher report in `text`.
 
     A report is a `PR-SENTINEL EVENT: <name>` line immediately followed by its
-    `PR: <number>` line. Requiring the pair is what separates a real report from
+    `PR: <target>` line. Requiring the pair is what separates a real report from
     the watcher's own source, where the header is `report_header`'s `$1`, and
     from a test asserting on the string, where the marker sits mid-line inside
     Python rather than at the start of one.
@@ -300,8 +313,9 @@ def find_reports(text):
         m = EVENT_HEADER.match(line)
         if not m or i + 1 >= len(lines):
             continue
-        pr = EVENT_PR.match(lines[i + 1])
-        if not pr:
+        m_pr = EVENT_PR.match(lines[i + 1])
+        pr = target_pr(m_pr.group(1)) if m_pr else None
+        if pr is None:
             continue
         body = []
         for j in range(i, min(len(lines), i + REPORT_LINES)):
@@ -309,7 +323,7 @@ def find_reports(text):
                 break
             body.append(lines[j].rstrip())
         digest = hashlib.sha1('\n'.join(body).encode('utf-8')).hexdigest()
-        yield m.group(1), pr.group(1), digest
+        yield m.group(1), pr, digest
 
 
 def nudge_context(rec):
@@ -345,10 +359,10 @@ def guard_decision(rec):
 
     Anchored on the hook command naming this plugin's guard script, so a
     sibling guard's decision — recorded in exactly this shape, on the same
-    Bash call — is not counted as ours.
+    call — is not counted as ours.
     """
     att = rec.get('attachment')
-    if not isinstance(att, dict) or att.get('hookName') != 'PreToolUse:Bash':
+    if not isinstance(att, dict) or att.get('hookName') not in GUARD_HOOKS:
         return None
     if not GUARD_SCRIPT.search(att.get('command') or ''):
         return None
@@ -375,19 +389,19 @@ def guard_decision(rec):
             'command': ''}
 
 
-def guard_deny(block, bash_cmds):
+def guard_deny(block, commands):
     """The guard deny carried by an error tool_result block, or None.
 
-    The block must join back to a Bash `tool_use`: this guard only ever speaks
-    on Bash, so an error opening with the same prefix against any other tool is
-    not one of its denies.
+    The block must join back to a `tool_use` of one of `GUARD_TOOLS`: an error
+    opening with the same prefix against any other tool is not one of its
+    denies.
     """
     if not block.get('is_error'):
         return None
     text = result_text(block).strip()
     if not DENY_TEXT.match(text):
         return None
-    command = bash_cmds.get(block.get('tool_use_id'))
+    command = commands.get(block.get('tool_use_id'))
     if command is None:
         return None
     return {'decision': 'deny', 'category': guard_category(text),
@@ -507,9 +521,11 @@ def scan(path):
     out = {'nudges': [], 'launches': [], 'events': [], 'stop_blocks': [],
            'decisions': [], 'overrides': []}
     seen = set()
-    # tool_use_id -> Bash command, for the deny join. A tool_use always precedes
-    # its result, so one streaming pass suffices.
-    bash_cmds = {}
+    # tool_use_id -> command, for the deny join. A tool_use always precedes its
+    # result, so one streaming pass suffices.
+    commands = {}
+    # A transcript can hold the same records twice, the call and its result.
+    denied = set()
     try:
         fh = open(path, encoding='utf-8', errors='replace')
     except OSError:
@@ -545,17 +561,21 @@ def scan(path):
             elif rtype == 'assistant':
                 for b in blocks(rec):
                     if not (isinstance(b, dict) and b.get('type') == 'tool_use'
-                            and b.get('name') == 'Bash'):
+                            and b.get('name') in GUARD_TOOLS):
                         continue
                     inp = b.get('input') or {}
                     command = inp.get('command') or ''
+                    # A Monitor has no `run_in_background` and is always
+                    # detached, which is how the guard reads it.
+                    monitor = b['name'] == 'Monitor'
                     if b.get('id'):
-                        bash_cmds[b['id']] = command
+                        commands[b['id']] = command
                     if inline_override(command):
                         out['overrides'].append({
                             'command': command,
                             'branch': override_branch(
-                                command, guard.is_backgrounded(inp)),
+                                command,
+                                monitor or guard.is_backgrounded(inp)),
                             'ts': ts, 'cwd': cwd})
                     m = LAUNCH.search(command)
                     if not m:
@@ -563,7 +583,8 @@ def scan(path):
                     target = m.group(2).strip('"')
                     out['launches'].append({
                         'pr': target_pr(target),
-                        'background': bool(inp.get('run_in_background')),
+                        'background': monitor
+                            or bool(inp.get('run_in_background')),
                         'ts': ts, 'cwd': cwd,
                     })
             elif rtype == 'user':
@@ -571,8 +592,9 @@ def scan(path):
                     if not (isinstance(b, dict)
                             and b.get('type') == 'tool_result'):
                         continue
-                    deny = guard_deny(b, bash_cmds)
-                    if deny is not None:
+                    deny = guard_deny(b, commands)
+                    if deny is not None and b['tool_use_id'] not in denied:
+                        denied.add(b['tool_use_id'])
                         deny.update({'ts': ts, 'cwd': cwd})
                         out['decisions'].append(deny)
                     for event, pr, digest in find_reports(result_text(b)):
@@ -587,6 +609,13 @@ def scan(path):
                 if n:
                     out['stop_blocks'].append({'n': n, 'ts': ts, 'cwd': cwd})
     return out
+
+
+def repo_name(cwd):
+    """The repository directory a record was written from. A Claude Code
+    worktree sits under its repository, so the part above it names the
+    repository and the worktree's own basename names nothing."""
+    return os.path.basename(cwd.split('/.claude/worktrees/')[0]) or '(unknown)'
 
 
 def keep(item, cutoff, repo):
@@ -626,8 +655,7 @@ def collect(paths, cutoff, repo):
         out['answered'] += len(nudged & launched)
         out['unanswered'] += len(nudged - launched)
         for item in kept['events']:
-            repo_name = os.path.basename(item.get('cwd') or '') or '(unknown)'
-            out['repos'][repo_name] += 1
+            out['repos'][repo_name(item.get('cwd') or '')] += 1
     return out
 
 
